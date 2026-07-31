@@ -117,7 +117,7 @@ async def test_stdio_round_trip(server_env: dict[str, str]) -> None:
     # and networkx; on a cold Windows runner that is many times slower than on
     # Linux, and a timeout here reads as a protocol failure that never happened.
     try:
-        await asyncio.wait_for(_run(), timeout=300)
+        await asyncio.wait_for(_run(), timeout=1200)
     except BaseException as exc:  # noqa: BLE001 — re-raised unless purely teardown noise
         if not _is_client_teardown_race(exc):
             raise

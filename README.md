@@ -28,7 +28,7 @@ Current agent memory is passive: vector stores and scratchpads accumulate facts 
 ## Install
 
 ```bash
-# From PyPI (once published)
+# From PyPI
 uvx hypotree
 # or
 pip install hypotree
