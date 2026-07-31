@@ -1,0 +1,15 @@
+"""Store package — SQLite-WAL source-of-truth persistence."""
+
+from hypotree.store.identity import _normalize_remote, store_root, workspace_id
+from hypotree.store.schema import SCHEMA_DDL, SCHEMA_VERSION
+from hypotree.store.store import HypoTreeStore, SchemaVersionError
+
+__all__ = [
+    "HypoTreeStore",
+    "SCHEMA_DDL",
+    "SCHEMA_VERSION",
+    "SchemaVersionError",
+    "_normalize_remote",
+    "store_root",
+    "workspace_id",
+]

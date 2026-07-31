@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# A new push to the same branch makes the previous run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Lint once. It is platform-independent, and running it three times only
+  # triples how long it takes to find out that a line is too long.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv python install 3.10
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  test:
+    name: test ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not hide the result on the others — the point
+      # of a matrix is to see *which* platform broke.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10"]
+        include:
+          # The ceiling of the supported range, on the platform most
+          # contributors develop on. The other platforms are about OS behaviour
+          # rather than interpreter version, so they run one Python each.
+          - os: ubuntu-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv sync
+
+      # The whole suite, not just the unit tier. CI previously ran `-m unit`,
+      # which is 517 of 614 tests: every integration and e2e test — including
+      # the ones that spawn the server over stdio and would catch a broken
+      # console script or a file missing from the package — never ran at all.
+      - name: Run tests
+        run: uv run pytest -q
+
+  # Proves the artefact people actually install works, on the platform where
+  # path handling is most likely to break it. A wheel that builds is not a wheel
+  # that runs, and the agent guide is read from inside the installed package at
+  # runtime, so a packaging change drops it silently.
+  package:
+    name: wheel install ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv python install 3.10
+
+      - name: Build wheel
+        run: uv build --wheel -o dist
+
+      # Both files are shipped inside the package and loaded at runtime, so a
+      # packaging change drops them silently. The typing marker went missing
+      # once already between a build and a commit.
+      - name: Wheel carries its data files
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import glob
+          import zipfile
+
+          names = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          for required in ("hypotree/py.typed", "hypotree/AGENT_GUIDE.md"):
+              assert required in names, f"{required} missing from wheel"
+          print("ok: data files present")
+          EOF
+
+      - name: Install into a clean environment
+        shell: bash
+        run: |
+          uv venv "${RUNNER_TEMP}/clean"
+          VIRTUAL_ENV="${RUNNER_TEMP}/clean" uv pip install dist/*.whl
+
+      - name: Console script answers without a client
+        shell: bash
+        run: |
+          BIN="${RUNNER_TEMP}/clean/bin/hypotree"
+          [ -f "$BIN" ] || BIN="${RUNNER_TEMP}/clean/Scripts/hypotree"
+          "$BIN" --version
+          "$BIN" --help
+          "$BIN" --info
+
+      - name: Server completes an MCP handshake over stdio
+        shell: bash
+        run: |
+          BIN="${RUNNER_TEMP}/clean/bin/hypotree"
+          PY="${RUNNER_TEMP}/clean/bin/python"
+          if [ ! -f "$BIN" ]; then
+            BIN="${RUNNER_TEMP}/clean/Scripts/hypotree"
+            PY="${RUNNER_TEMP}/clean/Scripts/python"
+          fi
+          HYPOTREE_BIN="$BIN" "$PY" - <<'EOF'
+          import asyncio
+          import os
+
+          from mcp import ClientSession, StdioServerParameters
+          from mcp.client.stdio import stdio_client
+
+          params = StdioServerParameters(
+              command=os.environ["HYPOTREE_BIN"], args=[], env=os.environ.copy()
+          )
+
+
+          async def main() -> None:
+              async with stdio_client(params) as (r, w), ClientSession(r, w) as s:
+                  init = await s.initialize()
+                  tools = await s.list_tools()
+                  prompts = await s.list_prompts()
+                  resources = await s.list_resources()
+                  guide = await s.read_resource("hypotree://guide")
+                  assert init.instructions, "server sent no instructions block"
+                  assert tools.tools, "no tools registered"
+                  assert len(prompts.prompts) == 3, prompts
+                  assert len(resources.resources) == 2, resources
+                  # Read from inside the installed package: a packaging change
+                  # that drops it stays invisible until an agent asks for it.
+                  assert "exclusion_group" in guide.contents[0].text
+                  print(f"ok: {len(tools.tools)} tools, {len(prompts.prompts)} prompts")
+
+
+          asyncio.run(main())
+          EOF

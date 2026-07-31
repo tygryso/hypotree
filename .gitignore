@@ -1,0 +1,38 @@
+# --- venv & python ----------------------------------------------------------
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+temp/
+
+# --- tooling caches ---------------------------------------------------------
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# --- runtime & export artefacts --------------------------------------------
+# The live belief-state DB lives OUTSIDE the working tree
+# ($XDG_DATA_HOME/mcp_hypotree/<workspace-id>/state.db, PLAN.md §17). Only
+# on-demand export dumps and fixtures ever land under the repo. Ignore stray
+# local SQLite files and JSONL dumps; keep a committed events.jsonl example.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.jsonl
+eval/runs/
+
+# --- editor -----------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+
+# --- working ----------------------------------------------------------
+.docs/

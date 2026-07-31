@@ -1,0 +1,1091 @@
+{
+  "seed": 1226,
+  "domain": "solar_cell",
+  "domain_description": "photovoltaic conversion efficiency",
+  "axes": [
+    "component",
+    "method",
+    "parameter",
+    "regime",
+    "encoding"
+  ],
+  "axis_values": {
+    "component": [
+      "v0",
+      "v1",
+      "v2",
+      "v3",
+      "v4"
+    ],
+    "method": [
+      "v0",
+      "v1",
+      "v2",
+      "v3",
+      "v4"
+    ],
+    "parameter": [
+      "v0",
+      "v1",
+      "v2",
+      "v3",
+      "v4"
+    ],
+    "regime": [
+      "v0",
+      "v1",
+      "v2",
+      "v3",
+      "v4"
+    ],
+    "encoding": [
+      "v0",
+      "v1",
+      "v2",
+      "v3",
+      "v4"
+    ]
+  },
+  "synergy_pair": [
+    "method",
+    "parameter"
+  ],
+  "separable_axes": [
+    "component",
+    "regime",
+    "encoding"
+  ],
+  "winning_values": {
+    "component": "v4",
+    "method": "v1",
+    "parameter": "v2",
+    "regime": "v1",
+    "encoding": "v4"
+  },
+  "winning_config": "component=v4;method=v1;parameter=v2;regime=v1;encoding=v4",
+  "winning_node_id": "H026",
+  "decoy_axis": "encoding",
+  "decoy_value": "v2",
+  "decoy_config": "component=v4;method=v1;parameter=v2;regime=v1;encoding=v2",
+  "decoy_node_id": "H027",
+  "min_confirm_depth": 2,
+  "evidence_regime": "deterministic",
+  "nodes": [
+    {
+      "id": "H000",
+      "statement": "Root: explore the photovoltaic conversion efficiency configuration space",
+      "layer": 0
+    },
+    {
+      "id": "H001",
+      "statement": "component=v0",
+      "layer": 1,
+      "premise_axis": "component",
+      "exclusion_group": "component"
+    },
+    {
+      "id": "H002",
+      "statement": "component=v1",
+      "layer": 1,
+      "premise_axis": "component",
+      "exclusion_group": "component"
+    },
+    {
+      "id": "H003",
+      "statement": "component=v2",
+      "layer": 1,
+      "premise_axis": "component",
+      "exclusion_group": "component"
+    },
+    {
+      "id": "H004",
+      "statement": "component=v3",
+      "layer": 1,
+      "premise_axis": "component",
+      "exclusion_group": "component"
+    },
+    {
+      "id": "H005",
+      "statement": "component=v4",
+      "layer": 1,
+      "premise_axis": "component",
+      "exclusion_group": "component"
+    },
+    {
+      "id": "H006",
+      "statement": "method=v0",
+      "layer": 1,
+      "premise_axis": "method",
+      "exclusion_group": "method"
+    },
+    {
+      "id": "H007",
+      "statement": "method=v1",
+      "layer": 1,
+      "premise_axis": "method",
+      "exclusion_group": "method"
+    },
+    {
+      "id": "H008",
+      "statement": "method=v2",
+      "layer": 1,
+      "premise_axis": "method",
+      "exclusion_group": "method"
+    },
+    {
+      "id": "H009",
+      "statement": "method=v3",
+      "layer": 1,
+      "premise_axis": "method",
+      "exclusion_group": "method"
+    },
+    {
+      "id": "H010",
+      "statement": "method=v4",
+      "layer": 1,
+      "premise_axis": "method",
+      "exclusion_group": "method"
+    },
+    {
+      "id": "H011",
+      "statement": "parameter=v0",
+      "layer": 1,
+      "premise_axis": "parameter",
+      "exclusion_group": "parameter"
+    },
+    {
+      "id": "H012",
+      "statement": "parameter=v1",
+      "layer": 1,
+      "premise_axis": "parameter",
+      "exclusion_group": "parameter"
+    },
+    {
+      "id": "H013",
+      "statement": "parameter=v2",
+      "layer": 1,
+      "premise_axis": "parameter",
+      "exclusion_group": "parameter"
+    },
+    {
+      "id": "H014",
+      "statement": "parameter=v3",
+      "layer": 1,
+      "premise_axis": "parameter",
+      "exclusion_group": "parameter"
+    },
+    {
+      "id": "H015",
+      "statement": "parameter=v4",
+      "layer": 1,
+      "premise_axis": "parameter",
+      "exclusion_group": "parameter"
+    },
+    {
+      "id": "H016",
+      "statement": "regime=v0",
+      "layer": 1,
+      "premise_axis": "regime",
+      "exclusion_group": "regime"
+    },
+    {
+      "id": "H017",
+      "statement": "regime=v1",
+      "layer": 1,
+      "premise_axis": "regime",
+      "exclusion_group": "regime"
+    },
+    {
+      "id": "H018",
+      "statement": "regime=v2",
+      "layer": 1,
+      "premise_axis": "regime",
+      "exclusion_group": "regime"
+    },
+    {
+      "id": "H019",
+      "statement": "regime=v3",
+      "layer": 1,
+      "premise_axis": "regime",
+      "exclusion_group": "regime"
+    },
+    {
+      "id": "H020",
+      "statement": "regime=v4",
+      "layer": 1,
+      "premise_axis": "regime",
+      "exclusion_group": "regime"
+    },
+    {
+      "id": "H021",
+      "statement": "encoding=v0",
+      "layer": 1,
+      "premise_axis": "encoding",
+      "exclusion_group": "encoding"
+    },
+    {
+      "id": "H022",
+      "statement": "encoding=v1",
+      "layer": 1,
+      "premise_axis": "encoding",
+      "exclusion_group": "encoding"
+    },
+    {
+      "id": "H023",
+      "statement": "encoding=v2",
+      "layer": 1,
+      "premise_axis": "encoding",
+      "exclusion_group": "encoding"
+    },
+    {
+      "id": "H024",
+      "statement": "encoding=v3",
+      "layer": 1,
+      "premise_axis": "encoding",
+      "exclusion_group": "encoding"
+    },
+    {
+      "id": "H025",
+      "statement": "encoding=v4",
+      "layer": 1,
+      "premise_axis": "encoding",
+      "exclusion_group": "encoding"
+    },
+    {
+      "id": "H026",
+      "statement": "component=v4;method=v1;parameter=v2;regime=v1;encoding=v4",
+      "layer": 2
+    },
+    {
+      "id": "H027",
+      "statement": "component=v4;method=v1;parameter=v2;regime=v1;encoding=v2",
+      "layer": 2
+    },
+    {
+      "id": "H028",
+      "statement": "component=v3;method=v3;parameter=v3;regime=v3;encoding=v3",
+      "layer": 2
+    },
+    {
+      "id": "H029",
+      "statement": "component=v0;method=v0;parameter=v0;regime=v0;encoding=v0",
+      "layer": 2
+    },
+    {
+      "id": "H030",
+      "statement": "component=v2;method=v2;parameter=v2;regime=v2;encoding=v2",
+      "layer": 2
+    },
+    {
+      "id": "H031",
+      "statement": "component=v4;method=v4;parameter=v4;regime=v4;encoding=v4",
+      "layer": 2
+    },
+    {
+      "id": "H032",
+      "statement": "component=v1;method=v1;parameter=v1;regime=v1;encoding=v1",
+      "layer": 2
+    },
+    {
+      "id": "H033",
+      "statement": "component=v3;method=v3;parameter=v3;regime=v3;encoding=v3",
+      "layer": 2
+    },
+    {
+      "id": "H034",
+      "statement": "component=v0;method=v0;parameter=v0;regime=v0;encoding=v0",
+      "layer": 2
+    },
+    {
+      "id": "H035",
+      "statement": "component=v2;method=v2;parameter=v2;regime=v2;encoding=v2",
+      "layer": 2
+    },
+    {
+      "id": "H036",
+      "statement": "component=v4;method=v4;parameter=v4;regime=v4;encoding=v4",
+      "layer": 2
+    },
+    {
+      "id": "H037",
+      "statement": "component=v1;method=v1;parameter=v1;regime=v1;encoding=v1",
+      "layer": 2
+    },
+    {
+      "id": "H038",
+      "statement": "component=v3;method=v3;parameter=v3;regime=v3;encoding=v3",
+      "layer": 2
+    },
+    {
+      "id": "H039",
+      "statement": "component=v0;method=v0;parameter=v0;regime=v0;encoding=v0",
+      "layer": 2
+    },
+    {
+      "id": "H040",
+      "statement": "GOAL: achieve target photovoltaic conversion efficiency",
+      "layer": 3,
+      "is_goal": true,
+      "target_metric": 0.75
+    }
+  ],
+  "edges": [
+    {
+      "src": "H000",
+      "dst": "H001",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H002",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H003",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H004",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H005",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H006",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H007",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H008",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H009",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H010",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H011",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H012",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H013",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H014",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H015",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H016",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H017",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H018",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H019",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H020",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H021",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H022",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H023",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H024",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H000",
+      "dst": "H025",
+      "type": "ALTERNATIVE"
+    },
+    {
+      "src": "H005",
+      "dst": "H026",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H007",
+      "dst": "H026",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H013",
+      "dst": "H026",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H017",
+      "dst": "H026",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H025",
+      "dst": "H026",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H005",
+      "dst": "H027",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H007",
+      "dst": "H027",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H013",
+      "dst": "H027",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H017",
+      "dst": "H027",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H023",
+      "dst": "H027",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H004",
+      "dst": "H028",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H009",
+      "dst": "H028",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H014",
+      "dst": "H028",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H019",
+      "dst": "H028",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H024",
+      "dst": "H028",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H001",
+      "dst": "H029",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H006",
+      "dst": "H029",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H011",
+      "dst": "H029",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H016",
+      "dst": "H029",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H021",
+      "dst": "H029",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H003",
+      "dst": "H030",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H008",
+      "dst": "H030",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H013",
+      "dst": "H030",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H018",
+      "dst": "H030",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H023",
+      "dst": "H030",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H005",
+      "dst": "H031",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H010",
+      "dst": "H031",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H015",
+      "dst": "H031",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H020",
+      "dst": "H031",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H025",
+      "dst": "H031",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H002",
+      "dst": "H032",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H007",
+      "dst": "H032",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H012",
+      "dst": "H032",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H017",
+      "dst": "H032",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H022",
+      "dst": "H032",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H004",
+      "dst": "H033",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H009",
+      "dst": "H033",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H014",
+      "dst": "H033",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H019",
+      "dst": "H033",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H024",
+      "dst": "H033",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H001",
+      "dst": "H034",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H006",
+      "dst": "H034",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H011",
+      "dst": "H034",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H016",
+      "dst": "H034",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H021",
+      "dst": "H034",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H003",
+      "dst": "H035",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H008",
+      "dst": "H035",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H013",
+      "dst": "H035",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H018",
+      "dst": "H035",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H023",
+      "dst": "H035",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H005",
+      "dst": "H036",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H010",
+      "dst": "H036",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H015",
+      "dst": "H036",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H020",
+      "dst": "H036",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H025",
+      "dst": "H036",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H002",
+      "dst": "H037",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H007",
+      "dst": "H037",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H012",
+      "dst": "H037",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H017",
+      "dst": "H037",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H022",
+      "dst": "H037",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H004",
+      "dst": "H038",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H009",
+      "dst": "H038",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H014",
+      "dst": "H038",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H019",
+      "dst": "H038",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H024",
+      "dst": "H038",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H001",
+      "dst": "H039",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H006",
+      "dst": "H039",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H011",
+      "dst": "H039",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H016",
+      "dst": "H039",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H021",
+      "dst": "H039",
+      "type": "DEPENDENCY"
+    },
+    {
+      "src": "H026",
+      "dst": "H040",
+      "type": "DEPENDENCY"
+    }
+  ],
+  "goal_node_id": "H040",
+  "goal_parent_id": "H026",
+  "node_truth": {
+    "H000": {
+      "true_success": 1.0
+    },
+    "H001": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "component",
+      "premise_value": "v0",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H002": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "component",
+      "premise_value": "v1",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H003": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "component",
+      "premise_value": "v2",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H004": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "component",
+      "premise_value": "v3",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H005": {
+      "true_success": 1.0,
+      "premise": true,
+      "premise_axis": "component",
+      "premise_value": "v4",
+      "premise_confirms": true,
+      "is_decoy": false
+    },
+    "H006": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "method",
+      "premise_value": "v0",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H007": {
+      "true_success": 1.0,
+      "premise": true,
+      "premise_axis": "method",
+      "premise_value": "v1",
+      "premise_confirms": true,
+      "is_decoy": false
+    },
+    "H008": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "method",
+      "premise_value": "v2",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H009": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "method",
+      "premise_value": "v3",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H010": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "method",
+      "premise_value": "v4",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H011": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "parameter",
+      "premise_value": "v0",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H012": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "parameter",
+      "premise_value": "v1",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H013": {
+      "true_success": 1.0,
+      "premise": true,
+      "premise_axis": "parameter",
+      "premise_value": "v2",
+      "premise_confirms": true,
+      "is_decoy": false
+    },
+    "H014": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "parameter",
+      "premise_value": "v3",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H015": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "parameter",
+      "premise_value": "v4",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H016": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "regime",
+      "premise_value": "v0",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H017": {
+      "true_success": 1.0,
+      "premise": true,
+      "premise_axis": "regime",
+      "premise_value": "v1",
+      "premise_confirms": true,
+      "is_decoy": false
+    },
+    "H018": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "regime",
+      "premise_value": "v2",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H019": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "regime",
+      "premise_value": "v3",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H020": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "regime",
+      "premise_value": "v4",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H021": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "encoding",
+      "premise_value": "v0",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H022": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "encoding",
+      "premise_value": "v1",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H023": {
+      "true_success": 1.0,
+      "premise": true,
+      "premise_axis": "encoding",
+      "premise_value": "v2",
+      "premise_confirms": true,
+      "is_decoy": true
+    },
+    "H024": {
+      "true_success": 0.0,
+      "premise": true,
+      "premise_axis": "encoding",
+      "premise_value": "v3",
+      "premise_confirms": false,
+      "is_decoy": false
+    },
+    "H025": {
+      "true_success": 1.0,
+      "premise": true,
+      "premise_axis": "encoding",
+      "premise_value": "v4",
+      "premise_confirms": true,
+      "is_decoy": false
+    },
+    "H026": {
+      "true_success": 0.93,
+      "shallow_success": 0.93
+    },
+    "H027": {
+      "true_success": 0.0,
+      "shallow_success": 0.93,
+      "decoy_trap": true
+    },
+    "H028": {
+      "true_success": 0.05,
+      "shallow_success": 0.05
+    },
+    "H029": {
+      "true_success": 0.05,
+      "shallow_success": 0.05
+    },
+    "H030": {
+      "true_success": 0.0,
+      "shallow_success": 0.25
+    },
+    "H031": {
+      "true_success": 0.45,
+      "shallow_success": 0.45
+    },
+    "H032": {
+      "true_success": 0.25,
+      "shallow_success": 0.25
+    },
+    "H033": {
+      "true_success": 0.05,
+      "shallow_success": 0.05
+    },
+    "H034": {
+      "true_success": 0.05,
+      "shallow_success": 0.05
+    },
+    "H035": {
+      "true_success": 0.0,
+      "shallow_success": 0.25
+    },
+    "H036": {
+      "true_success": 0.45,
+      "shallow_success": 0.45
+    },
+    "H037": {
+      "true_success": 0.25,
+      "shallow_success": 0.25
+    },
+    "H038": {
+      "true_success": 0.05,
+      "shallow_success": 0.05
+    },
+    "H039": {
+      "true_success": 0.05,
+      "shallow_success": 0.05
+    },
+    "H040": {
+      "true_success": 0.93
+    }
+  },
+  "session_breakpoints": [
+    8,
+    15,
+    22
+  ],
+  "total_nodes": 41,
+  "target_metric": 0.75,
+  "tool_budget": 100,
+  "reference_strategy_probes": 17,
+  "min_reference_probes": 11
+}

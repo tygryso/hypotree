@@ -1,0 +1,20 @@
+# hypotree.yaml — Optional workspace identity for consumer repos.
+#
+# Copy this file to the ROOT of YOUR project repo (the repo that USES hypotree
+# as an MCP tool, not the hypotree repo itself). Rename it to `hypotree.yaml`.
+#
+# The workspace_id determines which belief-state database your project
+# uses. Projects with different IDs are fully isolated — separate databases,
+# separate belief states, no cross-contamination.
+#
+# The workspace_id name must be: lowercase alphanumeric + hyphens/underscores/dots,
+# 1-128 chars, starting with an alphanumeric character.
+#
+# Not sure which workspace you are connected to? Run `hypotree --info`, or have
+# the agent call `get_workspace_info`.
+#
+# This file is the identity resolution mechanism. It fires when:
+#   - HYPOTREE_WORKSPACE_ID env var is NOT set 
+#   - The server can find this file (cwd or project_path points to this repo)
+
+workspace_id: my-workspace-id
