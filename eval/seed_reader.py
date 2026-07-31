@@ -251,7 +251,7 @@ def _parse_events(path: Path) -> list[dict[str, Any]]:
     must not take the whole report down.
     """
     events: list[dict[str, Any]] = []
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -1623,7 +1623,7 @@ def main(argv: list[str] | None = None) -> None:
     report = render_report(args.run_id, runs_dir)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(report)
+        args.output.write_text(report, encoding="utf-8")
         print(f"wrote {args.output}")
     else:
         print(report)

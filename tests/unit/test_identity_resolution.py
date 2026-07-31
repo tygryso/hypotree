@@ -84,7 +84,7 @@ def test_workspace_id_env_name_invalid_falls_through(
 def test_workspace_id_from_yaml_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """hypotree.yaml 'project:' field is used as workspace_id."""
     monkeypatch.delenv("HYPOTREE_WORKSPACE_ID", raising=False)
-    (tmp_path / "hypotree.yaml").write_text("project: yaml-project-name\n")
+    (tmp_path / "hypotree.yaml").write_text("project: yaml-project-name\n", encoding="utf-8")
     wid = workspace_id(tmp_path)
     assert wid == "yaml-project-name"
 
@@ -93,7 +93,7 @@ def test_workspace_id_from_yaml_config(tmp_path: Path, monkeypatch: pytest.Monke
 def test_workspace_id_from_yml_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """hypotree.yml (short extension) also works."""
     monkeypatch.delenv("HYPOTREE_WORKSPACE_ID", raising=False)
-    (tmp_path / "hypotree.yml").write_text("project: short-ext\n")
+    (tmp_path / "hypotree.yml").write_text("project: short-ext\n", encoding="utf-8")
     wid = workspace_id(tmp_path)
     assert wid == "short-ext"
 
@@ -104,7 +104,7 @@ def test_workspace_id_yaml_ignored_when_env_set(
 ) -> None:
     """HYPOTREE_WORKSPACE_ID (name) takes priority over yaml."""
     monkeypatch.setenv("HYPOTREE_WORKSPACE_ID", "env-wins")
-    (tmp_path / "hypotree.yaml").write_text("project: yaml-loses\n")
+    (tmp_path / "hypotree.yaml").write_text("project: yaml-loses\n", encoding="utf-8")
     wid = workspace_id(tmp_path)
     assert wid == "env-wins"
 
@@ -115,7 +115,7 @@ def test_workspace_id_yaml_invalid_name_falls_through(
 ) -> None:
     """Invalid project name in yaml falls through to git/path layers."""
     monkeypatch.delenv("HYPOTREE_WORKSPACE_ID", raising=False)
-    (tmp_path / "hypotree.yaml").write_text("project: 'has space'\n")
+    (tmp_path / "hypotree.yaml").write_text("project: 'has space'\n", encoding="utf-8")
     wid = workspace_id(tmp_path)
     assert wid != "has space"
     assert len(wid) == 16

@@ -293,7 +293,7 @@ def test_events_jsonl_dump_matches_store(store: HypoTreeStore, tmp_path: Path) -
 
     import json
 
-    lines = [json.loads(line) for line in dump.read_text().strip().splitlines()]
+    lines = [json.loads(line) for line in dump.read_text(encoding="utf-8").strip().splitlines()]
     assert [line["type"] for line in lines] == [
         "NodeCreated",
         "NodeCreated",

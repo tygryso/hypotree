@@ -222,7 +222,7 @@ def test_log_ablation_result_writes_jsonl(tmp_path: Path) -> None:
     )
     log_ablation_result(result, log_path)
 
-    entry = json.loads(log_path.read_text().strip())
+    entry = json.loads(log_path.read_text(encoding="utf-8").strip())
     assert entry["event_type"] == "ablation_result"
     assert entry["strategy"] == "ts"
     assert entry["seed"] == 1001

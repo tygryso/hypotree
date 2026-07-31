@@ -3,7 +3,7 @@
 [![CI](https://github.com/tygryso/hypotree/actions/workflows/ci.yml/badge.svg)](https://github.com/tygryso/hypotree/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests: 614](https://img.shields.io/badge/tests-614-brightgreen.svg)](tests/)
+[![Tests: 618](https://img.shields.io/badge/tests-618-brightgreen.svg)](tests/)
 [![Version: 0.3.0](https://img.shields.io/badge/version-0.3.0-blue.svg)](pyproject.toml)
 
 A persistent, self-revising **hypothesis DAG** for agentic R&D — exposed as an [MCP server](https://modelcontextprotocol.io/).

@@ -12,7 +12,11 @@ import os
 import sys
 from pathlib import Path
 
+import anyio
 import pytest
+
+if sys.version_info < (3, 11):  # BaseExceptionGroup is a builtin from 3.11 on.
+    from exceptiongroup import BaseExceptionGroup
 
 
 @pytest.fixture
@@ -22,6 +26,25 @@ def server_env(tmp_path: Path) -> dict[str, str]:
     env["HYPOTREE_WORKSPACE_ID"] = str(tmp_path)
     env["XDG_DATA_HOME"] = str(tmp_path / "xdg")
     return env
+
+
+def _is_client_teardown_race(exc: BaseException) -> bool:
+    """Whether a failure is only the stdio client closing its own streams.
+
+    Leaving an `async with stdio_client(...)` block tears the client's task group
+    down while the server subprocess may still be writing, and the reader task
+    then hits an already-closed stream. That is a shutdown ordering detail of the
+    client transport, not a server fault, and it shows up on Windows because the
+    subprocess is slower to wind down there.
+
+    Deliberately narrow: every leaf of the group must be a closed-stream error.
+    Anything else — a protocol error, a crashed server, a failed assertion — is
+    re-raised, and the caller additionally asserts that every request completed,
+    so a server that died halfway can never be mistaken for teardown noise.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        return bool(exc.exceptions) and all(_is_client_teardown_race(e) for e in exc.exceptions)
+    return isinstance(exc, anyio.BrokenResourceError | anyio.ClosedResourceError)
 
 
 # ---------------------------------------------------------------------------
@@ -45,15 +68,21 @@ async def test_stdio_round_trip(server_env: dict[str, str]) -> None:
         env=server_env,
     )
 
+    # Every step that completed, so a shutdown race cannot be mistaken for the
+    # server having failed halfway through.
+    done: list[str] = []
+
     async def _run() -> None:
         async with (
             stdio_client(params) as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
+            done.append("initialize")
 
             tools = await session.list_tools()
             assert len(tools.tools) == 18
+            done.append("list_tools")
 
             res = await session.call_tool(
                 "create_hypotheses", {"hypotheses": [{"statement": "e2e", "node_id": "n1"}]}
@@ -61,11 +90,13 @@ async def test_stdio_round_trip(server_env: dict[str, str]) -> None:
             created = json.loads(res.content[0].text)[0]
             assert created["node"]["id"] == "n1"
             assert created["created"] is True
+            done.append("create_hypotheses")
 
             res = await session.call_tool("get_next_targets", {})
             target = json.loads(res.content[0].text)[0]
             assert target["status"] == "SELECTED"
             assert target["node_id"] == "n1"
+            done.append("get_next_targets")
 
             res = await session.call_tool(
                 "record_evidence",
@@ -75,12 +106,30 @@ async def test_stdio_round_trip(server_env: dict[str, str]) -> None:
             assert updated["node"]["alpha"] > 1.0
             # No dispatch was asked for, so none is fused in.
             assert updated["next_targets"] == []
+            done.append("record_evidence")
 
             res = await session.call_tool("render_dag_map", {})
             rendered = json.loads(res.content[0].text)
             assert "graph TD" in rendered["mermaid"]
+            done.append("render_dag_map")
 
-    await asyncio.wait_for(_run(), timeout=60)
+    # Generous because this spawns a Python subprocess that imports numpy, scipy
+    # and networkx; on a cold Windows runner that is many times slower than on
+    # Linux, and a timeout here reads as a protocol failure that never happened.
+    try:
+        await asyncio.wait_for(_run(), timeout=300)
+    except BaseException as exc:  # noqa: BLE001 — re-raised unless purely teardown noise
+        if not _is_client_teardown_race(exc):
+            raise
+
+    assert done == [
+        "initialize",
+        "list_tools",
+        "create_hypotheses",
+        "get_next_targets",
+        "record_evidence",
+        "render_dag_map",
+    ]
 
 
 @pytest.mark.e2e

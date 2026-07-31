@@ -40,11 +40,11 @@ def _setup_eval_env(tmp_path: Path, seed: int = 1001) -> Path:
 
     landscape = _generate_dag(seed)
     landscape_path = landscapes_dir / f"landscape_seed_{seed}.json"
-    landscape_path.write_text(json.dumps(landscape))
+    landscape_path.write_text(json.dumps(landscape), encoding="utf-8")
 
     briefing = generate_briefing(landscape_path)
     briefing_path = briefings_dir / f"briefing_seed_{seed}.md"
-    briefing_path.write_text(briefing)
+    briefing_path.write_text(briefing, encoding="utf-8")
 
     return eval_dir
 
@@ -126,7 +126,7 @@ def test_logger_writes_jsonl(tmp_path: Path) -> None:
     logger.log_experiment("test_config", 0, 0.75)
     logger.log_run_end("all_goals_met", True)
 
-    lines = log_path.read_text().strip().split("\n")
+    lines = log_path.read_text(encoding="utf-8").strip().split("\n")
     assert len(lines) == 3
 
     run_start = json.loads(lines[0])
@@ -254,7 +254,7 @@ def test_runner_arm_b_mock_completes(tmp_path: Path) -> None:
     assert result["log_path"] == str(config.log_path)
 
     # Verify the JSONL log was populated.
-    log_lines = config.log_path.read_text().strip().split("\n")
+    log_lines = config.log_path.read_text(encoding="utf-8").strip().split("\n")
     assert len(log_lines) >= 2  # at least run_start + run_end
 
     events = [json.loads(line) for line in log_lines]
@@ -295,7 +295,7 @@ def test_runner_arm_a_mock_completes(tmp_path: Path) -> None:
     assert result["goals_met"] is False  # Arm A has no goal mechanism
     assert result["reason"] in ("budget_exhausted", "agent_stopped")
 
-    log_lines = config.log_path.read_text().strip().split("\n")
+    log_lines = config.log_path.read_text(encoding="utf-8").strip().split("\n")
     events = [json.loads(line) for line in log_lines]
     experiments = [e for e in events if e["event_type"] == "experiment"]
     assert len(experiments) > 0
@@ -507,7 +507,7 @@ def test_runner_session_reset_logged(tmp_path: Path) -> None:
     with patch("eval.runner.runner.landscape_probe", side_effect=mock_probe):
         run(config)
 
-    log_lines = config.log_path.read_text().strip().split("\n")
+    log_lines = config.log_path.read_text(encoding="utf-8").strip().split("\n")
     events = [json.loads(line) for line in log_lines]
     resets = [e for e in events if e["event_type"] == "session_reset"]
     assert len(resets) >= 1
@@ -547,7 +547,7 @@ def test_record_evidence_logs_propagated_prune(tmp_path: Path) -> None:
     # cascade-prunes its descendant C.
     _execute_tool("record_evidence", {"node_id": "P", "success": 0.0}, engine, [], config, logger)
 
-    events = [json.loads(line) for line in log_path.read_text().strip().split("\n")]
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").strip().split("\n")]
     transitions = [e for e in events if e["event_type"] == "status_transition"]
     propagated = [t for t in transitions if t["propagated"] is True]
     assert any(t["node_id"] == "C" and t["new_status"] == "PRUNED" for t in propagated)
@@ -572,7 +572,7 @@ def test_record_evidence_on_pruned_node_logs_reexecution(tmp_path: Path) -> None
     # C is now PRUNED — re-executing it is redundant work.
     _execute_tool("record_evidence", {"node_id": "C", "success": 0.5}, engine, [], config, logger)
 
-    events = [json.loads(line) for line in log_path.read_text().strip().split("\n")]
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").strip().split("\n")]
     reexec = [e for e in events if e["event_type"] == "pruned_reexecution"]
     assert any(e["node_id"] == "C" for e in reexec)
     engine.close()
@@ -744,7 +744,7 @@ def test_briefing_is_reinjected_after_every_session_reset(tmp_path: Path) -> Non
         config = config.__class__(
             **{**config.__dict__, "tool_budget": 6, "session_breakpoints": (2, 4)}
         )
-        briefing = config.briefing_path.read_text()
+        briefing = config.briefing_path.read_text(encoding="utf-8")
         seen_after_reset: list[list[dict]] = []
 
         def fake_api(
@@ -805,7 +805,7 @@ def test_experiment_log_flags_duplicate_probes(tmp_path: Path) -> None:
     logger.log_experiment("component=v2", 0, 0.0)
     logger.log_experiment("component=v1", 0, 0.5)  # repeat — zero information
 
-    entries = [json.loads(line) for line in log_path.read_text().splitlines()]
+    entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert [e["duplicate"] for e in entries] == [False, False, True]
     assert entries[-1]["distinct_configs"] == 2
 
@@ -824,7 +824,7 @@ def test_evidence_log_records_regime_and_status_change(tmp_path: Path) -> None:
         evidence_count=1,
         posterior_mean=0.4,
     )
-    entry = json.loads(log_path.read_text().strip())
+    entry = json.loads(log_path.read_text(encoding="utf-8").strip())
     assert entry["regime"] == "deterministic"
     assert entry["old_status"] == "IN_PROGRESS"
     assert entry["new_status"] == "EXHAUSTED"
@@ -894,7 +894,7 @@ def test_scratchpad_writes_are_logged(tmp_path: Path) -> None:
 
     writes = [
         json.loads(line)
-        for line in log_path.read_text().splitlines()
+        for line in log_path.read_text(encoding="utf-8").splitlines()
         if json.loads(line)["event_type"] == "scratchpad_write"
     ]
     assert len(writes) == 2
@@ -933,7 +933,7 @@ def test_evidence_regime_is_pinned_to_the_environment(tmp_path: Path) -> None:
     assert engine._store.get_node("n1").evidence_regime == "deterministic"
     overrides = [
         json.loads(line)
-        for line in log_path.read_text().splitlines()
+        for line in log_path.read_text(encoding="utf-8").splitlines()
         if json.loads(line)["event_type"] == "regime_override"
     ]
     assert len(overrides) == 1
@@ -963,7 +963,7 @@ def test_record_evidence_logs_conflict_events(tmp_path: Path) -> None:
         "record_evidence", {"node_id": "combo", "success": 0.0}, engine, [], config, logger
     )
 
-    events = [json.loads(line) for line in log_path.read_text().strip().split("\n")]
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").strip().split("\n")]
     conflicts = [e for e in events if e["event_type"] == "conflict_recorded"]
     assert len(conflicts) == 1
     assert sorted(conflicts[0]["member_ids"]) == ["c1", "r1"]
@@ -976,7 +976,7 @@ def test_record_evidence_logs_conflict_events(tmp_path: Path) -> None:
         "record_evidence", {"node_id": "combo2", "success": 1.0}, engine, [], config, logger
     )
 
-    events = [json.loads(line) for line in log_path.read_text().strip().split("\n")]
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").strip().split("\n")]
     resolved = [e for e in events if e["event_type"] == "conflict_resolved"]
     assert [e["culprit_id"] for e in resolved] == ["r1"]
     engine.close()
@@ -1004,7 +1004,7 @@ def test_create_hypotheses_logs_exclusion_group(tmp_path: Path) -> None:
 
     created = [
         json.loads(line)
-        for line in log_path.read_text().strip().split("\n")
+        for line in log_path.read_text(encoding="utf-8").strip().split("\n")
         if json.loads(line)["event_type"] == "node_created"
     ]
     assert [e["exclusion_group"] for e in created] == ["component", None]
@@ -1044,7 +1044,7 @@ def test_create_hypotheses_counts_declared_groups(tmp_path: Path) -> None:
 
     created = [
         json.loads(line)
-        for line in log_path.read_text().strip().split("\n")
+        for line in log_path.read_text(encoding="utf-8").strip().split("\n")
         if json.loads(line)["event_type"] == "node_created"
     ]
     assert len(created) == 3
@@ -1077,7 +1077,7 @@ def test_llm_call_logs_latency_and_tokens(tmp_path: Path) -> None:
         1.25, 2, prompt_tokens=900, completion_tokens=60, finish_reason="tool_calls"
     )
 
-    event = json.loads(log_path.read_text().strip())
+    event = json.loads(log_path.read_text(encoding="utf-8").strip())
     assert event["event_type"] == "llm_call"
     assert event["duration_s"] == 1.25
     assert event["n_tool_calls"] == 2
@@ -1457,7 +1457,11 @@ def test_believing_the_goal_is_met_is_not_a_win(tmp_path: Path) -> None:
     assert result["goals_met"] is False
     assert result["steps_to_target"] == config.tool_budget
     # The goal absorbed nothing: every record was refused.
-    events = [json.loads(line) for line in config.log_path.read_text().splitlines() if line.strip()]
+    events = [
+        json.loads(line)
+        for line in config.log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert not [e for e in events if e.get("event_type") == "evidence_recorded"]
     assert [e for e in events if e.get("event_type") == "tool_call" and not e.get("ok")]
 
@@ -1527,7 +1531,11 @@ def test_an_unreachable_graph_does_not_end_the_run(tmp_path: Path) -> None:
     # unreachable graph for a completed investigation.
     assert result["reason"] == "no_progress"
     assert calls.count("ask") >= 2
-    events = [json.loads(line) for line in config.log_path.read_text().splitlines() if line.strip()]
+    events = [
+        json.loads(line)
+        for line in config.log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     reasons = {e.get("reason") for e in events if e.get("event_type") == "target_selected"}
     assert "blocked_frontier" in reasons
 
@@ -1781,7 +1789,7 @@ def test_each_tool_call_is_classified_before_it_runs(tmp_path: Path) -> None:
 
         actions = [
             json.loads(line)
-            for line in log_path.read_text().strip().split("\n")
+            for line in log_path.read_text(encoding="utf-8").strip().split("\n")
             if json.loads(line)["event_type"] == "agent_action"
         ]
         assert [a["action"] for a in actions] == ["REPLAN", "REQUEST_CONTEXT"]
@@ -1854,7 +1862,9 @@ def test_recording_hands_back_the_next_targets(tmp_path: Path) -> None:
         payload = json.loads(out)
         assert payload["next_targets"][0]["node_id"] == "n2"
 
-        events = [json.loads(line) for line in log_path.read_text().strip().split("\n")]
+        events = [
+            json.loads(line) for line in log_path.read_text(encoding="utf-8").strip().split("\n")
+        ]
         # A fused dispatch is logged exactly like a standalone one, or half the
         # dispatches in a run become invisible to the analysis.
         dispatches = [e for e in events if e["event_type"] == "target_selected"]
@@ -1940,7 +1950,10 @@ def test_a_reset_never_strands_a_probe_the_agent_is_about_to_record(tmp_path: Pa
     ):
         run(config)
 
-    events = [json.loads(line) for line in (config.log_path).read_text().strip().split("\n")]
+    events = [
+        json.loads(line)
+        for line in (config.log_path).read_text(encoding="utf-8").strip().split("\n")
+    ]
     # The probe must have actually landed, or the assertion below is vacuous.
     assert [e for e in events if e["event_type"] == "experiment"]
     carried = [e for e in events if e["event_type"] == "probes_carried"]
@@ -1985,7 +1998,10 @@ def test_a_reset_that_cannot_be_deferred_carries_the_result_across(tmp_path: Pat
     ):
         run(config)
 
-    events = [json.loads(line) for line in (config.log_path).read_text().strip().split("\n")]
+    events = [
+        json.loads(line)
+        for line in (config.log_path).read_text(encoding="utf-8").strip().split("\n")
+    ]
     resets = [e for e in events if e["event_type"] == "session_reset"]
     assert resets, "a bounded deferral must eventually fire"
     # And what it could not wait out was handed forward rather than destroyed.
@@ -2054,6 +2070,9 @@ def test_a_probe_that_never_reached_the_oracle_costs_no_step(tmp_path: Path) -> 
 
     # The unreachable oracle must terminate the run, not spin it to the budget.
     assert result["reason"] == "no_progress"
-    events = [json.loads(line) for line in (config.log_path).read_text().strip().split("\n")]
+    events = [
+        json.loads(line)
+        for line in (config.log_path).read_text(encoding="utf-8").strip().split("\n")
+    ]
     assert not [e for e in events if e["event_type"] == "experiment"]
     assert result["steps_to_target"] == config.tool_budget  # censored, never met

@@ -343,7 +343,7 @@ def log_ablation_result(result: AblationResult, log_path: Path) -> None:
         "cumulative_regret": result.cumulative_regret,
         "total_pulls": result.total_pulls,
     }
-    with open(log_path, "a") as f:
+    with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
 
 

@@ -70,7 +70,7 @@ class SelfPlayResult:
 
 
 def _load(seed: int) -> dict:
-    return json.loads((LANDSCAPE_DIR / f"landscape_seed_{seed}.json").read_text())
+    return json.loads((LANDSCAPE_DIR / f"landscape_seed_{seed}.json").read_text(encoding="utf-8"))
 
 
 def solve_seed(seed: int, rng_seed: int = 7) -> SelfPlayResult:

@@ -186,3 +186,85 @@ def test_diagnostics_do_not_create_the_workspace(
 
     assert info["database_exists"] is False
     assert not Path(str(info["store_root"])).exists()
+
+
+# An en dash, an em dash and a maths symbol. `≥` has no cp1252 slot at all, and
+# Python before 3.15 opens text files in the locale codepage on Windows.
+NON_ASCII_TEXT = "latency ≥ 200ms — the p99 tail, not the mean – measured cold"
+
+
+@pytest.mark.unit
+def test_plain_text_round_trips_regardless_of_the_locale_codepage(tmp_path: Path) -> None:
+    """The failure that took out 21 tests on the first Windows CI run.
+
+    Markdown written with no explicit encoding raises UnicodeEncodeError on
+    Windows the moment it contains a character cp1252 lacks — which the
+    generated task briefings do (`≥`). JSON writers escape non-ASCII and were
+    never at risk; plain text is where this bites.
+    """
+    assert any(ord(c) > 127 for c in NON_ASCII_TEXT)
+    with pytest.raises(UnicodeEncodeError):
+        NON_ASCII_TEXT.encode("cp1252")
+
+    path = tmp_path / "briefing.md"
+    path.write_text(NON_ASCII_TEXT, encoding="utf-8")
+
+    assert path.read_text(encoding="utf-8") == NON_ASCII_TEXT
+
+
+@pytest.mark.unit
+def test_the_packaged_agent_guide_is_readable() -> None:
+    """It is full of arrows and set symbols, and an agent reads it at runtime.
+
+    Read without an explicit encoding this raises on Windows the first time an
+    agent asks for `hypotree://guide`.
+    """
+    from hypotree.mcp_server import _agent_guide
+
+    guide = _agent_guide()
+
+    assert "exclusion_group" in guide
+    assert any(ord(c) > 127 for c in guide)
+
+
+@pytest.mark.unit
+def test_a_non_ascii_workspace_config_is_readable(tmp_path: Path) -> None:
+    """A `hypotree.yaml` written as UTF-8 must not be read in the locale codepage."""
+    from hypotree.store.identity import workspace_id
+
+    (tmp_path / "hypotree.yaml").write_text(
+        "# projekt: pomiar opóźnień ≥ 200ms\nworkspace_id: latency-probe\n",
+        encoding="utf-8",
+    )
+
+    assert workspace_id(tmp_path) == "latency-probe"
+
+
+@pytest.mark.unit
+def test_every_text_file_operation_declares_its_encoding() -> None:
+    """The rule, enforced rather than remembered.
+
+    This class of bug is invisible on Linux and fatal on Windows, so a reviewer
+    working on Linux cannot catch it by reading the diff. Cheaper to assert here
+    than to rediscover it on the next Windows CI run.
+    """
+    import re
+
+    root = Path(__file__).resolve().parents[2]
+    offenders: list[str] = []
+    pattern = re.compile(r"""(\.write_text\(|\.read_text\(\)|[^.\w]open\()""")
+
+    for sub in ("src", "eval"):
+        for path in sorted((root / sub).rglob("*.py")):
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if "urlopen" in line or not pattern.search(line):
+                    continue
+                # A call left open continues on the next line, where the
+                # encoding argument lives.
+                if "encoding=" in line or line.rstrip().endswith("("):
+                    continue
+                offenders.append(f"{path.relative_to(root)}:{lineno}: {line.strip()}")
+
+    assert not offenders, "text file operations without an explicit encoding:\n" + "\n".join(
+        offenders
+    )

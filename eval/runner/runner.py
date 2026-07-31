@@ -177,7 +177,7 @@ def _load_win_criteria(landscape_path: Path) -> dict[str, Any]:
     ``min_confirm_depth`` a result must be confirmed at, and the environment's
     ``evidence_regime``.
     """
-    data = json.loads(landscape_path.read_text())
+    data = json.loads(landscape_path.read_text(encoding="utf-8"))
     goal_id = data.get("goal_node_id", "")
     nodes = data.get("nodes", [])
 
@@ -239,7 +239,7 @@ def _check_landscape_win(
 def load_system_prompt(arm: str) -> str:
     """Load the system prompt markdown for the given arm."""
     path = _PROMPTS_DIR / f"system_prompt_arm_{arm.lower()}.md"
-    return path.read_text()
+    return path.read_text(encoding="utf-8")
 
 
 # -- Tool definitions (OpenAI function-calling format) -----------------------
@@ -978,7 +978,7 @@ class RunLogger:
         # so the duplicate rate is a direct measure of wasted budget.
         self._seen_configs: set[str] = set()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self.log_path.write_text("")
+        self.log_path.write_text("", encoding="utf-8")
 
     def _write(self, event_type: str, **kwargs: Any) -> None:
         entry = {
@@ -989,7 +989,7 @@ class RunLogger:
             "arm": self.arm,
             **kwargs,
         }
-        with open(self.log_path, "a") as f:
+        with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, default=str) + "\n")
 
     def log_run_start(self, config: EvalConfig) -> None:
@@ -1280,7 +1280,7 @@ class MockAgent:
         import numpy as np
 
         self._rng = np.random.default_rng(config.mock_seed)
-        self._landscape = json.loads(config.landscape_path.read_text())
+        self._landscape = json.loads(config.landscape_path.read_text(encoding="utf-8"))
         self._arm = config.arm
         self._state = "INIT"
 
@@ -1489,7 +1489,9 @@ def run(config: EvalConfig) -> dict[str, Any]:
     # across resets; for the others it is recorded but never shown, so the same
     # code path serves all three arms and the logs stay comparable.
     transcript: list[dict[str, Any]] = []
-    briefing = config.briefing_path.read_text() if config.briefing_path.exists() else ""
+    briefing = (
+        config.briefing_path.read_text(encoding="utf-8") if config.briefing_path.exists() else ""
+    )
     system_prompt = load_system_prompt(config.arm)
     available_tools = [t["function"]["name"] for t in get_tools_for_arm(config.arm)]
 

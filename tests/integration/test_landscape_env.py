@@ -24,7 +24,7 @@ def test_landscape_generator_produces_one_config_per_seed(tmp_path: Path) -> Non
     paths = generate_all(tmp_path)
     assert len(paths) == len(TASK_SEEDS)
     for p in paths:
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
         assert data["seed"] in TASK_SEEDS
         assert data["total_nodes"] >= 40
         assert len(data["session_breakpoints"]) >= 3
@@ -48,7 +48,7 @@ def test_first_breakpoint_is_below_the_reference_difficulty_floor(tmp_path: Path
 
     floor = min_reference_probes()
     for p in generate_all(tmp_path):
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
         first_reset = data["session_breakpoints"][0]
         assert first_reset < floor, (data["seed"], first_reset, floor)
         # The per-seed cost must never dip below the global floor.
@@ -339,7 +339,7 @@ def test_briefing_never_leaks_the_winning_combination(tmp_path: Path) -> None:
     from eval.environment.landscape_scoring import AXES
 
     for path in generate_all(tmp_path):
-        data = _json.loads(path.read_text())
+        data = _json.loads(path.read_text(encoding="utf-8"))
         briefing = generate_briefing(path)
         assert data["winning_config"] not in briefing, data["seed"]
         assert data["decoy_config"] not in briefing, data["seed"]
@@ -365,7 +365,7 @@ def test_landscape_server_evaluate(tmp_path: Path) -> None:
     # Write a landscape config
     config = _generate_dag(1001)
     config_path = tmp_path / "landscape.json"
-    config_path.write_text(json.dumps(config))
+    config_path.write_text(json.dumps(config), encoding="utf-8")
 
     # Pick a known node config to probe
     first_node = config["nodes"][1]
@@ -401,7 +401,7 @@ def test_landscape_server_arbitrary_config(tmp_path: Path) -> None:
 
     config = _generate_dag(1001)
     config_path = tmp_path / "landscape.json"
-    config_path.write_text(json.dumps(config))
+    config_path.write_text(json.dumps(config), encoding="utf-8")
 
     port = 8097
     proc = subprocess.Popen(
@@ -439,7 +439,7 @@ def test_landscape_server_decoy_reveal(tmp_path: Path) -> None:
 
     config = _generate_dag(1001)
     config_path = tmp_path / "landscape.json"
-    config_path.write_text(json.dumps(config))
+    config_path.write_text(json.dumps(config), encoding="utf-8")
 
     # The decoy combination is the trap.
     ambush_id = config["decoy_node_id"]

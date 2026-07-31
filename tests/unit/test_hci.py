@@ -128,7 +128,8 @@ def test_hci_in_report():
             '"config": "component=v0", "depth": 1, "success": 0.0, '
             '"probe_mode": "premise", "duplicate": false, "distinct_configs": 1}\n'
             '{"event_type": "run_end", "step": 1, "seed": 1201, "arm": "B", '
-            '"reason": "all_goals_met", "goals_met": true}\n'
+            '"reason": "all_goals_met", "goals_met": true}\n',
+            encoding="utf-8",
         )
         report = render_report("test-run", runs_dir)
         assert "## 11. Hypotree Capability Index (HCI)" in report

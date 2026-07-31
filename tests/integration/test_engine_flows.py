@@ -184,7 +184,7 @@ def test_events_jsonl_dump(engine: HypoTreeEngine, tmp_path: Path) -> None:
     dump = tmp_path / "events.jsonl"
     engine._store.dump_events_jsonl(dump)
 
-    lines = [json.loads(line) for line in dump.read_text().strip().splitlines()]
+    lines = [json.loads(line) for line in dump.read_text(encoding="utf-8").strip().splitlines()]
     types_list = [line["type"] for line in lines]
     assert "NodeCreated" in types_list
     assert "StatusChanged" in types_list

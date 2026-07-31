@@ -85,7 +85,7 @@ class GateDecision:
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     """Load all JSONL lines from a file."""
     entries = []
-    for line in path.read_text().strip().split("\n"):
+    for line in path.read_text(encoding="utf-8").strip().split("\n"):
         if line:
             entries.append(json.loads(line))
     return entries

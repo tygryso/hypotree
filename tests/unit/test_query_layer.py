@@ -275,7 +275,7 @@ def test_capture_git_context_in_repo(tmp_path: Path) -> None:
         capture_output=True,
     )
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
-    (tmp_path / "README.md").write_text("# test")
+    (tmp_path / "README.md").write_text("# test", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, check=True)
     from hypotree.store.identity import capture_git_context

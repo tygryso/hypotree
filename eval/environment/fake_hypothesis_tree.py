@@ -23,7 +23,7 @@ def generate_briefing(landscape_path: Path) -> str:
     configuration axes and their candidate values (the search space) but never
     the winning combination.
     """
-    data = json.loads(landscape_path.read_text())
+    data = json.loads(landscape_path.read_text(encoding="utf-8"))
     domain = data["domain"]
     description = data["domain_description"]
     budget = data["tool_budget"]
@@ -160,7 +160,7 @@ def generate_all_briefings(landscapes_dir: Path, output_dir: Path) -> list[Path]
         seed = landscape_path.stem.split("_")[-1]
         briefing = generate_briefing(landscape_path)
         out_path = output_dir / f"briefing_seed_{seed}.md"
-        out_path.write_text(briefing)
+        out_path.write_text(briefing, encoding="utf-8")
         paths.append(out_path)
     return paths
 

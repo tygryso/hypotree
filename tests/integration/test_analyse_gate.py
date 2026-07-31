@@ -86,7 +86,7 @@ def _write_runner_log(
                 "propagated": True,
             }
         )
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for e in events:
             f.write(json.dumps(e) + "\n")
 
@@ -117,7 +117,7 @@ def _write_ablation_log(
                 "total_pulls": 300,
             }
         )
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for e in entries:
             f.write(json.dumps(e) + "\n")
 
@@ -552,7 +552,8 @@ def test_load_runner_logs_ignores_retired_seeds(tmp_path: Path) -> None:
     for seed in (current, retired):
         for arm in ("A", "B"):
             (tmp_path / f"seed-{seed}-arm-{arm}.jsonl").write_text(
-                json.dumps({"event_type": "run_end", "reason": "x", "goals_met": False}) + "\n"
+                json.dumps({"event_type": "run_end", "reason": "x", "goals_met": False}) + "\n",
+                encoding="utf-8",
             )
 
     logs = _load_runner_logs(tmp_path)

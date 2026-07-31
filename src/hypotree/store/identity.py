@@ -182,7 +182,7 @@ def _read_yaml_config(project_path: Path) -> str | None:
         config_file = project_path / f"hypotree.{ext}"
         if config_file.exists():
             try:
-                with open(config_file) as f:
+                with open(config_file, encoding="utf-8") as f:
                     data = yaml.safe_load(f)
                 if isinstance(data, dict):
                     name = data.get("workspace_id") or data.get("project")

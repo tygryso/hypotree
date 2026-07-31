@@ -25,7 +25,7 @@ def test_log_appends_timestamped_line(tmp_path: Path, monkeypatch: pytest.Monkey
     _log("test diagnostic message")
     log_file = _log_path()
     assert log_file.exists()
-    content = log_file.read_text()
+    content = log_file.read_text(encoding="utf-8")
     assert "test diagnostic message" in content
     # Each line starts with an ISO timestamp
     first_line = content.strip().split("\n")[0]
@@ -75,7 +75,7 @@ def test_workspace_id_logs_resolution(tmp_path: Path, monkeypatch: pytest.Monkey
     wid = workspace_id(tmp_path)
     log_file = _log_path()
     assert log_file.exists()
-    content = log_file.read_text()
+    content = log_file.read_text(encoding="utf-8")
     assert f"workspace_id={wid}" in content
     assert "path fallback" in content  # tmp_path has no git repo
     assert "WARNING" in content  # path-based identity warns about fragility
@@ -101,7 +101,7 @@ def test_workspace_id_logs_remote_resolution(
     )
     wid = workspace_id(repo)
     log_file = _log_path()
-    content = log_file.read_text()
+    content = log_file.read_text(encoding="utf-8")
     assert f"workspace_id={wid}" in content
     assert "git@github.com:test/repo.git" in content
     assert "from remote" in content

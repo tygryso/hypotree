@@ -647,7 +647,7 @@ class HypoTreeStore:
     def dump_events_jsonl(self, path: Path | str) -> None:
         """Dump the events table to a JSONL file (human/DR copy, not a live source)."""
         rows = self.get_events()
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             for r in rows:
                 record = {
                     "seq": r["seq"],

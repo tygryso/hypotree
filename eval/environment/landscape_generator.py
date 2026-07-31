@@ -274,7 +274,7 @@ def generate_all(output_dir: Path, seeds: list[int] | None = None) -> list[Path]
     for seed in seeds:
         config = _generate_dag(seed)
         path = output_dir / f"landscape_seed_{seed}.json"
-        path.write_text(json.dumps(config, indent=2))
+        path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         paths.append(path)
     return paths
 
@@ -284,7 +284,7 @@ if __name__ == "__main__":
     generated = generate_all(out)
     print(f"Generated {len(generated)} landscape configs in {out}")
     for p in generated:
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
         print(
             f"  {p.name}: {data['total_nodes']} nodes, domain={data['domain']}, "
             f"reference={data['reference_strategy_probes']} probes "

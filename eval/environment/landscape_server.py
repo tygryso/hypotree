@@ -49,7 +49,7 @@ def _log(message: str) -> None:
 def load_landscape(config_path: Path) -> None:
     """Load the landscape configuration from a JSON file."""
     global _LANDSCAPE
-    _LANDSCAPE = json.loads(config_path.read_text())
+    _LANDSCAPE = json.loads(config_path.read_text(encoding="utf-8"))
 
 
 def _evaluate(config: str, depth: int) -> dict:

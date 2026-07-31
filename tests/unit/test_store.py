@@ -350,7 +350,7 @@ def test_dump_events_jsonl(store: HypoTreeStore, node: Node, tmp_path: Path) -> 
     store.add_node(node)
     dump_path = tmp_path / "events.jsonl"
     store.dump_events_jsonl(dump_path)
-    lines = dump_path.read_text().strip().split("\n")
+    lines = dump_path.read_text(encoding="utf-8").strip().split("\n")
     assert len(lines) == 1
     record = json.loads(lines[0])
     assert record["type"] == "NodeCreated"

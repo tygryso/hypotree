@@ -137,7 +137,7 @@ def _write_log(
             "reason": "all_goals_met" if goals_met else "budget_exhausted",
         }
     )
-    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     return path
 
 
@@ -155,7 +155,7 @@ def test_reader_survives_a_truncated_line(tmp_path: Path) -> None:
     """A run killed mid-write must not take the whole report down."""
     runs = tmp_path / "runs" / "r"
     path = _write_log(runs, 1201, ARM_B, steps=11)
-    path.write_text(path.read_text() + '{"event_type": "experi')
+    path.write_text(path.read_text(encoding="utf-8") + '{"event_type": "experi')
 
     logs, _ = load_run(runs)
     assert logs[0].steps == 11
@@ -255,7 +255,9 @@ def test_pairing_drops_incomplete_episodes(tmp_path: Path) -> None:
     _write_log(runs, 1201, ARM_F, steps=18)
     _write_log(runs, 1202, ARM_B, steps=12)
     crashed = runs / f"seed-1202-arm-{ARM_F}.jsonl"
-    crashed.write_text(json.dumps({"event_type": "run_start", "seed": 1202, "arm": ARM_F}) + "\n")
+    crashed.write_text(
+        json.dumps({"event_type": "run_start", "seed": 1202, "arm": ARM_F}) + "\n", encoding="utf-8"
+    )
 
     logs, _ = load_run(runs)
     pair = pair_arms(logs, ARM_B, ARM_F)
@@ -280,7 +282,8 @@ def test_report_renders_every_section(tmp_path: Path) -> None:
         _write_log(runs, seed, ARM_A, steps=a)
     (runs / "ablation-seed-1201-rng-2001.jsonl").write_text(
         json.dumps({"event_type": "ablation_result", "strategy": "ts", "cumulative_regret": 4.0})
-        + "\n"
+        + "\n",
+        encoding="utf-8",
     )
 
     report = render_report("r", runs)
@@ -329,7 +332,8 @@ def test_report_flags_a_foreign_log(tmp_path: Path) -> None:
                 },
             )
         )
-        + "\n"
+        + "\n",
+        encoding="utf-8",
     )
 
     report = render_report("mine", runs)

@@ -221,7 +221,7 @@ def make_run_config(
     # Load tool budget + breakpoints from the landscape JSON.
     import json
 
-    data = json.loads(landscape_path.read_text())
+    data = json.loads(landscape_path.read_text(encoding="utf-8"))
     tool_budget = data.get("tool_budget", DEFAULT_TOOL_BUDGET)
     breakpoints = tuple(data.get("session_breakpoints", []))
     evidence_regime = data.get("evidence_regime", "deterministic")
