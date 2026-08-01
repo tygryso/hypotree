@@ -27,6 +27,11 @@ class LogicalEvidence(BaseModel):
     artifacts: list[Path] = Field(default_factory=list)
     context_hash: str | None = None
     git_branch: str | None = None
+    # What was actually run to produce this number — a path, a URL, a CI run id,
+    # a commit. Optional and unvalidated: an audit trail that says "0.85" and an
+    # audit trail that says "0.85, from pytest run #4412" are different
+    # artifacts, and only the caller knows which artifact exists.
+    source_ref: str | None = None
     claim_id: str | None = None
     notes: str = ""
     delta_success: float | None = None

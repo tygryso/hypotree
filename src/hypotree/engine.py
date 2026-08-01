@@ -187,6 +187,10 @@ class NodeSummary(BaseModel):
     created_at: datetime
     verified_at: datetime | None = None
     updated_at: datetime
+    # True when this node was confirmed against a commit that is no longer the
+    # one checked out. The confirmation may still hold; what is certain is that
+    # nothing has re-established it since the code moved.
+    stale: bool = False
 
 
 class EvidenceSummary(BaseModel):
@@ -200,6 +204,7 @@ class EvidenceSummary(BaseModel):
     monotonicity: str
     context_hash: str | None
     git_branch: str | None
+    source_ref: str | None = None
     notes: str
     recorded_at: datetime
 
@@ -1713,12 +1718,22 @@ class HypoTreeEngine:
         ascending: bool = False,
         limit: int = 20,
         offset: int = 0,
+        view: str | None = None,
+        stale_only: bool = False,
     ) -> str:
         """Query nodes with filter/sort/pagination and return a Markdown table.
 
         query_filter: case-insensitive statement match. `*` → `%`, `_` stays
         `_` (SQL LIKE). Literal `%`/`_` are escaped.
         """
+        if view is not None:
+            preset = self._VIEWS.get(view)
+            if preset is None:
+                raise ValueError(f"Unknown view {view!r}. Accepted views: {sorted(self._VIEWS)}.")
+            status_filter = status_filter or preset.get("status_filter")
+            if order_by == "created_at" and "order_by" in preset:
+                order_by = preset["order_by"]
+
         translated_query: str | None = None
         if query_filter:
             # Respect explicit `*` wildcards verbatim; otherwise treat the query
@@ -1737,6 +1752,10 @@ class HypoTreeEngine:
             offset=offset,
         )
 
+        stale_ids = self.stale_node_ids() if (stale_only or view == "stale") else set()
+        if stale_only:
+            rows = [r for r in rows if r["id"] in stale_ids]
+
         summaries: list[NodeSummary] = []
         for r in rows:
             alpha: float = r["alpha"]
@@ -1754,12 +1773,13 @@ class HypoTreeEngine:
                     if r["verified_at"]
                     else None,
                     updated_at=datetime.fromisoformat(r["updated_at"]),
+                    stale=r["id"] in stale_ids,
                 )
             )
 
         # Render as a Markdown table for compact, human-readable output.
-        header = "| ID | Statement | Status | μ | Goal | Ev# | Created | Verified |"
-        separator = "|----|-----------|--------|---|------|-----|---------|----------|"
+        header = "| ID | Statement | Status | μ | Goal | Ev# | Created | Verified | Stale |"
+        separator = "|----|-----------|--------|---|------|-----|---------|----------|-------|"
         lines = [header, separator]
         for s in summaries:
             stmt = s.statement[:60].replace("|", "\\|")
@@ -1769,9 +1789,48 @@ class HypoTreeEngine:
             verified = s.verified_at.strftime("%Y-%m-%d %H:%M") if s.verified_at else "—"
             lines.append(
                 f"| {s.id} | {stmt} | {s.status.value} | {s.posterior_mean:.2f} | "
-                f"{'🎯' if s.is_goal else ''} | {s.evidence_count} | {created} | {verified} |"
+                f"{'🎯' if s.is_goal else ''} | {s.evidence_count} | {created} | {verified} | "
+                f"{'⚠' if s.stale else ''} |"
             )
         return "\n".join(lines)
+
+    # Named filter combinations for the questions actually asked of a belief
+    # state. A caller that has to assemble `status_filter` by hand gets it
+    # subtly wrong and silently receives an empty table, which reads as "nothing
+    # to do" rather than "you asked the wrong question".
+    _VIEWS: dict[str, dict[str, Any]] = {
+        "frontier": {"status_filter": ["UNTESTED", "IN_PROGRESS", "BLOCKED", "NEEDS_REVISION"]},
+        "settled": {"status_filter": ["VERIFIED", "EXHAUSTED", "INVALIDATED", "PRUNED"]},
+        "verified": {"status_filter": ["VERIFIED"]},
+        "revision": {"status_filter": ["NEEDS_REVISION", "BLOCKED"]},
+        "stale": {"status_filter": ["VERIFIED"], "order_by": "staleness"},
+    }
+
+    def stale_node_ids(self) -> set[str]:
+        """VERIFIED nodes whose newest evidence names a commit that is not HEAD.
+
+        The engine has captured ``context_hash`` on every evidence row since
+        Phase 3b and never once read it back, which made the field a record of a
+        question nobody asked. A confirmation is not refuted by the code moving
+        underneath it, but it is no longer *current*, and that distinction is the
+        whole reason the hash was captured.
+
+        Silent when the workspace is not a git checkout: a project with no commit
+        to compare against has no drift to report, and inventing one would make
+        every node permanently suspect.
+        """
+        head, _ = capture_git_context(self.project_path)
+        if head is None:
+            return set()
+        stale: set[str] = set()
+        for node in self._store.get_all_nodes():
+            if node.status is not Status.VERIFIED:
+                continue
+            rows = self._store.get_evidence_paginated(node.id, limit=1, offset=0)
+            recorded = rows[0]["context_hash"] if rows else None
+            if recorded is not None and recorded != head:
+                stale.add(node.id)
+        return stale
 
     def get_evidence_history(
         self,
@@ -1796,6 +1855,7 @@ class HypoTreeEngine:
                 monotonicity=r["monotonicity"],
                 context_hash=r["context_hash"],
                 git_branch=r["git_branch"],
+                source_ref=r["source_ref"],
                 notes=r["notes"],
                 recorded_at=datetime.fromisoformat(r["recorded_at"]),
             )
@@ -2177,34 +2237,65 @@ class HypoTreeEngine:
     def _diagnosis_order(self, member_ids: list[str]) -> list[str]:
         """Members in the order diagnosis should interrogate them.
 
-        Weakest claim first. A member confirmed once by a shallow test is a
-        thinner commitment than one confirmed deep and repeatedly, so it is the
-        better first suspect for an assumption that only ever held because
-        nothing demanding was asked of it. Diagnosis buys one bit per probe and
-        stops at the culprit, so this order is the only lever on its cost.
+        **Least-corroborated question first.** A member is only as trustworthy as
+        the question behind it was interrogated. If every competing answer was
+        put to the test and refuted on its own evidence, the survivor is what is
+        left standing after a real search. If the alternatives were merely
+        *retired untested* by the exclusion inference the moment this one
+        confirmed, then nothing was learned about them at all — the question was
+        answered by whatever happened to be tried first, and that is a far
+        thinner commitment. So the fewer siblings a member has actually beaten,
+        the better a suspect it is.
 
-        Ties break on a hash of the id rather than on the id itself. Sorting by
-        id made the cost of diagnosis a function of what the caller *named*
+        This is the same reasoning ``_is_eliminated`` already encodes for the
+        deduction rule, applied one level up: there it decides whether a group is
+        settled, here it decides which settled group to doubt first. It costs
+        nothing to compute — the belief state already knows it — and unlike a
+        depth or an evidence count it actually varies across the members of a
+        real conflict, which is what makes it a usable ranking.
+
+        Confirmation depth and evidence count remain as tie-breaks: among equally
+        under-interrogated questions, the member tested least rigorously is still
+        the better suspect.
+
+        Ties break last on a hash of the id rather than on the id itself. Sorting
+        by id made the cost of diagnosis a function of what the caller *named*
         things: ids are conventionally prefixed by the question they answer, so
-        one question was always interrogated first and another always last, and
-        a workspace could be made to converge faster by renaming its hypotheses.
-        No inference procedure should have that property. The hash keeps the
-        order frozen and reproducible without tying it to the alphabet.
+        one question was always interrogated first and another always last, and a
+        workspace could be made to converge faster by renaming its hypotheses. No
+        inference procedure should have that property. The hash keeps the order
+        frozen and reproducible without tying it to the alphabet.
         """
 
-        def rank(member_id: str) -> tuple[int, int, str]:
+        def rank(member_id: str) -> tuple[int, int, int, str]:
+            tiebreak = sha256(member_id.encode("utf-8")).hexdigest()
             node = self._store.get_node(member_id)
             if node is None:
-                return (0, 0, sha256(member_id.encode("utf-8")).hexdigest())
+                return (0, 0, 0, tiebreak)
             return (
+                self._corroboration(node),
                 node.confirmed_depth or 0,
                 node.evidence_count,
-                sha256(member_id.encode("utf-8")).hexdigest(),
+                tiebreak,
             )
 
         return sorted(member_ids, key=rank)
 
-    def _substitution_plan(self, nogood: dict[str, Any]) -> dict[str, Any] | None:
+    def _corroboration(self, node: Node) -> int:
+        """How many competing answers this one has actually beaten on evidence.
+
+        Zero for a member with no exclusion group: nothing was ever declared to
+        compete with it, so no search stands behind it and it sorts as the least
+        corroborated — which is the right default for a bare assumption.
+        """
+        if not node.exclusion_group:
+            return 0
+        siblings = self._store.get_nodes_in_exclusion_group(node.exclusion_group, node.id)
+        return sum(1 for s in siblings if self._is_eliminated(s))
+
+    def _substitution_plan(
+        self, nogood: dict[str, Any], from_index: int | None = None
+    ) -> dict[str, Any] | None:
         """The next single-assumption swap that would narrow this conflict.
 
         The discriminating experiment for "these cannot all hold together" is
@@ -2241,7 +2332,8 @@ class HypoTreeEngine:
         """
         members: list[str] = list(nogood["member_ids"])
         known = {frozenset(n["member_ids"]) for n in self._store.get_nogoods()}
-        for index in range(int(nogood["probe_index"] or 0), len(members)):
+        start = int(nogood["probe_index"] or 0) if from_index is None else from_index
+        for index in range(start, len(members)):
             member = members[index]
             keep = [m for m in members if m != member]
             candidate = self._substitution_candidate(member, keep, known)
@@ -2255,6 +2347,7 @@ class HypoTreeEngine:
                 "min_depth": int(nogood["conflict_depth"] or 0),
                 "cleared": members[: int(nogood["probe_index"] or 0)],
                 "remaining": len(members) - index,
+                "index": index,
             }
         return None
 
@@ -2352,6 +2445,17 @@ class HypoTreeEngine:
                 # Every member has been swapped out and the composition failed
                 # every time: no single assumption is the cause, so the answer is
                 # somewhere among all the alternatives they retired.
+                #
+                # Known limitation: the cursor only moves forward, so a member the
+                # plan had to skip for want of a usable substitute is left behind
+                # it and reported as cleared. Rescuing it needs to distinguish
+                # "cleared" from "skipped", which a single integer cursor cannot
+                # express — a rescan from the front re-proposes cleared members
+                # and never terminates. It needs a settled-set rather than a
+                # cursor, so it is scoped as a schema change rather than patched
+                # here. The broad recovery below still fires, so the conflict
+                # ends in a sound state; it just ends more expensively than it
+                # had to.
                 self._recover_from_interaction(self._refetch_nogood(nogood["id"]) or refreshed, now)
             return True
 

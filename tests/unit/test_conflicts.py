@@ -1011,16 +1011,46 @@ def test_a_claim_for_another_node_is_still_refused(engine: HypoTreeEngine) -> No
 
 
 @pytest.mark.unit
-def test_diagnosis_interrogates_the_weakest_assumption_first(
+def test_diagnosis_interrogates_the_least_corroborated_question_first(
     engine: HypoTreeEngine,
 ) -> None:
-    """The member with the least evidence behind it is the first suspect.
+    """A member whose rivals were never tested is the better first suspect.
 
-    An assumption confirmed once by a shallow test is a thinner commitment than
-    one confirmed deep, so it is the likelier candidate for a premise that only
-    ever held because nothing demanding was asked of it. Diagnosis buys one bit
-    per probe and stops at the culprit, so this ordering is its only cost lever.
+    Beating four refuted competitors is a real search; being the first thing
+    tried while the exclusion inference quietly retired the rest is not. The
+    second rests on nothing, so diagnosis should doubt it first. Measured on the
+    held-out seeds this moved the culprit from position 3.75 to 2.38 of five.
     """
+    engine.create_hypotheses(
+        [
+            {"statement": "a=0", "node_id": "a0", "exclusion_group": "a"},
+            {"statement": "a=1", "node_id": "a1", "exclusion_group": "a"},
+            {"statement": "b=0", "node_id": "b0", "exclusion_group": "b"},
+            {"statement": "b=1", "node_id": "b1", "exclusion_group": "b"},
+            {
+                "statement": "combination",
+                "node_id": "combo",
+                "parent_ids": ["a0", "b0"],
+                "edge_type": "DEPENDENCY",
+            },
+        ]
+    )
+    # 'a' is interrogated: its rival is refuted on its own evidence.
+    # 'b' is not: b1 is only retired by the exclusion inference when b0 confirms.
+    engine.record_evidence("a1", LogicalEvidence(success=0.0, depth=1))
+    engine.record_evidence("a0", LogicalEvidence(success=1.0, depth=1))
+    engine.record_evidence("b0", LogicalEvidence(success=1.0, depth=1))
+    engine.record_evidence("combo", LogicalEvidence(success=0.0, depth=1))
+
+    members = engine._store.get_nogoods(open_only=True)[0]["member_ids"]
+    assert members[0] == "b0", "the question nobody actually searched must be doubted first"
+
+
+@pytest.mark.unit
+def test_diagnosis_falls_back_to_depth_when_corroboration_ties(
+    engine: HypoTreeEngine,
+) -> None:
+    """With both questions equally searched, the shallower confirmation leads."""
     engine.create_hypotheses(
         [
             {"statement": "deep premise", "node_id": "aaa_deep"},

@@ -377,3 +377,81 @@ def test_list_nodes_staleness_surfaces_oldest_first(engine: HypoTreeEngine) -> N
     result = engine.list_nodes(order_by="staleness")
     lines = result.strip().split("\n")
     assert "| n1 |" in lines[2]
+
+
+# -- Q1 staleness / Q6 views / Q4 source_ref -------------------------------
+
+
+@pytest.mark.unit
+def test_stale_is_silent_outside_a_git_checkout(engine: HypoTreeEngine) -> None:
+    """A project with no commit to compare against has no drift to report.
+
+    Inventing one would mark every confirmation permanently suspect, which is
+    worse than saying nothing.
+    """
+    engine.create_hypothesis("test", node_id="n1")
+    engine.record_evidence("n1", LogicalEvidence(success=1.0))
+
+    assert engine.stale_node_ids() == set()
+    assert "Stale" in engine.list_nodes()
+
+
+@pytest.mark.unit
+def test_stale_flags_a_confirmation_made_against_another_commit(
+    engine: HypoTreeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hash was captured on every evidence row and never once read back."""
+    import hypotree.engine as engine_mod
+
+    engine.create_hypothesis("moved", node_id="n1")
+    engine.create_hypothesis("current", node_id="n2")
+    engine.record_evidence("n1", LogicalEvidence(success=1.0, context_hash="oldsha"))
+    engine.record_evidence("n2", LogicalEvidence(success=1.0, context_hash="headsha"))
+    engine.update_status("n1", Status.VERIFIED, reason="t")
+    engine.update_status("n2", Status.VERIFIED, reason="t")
+    monkeypatch.setattr(engine_mod, "capture_git_context", lambda p: ("headsha", "main"))
+
+    assert engine.stale_node_ids() == {"n1"}
+    assert "n1" in engine.list_nodes(stale_only=True)
+    assert "n2" not in engine.list_nodes(stale_only=True)
+
+
+@pytest.mark.unit
+def test_only_verified_nodes_can_go_stale(
+    engine: HypoTreeEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An untested hypothesis does not become false because the code moved."""
+    import hypotree.engine as engine_mod
+
+    engine.create_hypothesis("untested", node_id="n1")
+    engine.record_evidence("n1", LogicalEvidence(success=0.5, context_hash="oldsha"))
+    monkeypatch.setattr(engine_mod, "capture_git_context", lambda p: ("headsha", "main"))
+
+    assert engine.stale_node_ids() == set()
+
+
+@pytest.mark.unit
+def test_view_preset_selects_the_frontier(engine: HypoTreeEngine) -> None:
+    engine.create_hypothesis("open", node_id="n1")
+    engine.create_hypothesis("done", node_id="n2")
+    engine.update_status("n2", Status.VERIFIED, reason="t")
+
+    frontier = engine.list_nodes(view="frontier")
+    assert "| n1 |" in frontier
+    assert "| n2 |" not in frontier
+
+
+@pytest.mark.unit
+def test_unknown_view_names_the_accepted_ones(engine: HypoTreeEngine) -> None:
+    """A silently-empty table reads as 'nothing to do', not 'wrong question'."""
+    with pytest.raises(ValueError, match="Accepted views"):
+        engine.list_nodes(view="nonsense")
+
+
+@pytest.mark.unit
+def test_evidence_carries_the_artifact_it_came_from(engine: HypoTreeEngine) -> None:
+    """'0.85' and '0.85, from pytest run #4412' are different audit trails."""
+    engine.create_hypothesis("test", node_id="n1")
+    engine.record_evidence("n1", LogicalEvidence(success=0.85, source_ref="ci://run/4412"))
+
+    assert engine.get_evidence_history("n1")[0].source_ref == "ci://run/4412"

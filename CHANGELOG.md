@@ -4,6 +4,46 @@ All notable changes to hypotree are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-08-01
+
+### Fixed
+- **Conflict diagnosis now interrogates the least-corroborated question first.** v0.3.1 replaced
+  the naming-dependent alphabetical order with a hash, which removed the bias but carried no
+  signal — in run F the culprit landed at position 3.75 of 5, and conflict episodes cost +1.9
+  probes. A member is only as trustworthy as the question behind it was searched: beating four
+  refuted rivals is a real search, being the first thing tried while the exclusion inference
+  quietly retired the rest is not. Ordering by how many siblings were eliminated *on their own
+  evidence* moves the culprit to position 2.38 and is still independent of what nodes are named.
+  Self-play: 16.2 → **15.9** probes, better than the alphabetical order it replaced (16.0).
+
+### Added
+- `list_nodes(view=...)` — named presets (`frontier`, `settled`, `verified`, `revision`, `stale`)
+  instead of hand-assembled status filters that silently return an empty table.
+- `list_nodes(stale_only=True)` and a `Stale` column: VERIFIED nodes whose newest evidence names
+  a commit that is no longer checked out. `context_hash` had been captured on every evidence row
+  since Phase 3b and never once read back.
+- `LogicalEvidence.source_ref` — what was actually run to produce a number (path, URL, CI run id).
+- `AGENT_GUIDE.md` now documents the 3 MCP prompts and 2 resources.
+
+### Changed
+- **Schema upgrades are now migrated**: the belief state is the accumulated
+  record of a month of experiments, and surviving across sessions is the entire product claim.
+  Opening a database written by an older release now walks a forward migration chain, applying
+  each step and its version stamp in one transaction — an interrupted upgrade rolls back to the
+  version it started from rather than stranding the file between two. Every migration is written
+  to the `events` audit log as `SchemaMigrated`, so "why does this differ from my backup?" is
+  answerable from the same place as every other question about the workspace.
+- Schema `"8"` → `"9"` adds `evidence.source_ref`; the 8→9 migration is additive
+  (`ALTER TABLE ... ADD COLUMN`) and cannot lose data.
+- A database written by a **newer** hypotree is refused rather than downgraded — the newer code
+  may have stored things this version cannot represent, and dropping them silently is worse than
+  stopping. A version with no route forward now says to keep the file and open an issue.
+
+### Known limitation
+- A conflict member skipped for want of a usable substitute is left behind the `probe_index`
+  cursor and reported as cleared. Distinguishing "cleared" from "skipped" needs a settled-set
+  rather than an integer cursor, so it is scoped as a schema change rather than patched.
+
 ## [0.3.1] - 2026-08-01
 
 ### Fixed

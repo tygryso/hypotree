@@ -40,11 +40,32 @@ refuted or settled).
 | `suggest_discriminating_experiment` | Propose the single most informative next experiment. While a conflict is still being narrowed it names the one **swap** that clears an assumption (`action:"substitute"`, with `node_id`, `replace_with`, `parent_ids`, `min_depth`); once every assumption has been swapped out and it still failed, it proposes a different **combination** (`action:"recombine"`). `{status: "SUGGESTED"\|"NO_CONFLICTS"\|"EXHAUSTED", …}`. |
 | `get_dag_context` | Bounded subgraph with credible intervals. `node_id`, `max_depth=2`, `max_children=10`. |
 | `render_dag_map` | Mermaid text. Edge styling: `DEPENDENCY` solid `-->`, `ALTERNATIVE` dashed `-.->`, `REFINEMENT` thick `==>`. `hide_statuses` drops matching nodes. |
-| `list_nodes` | Filter + search + sort nodes → Markdown table. `status_filter`, `query_filter`, `order_by`, `limit`, `offset`. See **Search & Ordering** below for wildcard/escape and staleness semantics. |
-| `get_evidence_history` | Evidence trail for a node (newest-first). `{id, kind, success, delta_success, monotonicity, context_hash, git_branch, notes, recorded_at}`. |
+| `list_nodes` | Filter + search + sort nodes → Markdown table. `status_filter`, `query_filter`, `order_by`, `limit`, `offset`, plus two shortcuts worth preferring: **`view`** (`frontier` \| `settled` \| `verified` \| `revision` \| `stale`) names the question instead of making you assemble a status filter that returns an empty table when you get it subtly wrong; **`stale_only`** keeps only VERIFIED nodes whose newest evidence names a commit that is no longer checked out. A stale node is **not refuted** — nothing has re-established it since the code moved, which is a different and weaker claim. The `Stale` column carries the same signal. See **Search & Ordering** below for wildcard/escape semantics. |
+| `get_evidence_history` | Evidence trail for a node (newest-first). `{id, kind, success, delta_success, monotonicity, context_hash, git_branch, source_ref, notes, recorded_at}`. |
 | `get_active_claims` | Live (unconsumed, unexpired) claims with `expires_in_s`. Use to resume interrupted work. |
 | `generate_learning_path` | What has been settled so far, **in order, and how**. Returns a markdown briefing plus structured `steps`, each marked `observed` (an experiment paid for it), `inferred` (the engine derived it for free) or `reversed` (a belief withdrawn or handed back). Carries `probes_spent`, `conclusions` and `conclusions_without_a_probe`. `limit` (default 200) bounds the narrative; the counters always cover the whole history. Call it **first** in a new session — something may already be settled — and to brief a human. |
 | `get_workspace_info` | **Which** belief state you are connected to, and how it was chosen. No arguments. Returns `workspace_id`, `source` (`env` \| `config` \| `remote` \| `path` — which of the four layers below produced it), `detail`, `project_path`, `store_root`, `db_path`, `db_exists`, and `warnings`. Call it when the graph is unexpectedly empty, or when two clients disagree about what has been established: that is almost always one project resolving to two workspaces. A pure read — it never creates the store, so asking cannot itself be what brings a workspace into being. |
+
+---
+
+#### Prompts (slash commands)
+
+Three MCP **prompts**. Clients that support them (Cursor, Claude Desktop, Cline) surface them as slash commands, so a human can steer the loop without the agent paraphrasing the protocol. Namespacing is client-specific — Cursor and Claude Desktop use `/hypotree:hypotree-init`.
+
+| Prompt | What it asks for |
+|--------|------------------|
+| `hypotree-init` | Create the goal node and the first 3–5 hypotheses under it, with `exclusion_group` set wherever those hypotheses are competing answers to one question. Takes an optional `task` argument. |
+| `hypotree-next` | Get the next target, actually run it, and record the result against that same node — including what to do for each DONE reason. |
+| `hypotree-status` | Brief on what is established, what was ruled out, what changed, and how many conclusions cost no experiment. |
+
+#### Resources
+
+Two MCP **resources**, pulled on demand rather than carried in context.
+
+| URI | What it is |
+|-----|------------|
+| `hypotree://guide` | This document, served live. ~23 KB — read it when something surprises you, rather than pasting it into a system prompt. |
+| `hypotree://state` | The current belief state as a narrative: what was established, how, and what it cost. Equivalent to `generate_learning_path`. |
 
 ---
 

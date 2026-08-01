@@ -20,7 +20,7 @@ from hypotree.models.edge import Edge, EdgeType
 from hypotree.models.evidence import Evidence, InfraError, LogicalEvidence
 from hypotree.models.node import Node
 from hypotree.models.status import Status, utcnow
-from hypotree.store.schema import SCHEMA_DDL, SCHEMA_VERSION
+from hypotree.store.schema import MIGRATIONS, SCHEMA_DDL, SCHEMA_VERSION
 
 
 class SchemaVersionError(RuntimeError):
@@ -51,6 +51,7 @@ def _evidence_to_row(node_id: str, ev: Evidence) -> dict:
             "artifacts": json.dumps([str(p) for p in ev.artifacts]),
             "context_hash": ev.context_hash,
             "git_branch": ev.git_branch,
+            "source_ref": ev.source_ref,
             "claim_id": ev.claim_id,
             "notes": ev.notes,
             "delta_success": ev.delta_success,
@@ -66,6 +67,7 @@ def _evidence_to_row(node_id: str, ev: Evidence) -> dict:
         "artifacts": "[]",
         "context_hash": None,
         "git_branch": None,
+        "source_ref": None,
         "claim_id": ev.claim_id,
         "notes": f"{ev.error_type}: {ev.message}",
         "delta_success": None,
@@ -78,6 +80,7 @@ class HypoTreeStore:
     """Persistent store backed by SQLite in WAL mode."""
 
     def __init__(self, db_path: Path | str) -> None:
+        self._db_path = str(db_path)
         self._conn = sqlite3.connect(str(db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -125,23 +128,74 @@ class HypoTreeStore:
         self._conn.executescript(SCHEMA_DDL)
 
     def _check_schema_version(self) -> None:
+        """Stamp a fresh database, or bring an existing one up to date.
+
+        A published tool cannot answer "your schema is old" with "delete it".
+        The belief state *is* the product — a month of recorded experiments, the
+        thing every claim about surviving across sessions rests on — so an
+        upgrade migrates it or refuses to touch it, and never quietly discards
+        it.
+        """
         row = self._conn.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()
         if row is None:
-            # Fresh DB — stamp it
+            # Fresh DB — stamp it. No migrations run: `_init_schema` already
+            # created every table at the current version.
             self._conn.execute(
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
                 (SCHEMA_VERSION,),
             )
             self._conn.commit()
         elif row["value"] != SCHEMA_VERSION:
-            db_ver = row["value"]
-            raise SchemaVersionError(
-                f"DB schema_version='{db_ver}' does not match "
-                f"code expected='{SCHEMA_VERSION}'. "
-                "Under active development — no migrations. Delete the DB to reset."
-            )
+            self._migrate(str(row["value"]))
+
+    def _migrate(self, from_version: str) -> None:
+        """Walk the migration chain from ``from_version`` to ``SCHEMA_VERSION``.
+
+        Each step runs its statements and stamps the new version inside one
+        transaction. SQLite makes DDL transactional, so an interrupted upgrade
+        rolls back to the version it started from and the next open retries it —
+        there is no state in which the tables and the stamp disagree.
+
+        Refuses rather than guesses in the two cases where it cannot know what to
+        do: a database written by a newer hypotree (downgrading could silently
+        drop data this version cannot represent) and a version with no route
+        forward (a hand-edited stamp, or a development build that never shipped).
+        """
+        version = from_version
+        while version != SCHEMA_VERSION:
+            step = MIGRATIONS.get(version)
+            if step is None:
+                raise SchemaVersionError(
+                    f"No migration path from schema_version='{version}' to "
+                    f"'{SCHEMA_VERSION}' at {self._db_path}. "
+                    + (
+                        "This database was written by a newer hypotree; upgrade the "
+                        "package rather than downgrading the data."
+                        if version > SCHEMA_VERSION
+                        else "Back the file up and open an issue — do not delete it."
+                    )
+                )
+            target, statements = step
+            with self.transaction() as conn:
+                for sql in statements:
+                    conn.execute(sql)
+                conn.execute(
+                    "UPDATE schema_meta SET value=? WHERE key='schema_version'",
+                    (target,),
+                )
+                # The events table is the workspace's audit log, so an upgrade
+                # belongs in it: "why does this database look different from the
+                # one I backed up?" is answerable from the same place as every
+                # other question about how it got into its current state.
+                self._write_event(
+                    conn,
+                    "SchemaMigrated",
+                    json.dumps({"from": version, "to": target}),
+                    self._txn_id(),
+                )
+            version = target
 
     # -- node CRUD -------------------------------------------------------------
 

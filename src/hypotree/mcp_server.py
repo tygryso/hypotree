@@ -308,6 +308,15 @@ def _tool_definitions() -> list[types.Tool]:
                     "error_type": {"type": "string"},
                     "message": {"type": "string"},
                     "metrics": {"type": "object"},
+                    "source_ref": {
+                        "type": "string",
+                        "description": (
+                            "What was actually run to produce this number — a file path, "
+                            "a URL, a CI run id, a commit. Optional, but a trail that says "
+                            "'0.85, from pytest run #4412' is worth more later than one "
+                            "that says '0.85'."
+                        ),
+                    },
                     "notes": {"type": "string"},
                     "count_next_targets": {
                         "type": "integer",
@@ -468,11 +477,29 @@ def _tool_definitions() -> list[types.Tool]:
         types.Tool(
             name="list_nodes",
             description="Query/filter/sort nodes and return a Markdown table. "
-            "Examples: list all VERIFIED, search by statement text, sort by "
-            "creation date.",
+            "Use `view` for the questions actually worth asking — 'frontier' (what "
+            "is still open), 'settled', 'verified', 'revision' (what is under "
+            "revision), 'stale' — rather than assembling a status filter by hand. "
+            "`stale_only=true` keeps only confirmations made against a commit that "
+            "is no longer checked out: they are not refuted, but nothing has "
+            "re-established them since the code moved.",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "view": {
+                        "type": "string",
+                        "enum": ["frontier", "settled", "verified", "revision", "stale"],
+                        "description": (
+                            "Named filter preset; overridden by an explicit status_filter."
+                        ),
+                    },
+                    "stale_only": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Keep only VERIFIED nodes confirmed against a non-HEAD commit."
+                        ),
+                    },
                     "status_filter": {
                         "type": "array",
                         "items": {
@@ -764,6 +791,8 @@ def _dispatch(engine: HypoTreeEngine, name: str, arguments: dict) -> object:
             "table": engine.list_nodes(
                 status_filter=arguments.get("status_filter"),
                 query_filter=arguments.get("query_filter"),
+                view=arguments.get("view"),
+                stale_only=bool(arguments.get("stale_only", False)),
                 order_by=arguments.get("order_by", "created_at"),
                 ascending=arguments.get("ascending", False),
                 limit=arguments.get("limit", 20),

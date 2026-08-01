@@ -1,6 +1,6 @@
 [project]
 name = "hypotree"
-version = "0.3.1"
+version = "0.3.2"
 description = "MCP server: persistent, self-revising hypothesis-DAG for agentic R&D"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,8 +21,8 @@ keywords = [
     "research",
 ]
 classifiers = [
-    # Beta, not Production/Stable: the schema is on v8 with no migration path
-    # yet and the API is pre-1.0.
+    # Beta, not Production/Stable: the API is pre-1.0. The schema now migrates
+    # forward on open, so an upgrade no longer costs the belief state.
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",

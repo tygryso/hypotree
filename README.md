@@ -4,8 +4,8 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg)](CHANGELOG.md)
-[![Tests: 628](https://img.shields.io/badge/tests-628-brightgreen.svg)](tests/)
-[![Version: 0.3.1](https://img.shields.io/badge/version-0.3.1-blue.svg)](pyproject.toml)
+[![Tests: 641](https://img.shields.io/badge/tests-641-brightgreen.svg)](tests/)
+[![Version: 0.3.2](https://img.shields.io/badge/version-0.3.2-blue.svg)](pyproject.toml)
 [![PyPI](https://img.shields.io/pypi/v/hypotree.svg)](https://pypi.org/project/hypotree/)
 
 A persistent, self-revising **hypothesis DAG** for agentic R&D — exposed as an [MCP server](https://modelcontextprotocol.io/).
@@ -223,7 +223,7 @@ belief state in hypotree rather than in the conversation.
 └─────────────┼───────────────────────────┘
               │
 ┌─────────────▼───────────────────────────┐
-│   SQLite-WAL (Schema v8, 9 tables)      │
+│   SQLite-WAL (Schema v9, 9 tables)      │
 │   • Bi-temporal history                 │
 │   • Belief state + evidence + conflicts │
 │   • Keyed by workspace_id               │

@@ -5,6 +5,7 @@ tables, claim lifecycle, schema_version fail-fast, normalized identity.
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -14,10 +15,10 @@ import pytest
 from hypotree.models.edge import Edge, EdgeType
 from hypotree.models.evidence import InfraError, LogicalEvidence
 from hypotree.models.node import Node
-from hypotree.models.status import Status
+from hypotree.models.status import Status, utcnow
 from hypotree.store.identity import _normalize_remote, store_root, workspace_id
 from hypotree.store.schema import SCHEMA_VERSION
-from hypotree.store.store import HypoTreeStore, SchemaVersionError
+from hypotree.store.store import HypoTreeStore, SchemaVersionError, _dt_to_str
 
 
 @pytest.fixture
@@ -513,3 +514,136 @@ def test_exclusion_group_round_trips(store: HypoTreeStore) -> None:
     assert members == {"b"}
     # An ungrouped node is never swept into someone else's exclusion set.
     assert store.get_nodes_in_exclusion_group("other") == []
+
+
+# -- schema migration ------------------------------------------------------
+
+
+def _write_v8_database(db_path: Path) -> None:
+    """A genuine v8 database: the current DDL minus the column v9 added.
+
+    Built from the real DDL rather than a hand-written fixture so it cannot
+    drift away from what v0.3.1 actually shipped, and stamped v8 so the store
+    takes the migration path rather than the fresh-stamp path.
+    """
+    from hypotree.store.schema import SCHEMA_DDL
+
+    v8_ddl = SCHEMA_DDL.replace("    source_ref    TEXT,\n", "")
+    assert "source_ref" not in v8_ddl, "the v8 fixture must not carry the v9 column"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(v8_ddl)
+    conn.execute("INSERT INTO schema_meta (key, value) VALUES ('schema_version', '8')")
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.unit
+def test_a_v8_database_is_migrated_rather_than_rejected(tmp_path: Path) -> None:
+    """The belief state is the product; an upgrade may not require discarding it."""
+    db = tmp_path / "old.db"
+    _write_v8_database(db)
+
+    store = HypoTreeStore(db)
+    try:
+        version = store._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()["value"]
+        columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(evidence)")}
+    finally:
+        store.close()
+
+    assert version == SCHEMA_VERSION
+    assert "source_ref" in columns
+
+
+@pytest.mark.unit
+def test_migration_preserves_the_rows_that_were_already_there(tmp_path: Path) -> None:
+    """A migration that loses a recorded experiment is worse than no migration."""
+    db = tmp_path / "old.db"
+    _write_v8_database(db)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO nodes (id, statement, status, alpha, beta, is_goal, evidence_regime,"
+        " is_parametric, evidence_count, created_at, updated_at)"
+        " VALUES ('n1','survives me','VERIFIED',3.0,1.0,0,'deterministic',0,1,?,?)",
+        (_dt_to_str(utcnow()), _dt_to_str(utcnow())),
+    )
+    conn.commit()
+    conn.close()
+
+    store = HypoTreeStore(db)
+    try:
+        node = store.get_node("n1")
+    finally:
+        store.close()
+
+    assert node is not None
+    assert node.statement == "survives me"
+    assert node.status is Status.VERIFIED
+
+
+@pytest.mark.unit
+def test_migration_is_recorded_in_the_audit_log(tmp_path: Path) -> None:
+    """'Why does this database differ from my backup?' is an audit question."""
+    db = tmp_path / "old.db"
+    _write_v8_database(db)
+
+    store = HypoTreeStore(db)
+    try:
+        rows = store._conn.execute("SELECT type, payload FROM events").fetchall()
+    finally:
+        store.close()
+
+    migrated = [r for r in rows if r["type"] == "SchemaMigrated"]
+    assert len(migrated) == 1
+    assert json.loads(migrated[0]["payload"]) == {"from": "8", "to": SCHEMA_VERSION}
+
+
+@pytest.mark.unit
+def test_a_database_from_a_newer_hypotree_is_refused(tmp_path: Path) -> None:
+    """Downgrading could silently drop data this version cannot represent."""
+    db = tmp_path / "future.db"
+    HypoTreeStore(db).close()
+    conn = sqlite3.connect(str(db))
+    conn.execute("UPDATE schema_meta SET value='999' WHERE key='schema_version'")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(SchemaVersionError, match="newer hypotree"):
+        HypoTreeStore(db)
+
+
+@pytest.mark.unit
+def test_an_unroutable_version_says_keep_the_file(tmp_path: Path) -> None:
+    """The one instruction that must never appear again is 'delete the DB'."""
+    db = tmp_path / "odd.db"
+    HypoTreeStore(db).close()
+    conn = sqlite3.connect(str(db))
+    conn.execute("UPDATE schema_meta SET value='3' WHERE key='schema_version'")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(SchemaVersionError, match="do not delete it"):
+        HypoTreeStore(db)
+
+
+@pytest.mark.unit
+def test_a_failed_migration_leaves_the_old_version_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupted upgrade must roll back, not strand the DB between versions."""
+    import hypotree.store.store as store_mod
+
+    db = tmp_path / "old.db"
+    _write_v8_database(db)
+    monkeypatch.setattr(
+        store_mod, "MIGRATIONS", {"8": (SCHEMA_VERSION, ("ALTER TABLE nope ADD COLUMN x",))}
+    )
+
+    with pytest.raises(sqlite3.OperationalError):
+        HypoTreeStore(db)
+
+    conn = sqlite3.connect(str(db))
+    stamped = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
+    conn.close()
+    assert stamped == "8"

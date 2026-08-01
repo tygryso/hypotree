@@ -1,12 +1,15 @@
 """SQL DDL for the SQLite-WAL source-of-truth store.
 
-Eight tables: schema_meta, nodes, edges, evidence, status_history,
-posterior_history, claims, events. The nodes table is a denormalized current
-cache; authoritative history lives in the *_history tables. The events table
-is an audit/replay log written in the same transaction as state mutations.
+Nine tables: schema_meta, nodes, edges, evidence, status_history,
+posterior_history, claims, events, nogoods. The nodes table is a denormalized
+current cache; authoritative history lives in the *_history tables. The events
+table is an audit/replay log written in the same transaction as state mutations.
+
+``MIGRATIONS`` at the foot of this module carries the forward upgrade path; see
+its comment for the rules a new entry has to satisfy.
 """
 
-SCHEMA_VERSION = "8"
+SCHEMA_VERSION = "9"
 
 SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -64,6 +67,10 @@ CREATE TABLE IF NOT EXISTS evidence (
     artifacts     TEXT NOT NULL DEFAULT '[]',
     context_hash  TEXT,
     git_branch    TEXT,
+    -- What was actually run to produce this number: a path, a URL, a CI run id.
+    -- An audit trail that says "0.85" and one that says "0.85, from run #4412"
+    -- are different artifacts, and only the caller knows which one exists.
+    source_ref    TEXT,
     claim_id      TEXT,
     notes         TEXT NOT NULL DEFAULT '',
     delta_success REAL,
@@ -148,3 +155,28 @@ CREATE TABLE IF NOT EXISTS nogoods (
 );
 CREATE INDEX IF NOT EXISTS idx_nogoods_open ON nogoods(resolved_at);
 """
+
+
+# Forward migrations, keyed by the version they upgrade *from*. Each entry is
+# (target_version, statements) and is applied together with the version stamp in
+# a single transaction, so a crash mid-upgrade leaves the database on the old
+# version rather than half-way between two.
+#
+# These exist because hypotree is published. "Delete the DB to reset" is a fair
+# answer while nothing is deployed and an unacceptable one once someone's belief
+# state is the accumulated record of a month of experiments — the whole product
+# claim is that the state survives. A release that silently required starting
+# over would refute it.
+#
+# Rules for adding one:
+#   * Forward only. A database written by a newer hypotree is not downgraded;
+#     it is refused, because the newer code may have stored things this version
+#     cannot represent and dropping them silently is worse than stopping.
+#   * Additive where possible. `ALTER TABLE ... ADD COLUMN` with a nullable
+#     column is instant and cannot lose data. A migration that rewrites rows
+#     needs a far stronger justification than a new field.
+#   * Chained, not jumped. 7→9 runs 7→8 then 8→9, so every step is exercised by
+#     every longer path instead of accumulating untested direct routes.
+MIGRATIONS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "8": ("9", ("ALTER TABLE evidence ADD COLUMN source_ref TEXT",)),
+}
