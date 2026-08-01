@@ -672,9 +672,13 @@ class HypoTreeStore:
         The depth is part of the claim, not decoration: the members were each
         confirmed by some test, and what the failure shows is that those tests
         were not jointly sufficient *at this depth*. Returns the conflict id.
+
+        The given order is preserved verbatim, because it is the order in which
+        diagnosis will interrogate the members and ``probe_index`` counts into
+        it. Re-sorting here would silently override the caller's ranking.
         """
         txn = self._txn_id()
-        payload = json.dumps(sorted(member_ids))
+        payload = json.dumps(list(member_ids))
         with self.transaction() as conn:
             cur = conn.execute(
                 """INSERT INTO nogoods (source_node_id, member_ids, conflict_depth, recorded_at)
@@ -688,7 +692,7 @@ class HypoTreeStore:
                 json.dumps(
                     {
                         "source_node_id": source_node_id,
-                        "member_ids": sorted(member_ids),
+                        "member_ids": list(member_ids),
                         "conflict_depth": conflict_depth,
                     }
                 ),

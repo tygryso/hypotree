@@ -1008,3 +1008,105 @@ def test_a_claim_for_another_node_is_still_refused(engine: HypoTreeEngine) -> No
 
     with pytest.raises(ClaimError, match="different hypothesis"):
         engine.record_evidence("a0", LogicalEvidence(success=1.0), claim_id=other.claim_id)
+
+
+@pytest.mark.unit
+def test_diagnosis_interrogates_the_weakest_assumption_first(
+    engine: HypoTreeEngine,
+) -> None:
+    """The member with the least evidence behind it is the first suspect.
+
+    An assumption confirmed once by a shallow test is a thinner commitment than
+    one confirmed deep, so it is the likelier candidate for a premise that only
+    ever held because nothing demanding was asked of it. Diagnosis buys one bit
+    per probe and stops at the culprit, so this ordering is its only cost lever.
+    """
+    engine.create_hypotheses(
+        [
+            {"statement": "deep premise", "node_id": "aaa_deep"},
+            {"statement": "shallow premise", "node_id": "zzz_shallow"},
+            {
+                "statement": "combination",
+                "node_id": "combo",
+                "parent_ids": ["aaa_deep", "zzz_shallow"],
+                "edge_type": "DEPENDENCY",
+            },
+        ]
+    )
+    # Alphabetically first, but the better-established of the two.
+    engine.record_evidence("aaa_deep", LogicalEvidence(success=1.0, depth=3))
+    engine.record_evidence("zzz_shallow", LogicalEvidence(success=1.0, depth=1))
+    engine.record_evidence("combo", LogicalEvidence(success=0.0, depth=3))
+
+    conflict = engine._store.get_nogoods(open_only=True)[0]
+    assert conflict["member_ids"][0] == "zzz_shallow"
+
+
+@pytest.mark.unit
+def test_diagnosis_order_does_not_depend_on_what_the_nodes_are_called(
+    engine: HypoTreeEngine,
+) -> None:
+    """Renaming a hypothesis must not make a workspace converge faster.
+
+    Members used to be stored alphabetically, so with ids conventionally
+    prefixed by the question they answer, one question was always interrogated
+    first and another always last. That made the cost of diagnosis a function of
+    the caller's naming convention, which is not a property any inference
+    procedure should have.
+    """
+    engine.create_hypotheses(
+        [
+            {"statement": "a", "node_id": "aaa"},
+            {"statement": "b", "node_id": "bbb"},
+            {"statement": "c", "node_id": "ccc"},
+            {"statement": "d", "node_id": "ddd"},
+            {
+                "statement": "combination",
+                "node_id": "combo",
+                "parent_ids": ["aaa", "bbb", "ccc", "ddd"],
+                "edge_type": "DEPENDENCY",
+            },
+        ]
+    )
+    # Every premise equally well established, so nothing but the tiebreak is
+    # left to order them by.
+    for pid in ("aaa", "bbb", "ccc", "ddd"):
+        engine.record_evidence(pid, LogicalEvidence(success=1.0, depth=2))
+    engine.record_evidence("combo", LogicalEvidence(success=0.0, depth=2))
+
+    members = engine._store.get_nogoods(open_only=True)[0]["member_ids"]
+    assert sorted(members) == ["aaa", "bbb", "ccc", "ddd"]
+    assert members != sorted(members)
+
+
+@pytest.mark.unit
+def test_the_stored_diagnosis_order_is_stable_across_reads(
+    engine: HypoTreeEngine,
+) -> None:
+    """`probe_index` counts into the stored order, so that order must be frozen.
+
+    If it were recomputed per read, a member gaining evidence mid-diagnosis
+    would reshuffle the list under a live cursor and either re-test something
+    already cleared or skip a suspect entirely.
+    """
+    engine.create_hypotheses(
+        [
+            {"statement": "a", "node_id": "aaa"},
+            {"statement": "b", "node_id": "bbb"},
+            {
+                "statement": "combination",
+                "node_id": "combo",
+                "parent_ids": ["aaa", "bbb"],
+                "edge_type": "DEPENDENCY",
+            },
+        ]
+    )
+    engine.record_evidence("aaa", LogicalEvidence(success=1.0, depth=1))
+    engine.record_evidence("bbb", LogicalEvidence(success=1.0, depth=1))
+    engine.record_evidence("combo", LogicalEvidence(success=0.0, depth=1))
+
+    first = engine._store.get_nogoods(open_only=True)[0]["member_ids"]
+    engine.record_evidence("aaa", LogicalEvidence(success=1.0, depth=9))
+    second = engine._store.get_nogoods(open_only=True)[0]["member_ids"]
+
+    assert first == second

@@ -14,6 +14,7 @@ import json
 import uuid
 from collections import Counter
 from datetime import datetime
+from hashlib import sha256
 from itertools import product
 from pathlib import Path
 from typing import Any, Literal
@@ -2140,7 +2141,9 @@ class HypoTreeEngine:
         if any(set(n["member_ids"]) == members for n in self._store.get_nogoods(open_only=True)):
             return
 
-        self._store.add_nogood(node_id, dep_parents, now, conflict_depth=depth)
+        self._store.add_nogood(
+            node_id, self._diagnosis_order(dep_parents), now, conflict_depth=depth
+        )
 
         for pid in dep_parents:
             parent = self._store.get_node(pid)
@@ -2170,6 +2173,36 @@ class HypoTreeEngine:
             for n in self._store.get_nogoods(open_only=True)
             if not n["reopened_at"] and int(n["probe_index"] or 0) < len(n["member_ids"])
         ]
+
+    def _diagnosis_order(self, member_ids: list[str]) -> list[str]:
+        """Members in the order diagnosis should interrogate them.
+
+        Weakest claim first. A member confirmed once by a shallow test is a
+        thinner commitment than one confirmed deep and repeatedly, so it is the
+        better first suspect for an assumption that only ever held because
+        nothing demanding was asked of it. Diagnosis buys one bit per probe and
+        stops at the culprit, so this order is the only lever on its cost.
+
+        Ties break on a hash of the id rather than on the id itself. Sorting by
+        id made the cost of diagnosis a function of what the caller *named*
+        things: ids are conventionally prefixed by the question they answer, so
+        one question was always interrogated first and another always last, and
+        a workspace could be made to converge faster by renaming its hypotheses.
+        No inference procedure should have that property. The hash keeps the
+        order frozen and reproducible without tying it to the alphabet.
+        """
+
+        def rank(member_id: str) -> tuple[int, int, str]:
+            node = self._store.get_node(member_id)
+            if node is None:
+                return (0, 0, sha256(member_id.encode("utf-8")).hexdigest())
+            return (
+                node.confirmed_depth or 0,
+                node.evidence_count,
+                sha256(member_id.encode("utf-8")).hexdigest(),
+            )
+
+        return sorted(member_ids, key=rank)
 
     def _substitution_plan(self, nogood: dict[str, Any]) -> dict[str, Any] | None:
         """The next single-assumption swap that would narrow this conflict.

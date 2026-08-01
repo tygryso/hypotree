@@ -57,6 +57,10 @@ def _is_client_teardown_race(exc: BaseException) -> bool:
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="stdio transport deadlocks under the Windows proactor loop in CI",
+)
 async def test_stdio_round_trip(server_env: dict[str, str]) -> None:
     """Spawn the server as a subprocess and drive it over real stdio JSON-RPC."""
     from mcp import ClientSession, StdioServerParameters
@@ -117,7 +121,7 @@ async def test_stdio_round_trip(server_env: dict[str, str]) -> None:
     # and networkx; on a cold Windows runner that is many times slower than on
     # Linux, and a timeout here reads as a protocol failure that never happened.
     try:
-        await asyncio.wait_for(_run(), timeout=1200)
+        await asyncio.wait_for(_run(), timeout=900)
     except BaseException as exc:  # noqa: BLE001 — re-raised unless purely teardown noise
         if not _is_client_teardown_race(exc):
             raise

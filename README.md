@@ -3,8 +3,10 @@
 [![CI](https://github.com/tygryso/hypotree/actions/workflows/ci.yml/badge.svg)](https://github.com/tygryso/hypotree/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests: 618](https://img.shields.io/badge/tests-618-brightgreen.svg)](tests/)
-[![Version: 0.3.0](https://img.shields.io/badge/version-0.3.0-blue.svg)](pyproject.toml)
+[![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg)](CHANGELOG.md)
+[![Tests: 628](https://img.shields.io/badge/tests-628-brightgreen.svg)](tests/)
+[![Version: 0.3.1](https://img.shields.io/badge/version-0.3.1-blue.svg)](pyproject.toml)
+[![PyPI](https://img.shields.io/pypi/v/hypotree.svg)](https://pypi.org/project/hypotree/)
 
 A persistent, self-revising **hypothesis DAG** for agentic R&D — exposed as an [MCP server](https://modelcontextprotocol.io/).
 
@@ -21,7 +23,7 @@ Current agent memory is passive: vector stores and scratchpads accumulate facts 
 - **Thompson Sampling navigation** — Beta-distribution sampling over the open frontier, giving bounded worst-case regret (no catastrophic lock-in).
 - **Conflict resolution via differential ablation** — when an integration test fails but every component passes alone, the engine rebuilds the failing combination one swap at a time to pinpoint the culprit.
 - **A derivation trail, not just a state** — `generate_learning_path` narrates what was settled, in order, separating what an experiment paid for from what the engine inferred for free, and calling out beliefs that were later withdrawn.
-- **Persistent across sessions, models, agents, users, and projects** — the belief state is a SQLite file, not a context window.
+- **Persistent across sessions, models, agents, users, and projects** — the belief state is a SQLite database, not a context window.
 
 ---
 
@@ -334,4 +336,5 @@ uv run mypy src/hypotree/
 ## Links
 
 - **GitHub:** [github.com/tygryso/hypotree](https://github.com/tygryso/hypotree)
+- **Changelog:** [`CHANGELOG.md`](CHANGELOG.md) — version history with gate results
 - **Agent guide:** [`src/hypotree/AGENT_GUIDE.md`](src/hypotree/AGENT_GUIDE.md) — the full contract, also served live as the `hypotree://guide` MCP resource

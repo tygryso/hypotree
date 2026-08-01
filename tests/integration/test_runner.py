@@ -9,6 +9,7 @@ and tool execution.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -2076,3 +2077,55 @@ def test_a_probe_that_never_reached_the_oracle_costs_no_step(tmp_path: Path) -> 
     ]
     assert not [e for e in events if e["event_type"] == "experiment"]
     assert result["steps_to_target"] == config.tool_budget  # censored, never met
+
+
+@pytest.mark.integration
+def test_a_result_obtained_before_the_prune_is_not_a_re_execution() -> None:
+    """Recording a measurement you already paid for is not wasted budget.
+
+    The batching protocol makes this routine: probe two configurations, record
+    the first, and its cascade can prune the node the second belongs to. The
+    honest response is to record the second anyway — discarding a finished
+    experiment is strictly worse than filing it. Counting that as a redundant
+    re-execution flipped a run's hard gate on a single event.
+    """
+    from datetime import timedelta
+
+    from eval.runner.runner import _probe_postdates_prune
+
+    pruned_at = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    transcript = [
+        {"config": "x=1", "depth": 2, "success": 0.0, "at": pruned_at - timedelta(seconds=5)}
+    ]
+
+    assert _probe_postdates_prune(transcript, "x=1", pruned_at) is False
+
+
+@pytest.mark.integration
+def test_probing_a_branch_that_was_already_dead_still_counts() -> None:
+    """The behaviour the hard gate exists to catch must keep being caught."""
+    from datetime import timedelta
+
+    from eval.runner.runner import _probe_postdates_prune
+
+    pruned_at = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    transcript = [
+        {"config": "x=1", "depth": 2, "success": 0.0, "at": pruned_at + timedelta(seconds=5)}
+    ]
+
+    assert _probe_postdates_prune(transcript, "x=1", pruned_at) is True
+
+
+@pytest.mark.integration
+def test_a_result_with_no_experiment_behind_it_counts_as_re_execution() -> None:
+    """Unknown timings fail open.
+
+    A pruned node with no matching probe in the transcript is the shape a
+    fabricated result takes, and that is exactly what the gate is watching for.
+    """
+    from eval.runner.runner import _probe_postdates_prune
+
+    pruned_at = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+
+    assert _probe_postdates_prune([], "x=1", pruned_at) is True
+    assert _probe_postdates_prune([{"config": "x=1"}], "x=1", pruned_at) is True

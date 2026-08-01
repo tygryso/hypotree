@@ -1,6 +1,6 @@
 [project]
 name = "hypotree"
-version = "0.3.0"
+version = "0.3.1"
 description = "MCP server: persistent, self-revising hypothesis-DAG for agentic R&D"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -23,7 +23,7 @@ refuted or settled).
 
 ---
 
-#### 17 Tools
+#### 18 Tools
 
 | Tool | Purpose |
 |------|---------|
@@ -44,6 +44,7 @@ refuted or settled).
 | `get_evidence_history` | Evidence trail for a node (newest-first). `{id, kind, success, delta_success, monotonicity, context_hash, git_branch, notes, recorded_at}`. |
 | `get_active_claims` | Live (unconsumed, unexpired) claims with `expires_in_s`. Use to resume interrupted work. |
 | `generate_learning_path` | What has been settled so far, **in order, and how**. Returns a markdown briefing plus structured `steps`, each marked `observed` (an experiment paid for it), `inferred` (the engine derived it for free) or `reversed` (a belief withdrawn or handed back). Carries `probes_spent`, `conclusions` and `conclusions_without_a_probe`. `limit` (default 200) bounds the narrative; the counters always cover the whole history. Call it **first** in a new session — something may already be settled — and to brief a human. |
+| `get_workspace_info` | **Which** belief state you are connected to, and how it was chosen. No arguments. Returns `workspace_id`, `source` (`env` \| `config` \| `remote` \| `path` — which of the four layers below produced it), `detail`, `project_path`, `store_root`, `db_path`, `db_exists`, and `warnings`. Call it when the graph is unexpectedly empty, or when two clients disagree about what has been established: that is almost always one project resolving to two workspaces. A pure read — it never creates the store, so asking cannot itself be what brings a workspace into being. |
 
 ---
 
@@ -306,15 +307,16 @@ record_evidence("node-id", success=0.5)  # claim_id is optional
 11. **Use `get_active_claims`** to resume after a session reset — see what was in-flight.
 12. **`hide_statuses=["PRUNED","VERIFIED"]`** on `render_dag_map` shows only active work.
 13. **Git branch + SHA are auto-captured** on evidence — `context_hash` and `git_branch` populate automatically (best-effort, `None` outside git).
-14. **Persistence is automatic** — SQLite-WAL at `~/.local/share/mcp_hypotree/<hash>/state.db`. Survives restarts, git branch switches.
-15. **5-layer project identity** — The server resolves which project to operate on and its workspace name through 5 layers:
-    - **Layer 1**: `HYPOTREE_WORKSPACE_ID` env var as a **name** (e.g. `my-project`) → used directly as workspace ID (no hashing). Validated: `[a-z0-9._-]`, max 64 chars.
-    - **Layer 2**: `hypotree.yaml` (or `.yml`) config file in the project root with `project: my-project-name` → used directly as workspace ID.
-    - **Layer 3**: `UV_PROJECT_ROOT` env var (set by `uv run --project`) → used as project root for git-remote hashing.
-    - **Layer 4**: Git walk-up from cwd → finds `.git` → git-remote hash (16 hex chars).
-    - **Layer 5**: cwd fallback → path-based hash (weakest, last resort).
-    
-    **For global MCP configs** (Cline, GitHub Copilot): set `HYPOTREE_WORKSPACE_ID=my-project` in the env, or create a `hypotree.yaml` in the repo root. Both bypass cwd issues entirely. Check `~/.local/share/mcp_hypotree/logs.txt` for diagnostic traces.
+14. **Persistence is automatic** — SQLite-WAL at `<data home>/mcp_hypotree/<workspace id>/state.db`, where the data home is `$XDG_DATA_HOME` if set (on every platform, including Windows), else `%LOCALAPPDATA%` on Windows and `~/.local/share` elsewhere. Survives restarts and git branch switches.
+15. **4-layer project identity** — the server resolves which belief state to open through four layers, in order. The first that answers wins:
+    - **Layer 1**: `HYPOTREE_WORKSPACE_ID` env var, used **as a name** (e.g. `my-project`) — no hashing.
+    - **Layer 2**: `workspace_id:` in `hypotree.yaml` (or `.yml`) in the project root — also used as a name.
+    - **Layer 3**: git remote URL, normalised then SHA-256, first 16 hex chars. Stable across clones of the same repo.
+    - **Layer 4**: canonical project path, SHA-256, first 16 hex chars. The weakest layer — it changes if the project moves, is re-cloned elsewhere, or is mounted differently, which silently splits one project into two belief states. `get_workspace_info` warns when you land here.
+
+    Names from layers 1–2 must match `[a-z0-9][a-z0-9._~-]{0,127}` and must not be a Windows reserved device name (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`), at any extension. Rejected on **every** platform, so a name that works on one machine works on all of them. An invalid name falls through to the next layer rather than failing.
+
+    **For global MCP configs** (Cline, GitHub Copilot): set `HYPOTREE_WORKSPACE_ID=my-project` in the env, or commit a `hypotree.yaml` to the repo root. Both bypass cwd issues entirely. To see what actually resolved, call `get_workspace_info` or run `hypotree --info` from a shell; `<data home>/mcp_hypotree/logs.txt` carries the traces.
 
 #### Don't Use hypotree For
 

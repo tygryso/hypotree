@@ -42,6 +42,12 @@ N_SEEDS = len(TASK_SEEDS)
 # rather than a significance claim nobody should believe.
 MIN_CHI2_PER_CONTEXT = 20
 MIN_CHI2_TOTAL = 50
+# Below this expected cell count the asymptotic chi-square stops approximating
+# the statistic's true distribution, and the p-value has to be derived exactly.
+MIN_EXPECTED_CELL = 5.0
+PERMUTATION_RESAMPLES = 20000
+# Fixed so a gate decision is a property of the run, not of when it was read.
+PERMUTATION_SEED = 20260728
 
 
 def _majority_threshold(n: int) -> int:
@@ -560,6 +566,57 @@ def _criterion3_revision(
     )
 
 
+def _permutation_p_value(table: list[list[int]]) -> float:
+    """Exact-by-resampling p-value for an R×2 contingency table.
+
+    Reconstructs the raw (action, context) pairs the table was counted from,
+    shuffles the context labels against the actions, and recounts the χ²
+    statistic each time. Under the null hypothesis the two are independent, so
+    every shuffle is as likely as the arrangement actually observed, and the
+    fraction of shuffles reaching the observed statistic *is* the p-value — with
+    no appeal to a limiting distribution and therefore no minimum cell count.
+
+    Shuffling leaves both margins untouched — the actions never move and the
+    contexts are only reordered — so the expected counts are the same for every
+    draw and are computed once, outside the loop. That also means no resample
+    can empty a row or a column, and the statistic is always defined.
+
+    The observed statistic is recomputed here rather than taken from
+    ``chi2_contingency``: on a 2×2 table SciPy applies Yates' continuity
+    correction and the resamples would not, so a borrowed value would be
+    compared against a differently-defined null distribution.
+
+    Seeded, so a gate decision never changes between two readings of the same
+    run. The +1 in numerator and denominator is the standard correction that
+    stops a finite resample from ever reporting p = 0, which would claim more
+    certainty than the resampling can support.
+    """
+    counts = np.array(table, dtype=np.int64)
+    row_sums = counts.sum(axis=1)
+    col_sums = counts.sum(axis=0)
+    expected = np.outer(row_sums, col_sums) / int(counts.sum())
+
+    def statistic(observed: np.ndarray) -> float:
+        return float((((observed - expected) ** 2) / expected).sum())
+
+    observed_chi2 = statistic(counts)
+    actions = np.repeat(np.arange(len(table)), row_sums)
+    contexts = np.repeat([0, 1], col_sums)
+    masks = [actions == i for i in range(len(table))]
+
+    rng = np.random.default_rng(PERMUTATION_SEED)
+    at_least_as_extreme = 0
+    for _ in range(PERMUTATION_RESAMPLES):
+        shuffled = rng.permutation(contexts)
+        # Only the second column has to be counted: the row totals are fixed, so
+        # the first column is whatever is left over.
+        in_revision = np.array([shuffled[m].sum() for m in masks], dtype=np.int64)
+        resampled = np.column_stack((row_sums - in_revision, in_revision))
+        if statistic(resampled) >= observed_chi2:
+            at_least_as_extreme += 1
+    return (at_least_as_extreme + 1) / (PERMUTATION_RESAMPLES + 1)
+
+
 def _criterion4_status_utility(
     arm_b: dict[str, list[dict[str, Any]]],
 ) -> CriterionResult:
@@ -643,8 +700,22 @@ def _criterion4_status_utility(
     # is reported alongside it.
     v_denominator = observed * min(len(table) - 1, len(table[0]) - 1)
     cramers_v = float(np.sqrt(chi2 / v_denominator))
-    keep = bool(p_value < ALPHA)
     min_expected = float(np.min(expected))
+
+    # The asymptotic chi-square distribution is a large-sample approximation and
+    # stops describing the statistic once an expected cell falls below ~5, which
+    # the rarest actions do as soon as the taxonomy grows. Reporting "keep" from
+    # a p-value the test cannot support would be worse than reporting nothing,
+    # and calling the whole thing underpowered would throw away several hundred
+    # perfectly good observations because two rows are thin. So the p-value is
+    # re-derived by permutation, which assumes nothing about cell counts: shuffle
+    # the context labels against the actions many times and ask how often chance
+    # alone produces a statistic this extreme.
+    p_method = "asymptotic"
+    if min_expected < MIN_EXPECTED_CELL:
+        p_value = _permutation_p_value(table)
+        p_method = "permutation"
+    keep = bool(p_value < ALPHA)
 
     # Turns are not independent draws: they come in runs of tens from the same
     # episode, so the effective sample is nearer the episode count than the turn
@@ -657,10 +728,11 @@ def _criterion4_status_utility(
         f"overstates certainty — read Cramer's V ({cramers_v:.3f}) as the "
         f"honest statement of how much the statuses change behaviour"
     ]
-    if min_expected < 5.0:
+    if min_expected < MIN_EXPECTED_CELL:
         caveats.append(
-            f"smallest expected cell is {min_expected:.1f} (<5), so the "
-            f"asymptotic chi-square approximation is marginal for the sparsest row"
+            f"smallest expected cell is {min_expected:.1f} (<{MIN_EXPECTED_CELL:.0f}), so "
+            f"the asymptotic chi-square does not apply and p was computed by "
+            f"permutation over {PERMUTATION_RESAMPLES} resamples instead"
         )
 
     return CriterionResult(
@@ -674,6 +746,7 @@ def _criterion4_status_utility(
             "dof": int(dof),
             "cramers_v": cramers_v,
             "min_expected_count": min_expected,
+            "p_value_method": p_method,
             "decision": "keep" if keep else "collapse",
             "reason": (
                 "the agent's actions depend on whether anything is under revision — "

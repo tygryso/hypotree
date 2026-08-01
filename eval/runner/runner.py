@@ -22,7 +22,7 @@ import argparse
 import json
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -149,6 +149,24 @@ def _reset_is_safe(
     return not _unrecorded_probes(engine, transcript)
 
 
+def _status_snapshot(engine: Any) -> dict[str, tuple[Any, str]]:
+    """Every node's current status *and* the reason it was last set for.
+
+    Status alone loses whole inferences. Ruling a substitute out after a sub-par
+    swap first retracts its exclusion (EXHAUSTED->UNTESTED) and then re-settles
+    it (UNTESTED->EXHAUSTED) at the same instant, so a before/after comparison
+    of statuses sees no change and the mechanism reports zero forever. The
+    reason is what actually changed, so the reason is what has to be watched.
+
+    Two queries regardless of workspace size: the per-node history accessor in a
+    loop would be one query per node per recorded result.
+    """
+    latest: dict[str, str] = {}
+    for row in engine._store.get_all_status_history():
+        latest[str(row["node_id"])] = str(row["reason"] or "")
+    return {n.id: (n.status, latest.get(n.id, "")) for n in engine._store.get_all_nodes()}
+
+
 def _last_probe_depth(transcript: list[dict[str, Any]] | None, statement: str) -> int:
     """Depth the given configuration was most recently probed at, else 0.
 
@@ -159,6 +177,30 @@ def _last_probe_depth(transcript: list[dict[str, Any]] | None, statement: str) -
         if entry.get("config") == statement:
             return int(entry.get("depth") or 0)
     return 0
+
+
+def _probe_postdates_prune(
+    transcript: list[dict[str, Any]] | None,
+    statement: str,
+    pruned_at: datetime | None,
+) -> bool:
+    """Whether the experiment behind this result was run after the branch died.
+
+    Only then has budget actually been wasted. A result obtained before the
+    prune is a measurement already paid for, and discarding it would be strictly
+    worse than recording it — so it must not be scored as redundant work.
+
+    Unknown timings fail *open* (True): a node pruned with no matching probe in
+    the transcript is the shape a genuine re-execution takes when the agent
+    fabricates a result, and the hard gate exists to catch exactly that.
+    """
+    if pruned_at is None:
+        return True
+    for entry in reversed(transcript or []):
+        if entry.get("config") == statement:
+            probed_at = entry.get("at")
+            return not isinstance(probed_at, datetime) or probed_at > pruned_at
+    return True
 
 
 # -- Arm-agnostic landscape win condition -------------------------------------
@@ -783,6 +825,10 @@ def _execute_tool_inner(
                     "config": raw_config,
                     "depth": args.get("depth", 0),
                     "success": result["success"],
+                    # When the oracle was actually consulted. Needed to tell a
+                    # probe that was wasted on a dead branch from one that was
+                    # merely *reported* after the branch died.
+                    "at": datetime.now(timezone.utc),
                 }
             )
         return json.dumps(result)
@@ -862,15 +908,24 @@ def _execute_tool_inner(
         if not depth and prior is not None:
             depth = _last_probe_depth(transcript, prior.statement)
 
-        # Hard gate signal: recording evidence on an already-pruned (dead) branch
-        # is exactly the redundant work hypotree is supposed to prevent.
-        if prior is not None and prior.status == Status.PRUNED:
+        # Hard gate signal: spending an experiment on a branch that was already
+        # dead. The probe has to post-date the prune for that to be true —
+        # recording a result obtained *before* the branch died is not waste, it
+        # is the only sensible thing to do with a measurement already paid for,
+        # and the batching protocol makes it routine: probe two configs, record
+        # the first, and its cascade can prune the node the second belongs to.
+        # Counting that flipped a GO to an ITERATE on a single event.
+        if (
+            prior is not None
+            and prior.status == Status.PRUNED
+            and _probe_postdates_prune(transcript, prior.statement, prior.pruned_at)
+        ):
             logger.log_pruned_reexecution(node_id)
         old_status = prior.status.value if prior is not None else None
 
         # Snapshot statuses so we can surface the transitions the engine performs
         # internally (cascading prune of descendants + upstream propagation).
-        before = {n.id: n.status for n in engine._store.get_all_nodes()}
+        before = _status_snapshot(engine)
         conflicts_before = {c["id"] for c in engine._store.get_nogoods()}
         resolved_before = {
             c["id"] for c in engine._store.get_nogoods() if c["resolved_at"] is not None
@@ -898,27 +953,28 @@ def _execute_tool_inner(
             ):
                 logger.log_conflict_resolved(conflict["id"], str(conflict["resolved_culprit_id"]))
 
-        for after_node in engine._store.get_all_nodes():
-            prior_status = before.get(after_node.id)
-            if prior_status is not None and prior_status != after_node.status:
-                # A transition on a node other than the evidence target can only
-                # come from propagation (cascading prune / upstream revision).
-                #
-                # The engine's own reason is carried through rather than being
-                # re-derived from the (old, new) pair: several distinct
-                # mechanisms share a transition — UNTESTED->EXHAUSTED is the
-                # exclusion inference, IN_PROGRESS->VERIFIED is either direct
-                # evidence or deduction by elimination — so the pair alone
-                # cannot say which fired, and the analysis was silently
-                # reporting zero for mechanisms that were working.
-                history = engine._store.get_status_history(after_node.id)
-                logger.log_status_transition(
-                    after_node.id,
-                    prior_status.value,
-                    after_node.status.value,
-                    propagated=after_node.id != node_id,
-                    reason=str(history[-1]["reason"]) if history else "",
-                )
+        after = _status_snapshot(engine)
+        for node_id_after, (status_after, reason_after) in after.items():
+            prior_entry = before.get(node_id_after)
+            if prior_entry is None or prior_entry == (status_after, reason_after):
+                continue
+            # A transition on a node other than the evidence target can only
+            # come from propagation (cascading prune / upstream revision).
+            #
+            # The engine's own reason is carried through rather than being
+            # re-derived from the (old, new) pair: several distinct
+            # mechanisms share a transition — UNTESTED->EXHAUSTED is the
+            # exclusion inference, IN_PROGRESS->VERIFIED is either direct
+            # evidence or deduction by elimination — so the pair alone
+            # cannot say which fired, and the analysis was silently
+            # reporting zero for mechanisms that were working.
+            logger.log_status_transition(
+                node_id_after,
+                prior_entry[0].value,
+                status_after.value,
+                propagated=node_id_after != node_id,
+                reason=reason_after,
+            )
 
         logger.log_evidence_recorded(
             node_id,

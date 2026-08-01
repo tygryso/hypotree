@@ -780,3 +780,45 @@ def test_criterion4_never_flips_the_gate_on_its_own() -> None:
 
     for log in ({}, _action_log({("NO_OP", "open"): 3})):
         assert _criterion4_status_utility(log).passed is True
+
+
+@pytest.mark.integration
+def test_permutation_p_value_finds_no_signal_in_an_independent_table() -> None:
+    """Identical row profiles mean the context explains nothing.
+
+    Every row here splits the same way, so the observed arrangement is exactly
+    what independence predicts and no shuffle can look less extreme. The
+    p-value must land near 1, not near 0.
+    """
+    from eval.analyse_gate import _permutation_p_value
+
+    assert _permutation_p_value([[20, 20], [10, 10], [3, 3]]) > 0.5
+
+
+@pytest.mark.integration
+def test_permutation_p_value_detects_a_real_dependence() -> None:
+    """A perfectly separated table is not something shuffling reproduces."""
+    from eval.analyse_gate import _permutation_p_value
+
+    assert _permutation_p_value([[40, 0], [0, 40], [2, 2]]) < 0.01
+
+
+@pytest.mark.integration
+def test_permutation_p_value_never_reports_impossible_certainty() -> None:
+    """A finite resample cannot justify p = 0, so the estimator must not emit it."""
+    from eval.analyse_gate import PERMUTATION_RESAMPLES, _permutation_p_value
+
+    # Perfect separation: no shuffle reproduces it, so this is the floor case.
+    p = _permutation_p_value([[400, 0], [0, 400]])
+
+    assert p == pytest.approx(1 / (PERMUTATION_RESAMPLES + 1))
+
+
+@pytest.mark.integration
+def test_permutation_p_value_is_reproducible() -> None:
+    """A gate decision is a property of the run, not of when it was read."""
+    from eval.analyse_gate import _permutation_p_value
+
+    table = [[18, 9], [7, 14], [2, 3]]
+
+    assert _permutation_p_value(table) == _permutation_p_value(table)

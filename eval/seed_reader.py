@@ -385,7 +385,10 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
             if new in _REVISION_STATUSES:
                 log.revision_transitions += 1
                 log.revision_fired = True
-            if new == "EXHAUSTED" and reason.startswith(_EXCLUDE_REASON):
+            # A re-attribution leaves the node EXHAUSTED and only rewrites which
+            # confirmation is responsible. Requiring a real status change keeps
+            # that from being counted as a second exclusion.
+            if new == "EXHAUSTED" and old != new and reason.startswith(_EXCLUDE_REASON):
                 log.exclusions_applied += 1
             if new == "EXHAUSTED" and reason.startswith(_SUBSTITUTE_OUT_REASON):
                 log.substitutes_ruled_out += 1
