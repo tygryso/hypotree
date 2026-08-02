@@ -2129,3 +2129,256 @@ def test_a_result_with_no_experiment_behind_it_counts_as_re_execution() -> None:
 
     assert _probe_postdates_prune([], "x=1", pruned_at) is True
     assert _probe_postdates_prune([{"config": "x=1"}], "x=1", pruned_at) is True
+
+
+@pytest.mark.integration
+def test_double_encoded_hypotheses_are_parsed_not_rejected(tmp_path: Path) -> None:
+    """A model that quotes its JSON argument should not lose a turn over it.
+
+    Two of thirty episodes in run G opened `create_hypotheses` with the list
+    carried as a *string*. The shape is unambiguous, and at ~13.6k prompt tokens
+    a bounced turn is the most expensive possible way to say "add brackets".
+    """
+    log_path = tmp_path / "coerce.jsonl"
+    logger = RunLogger(log_path, seed=1001, arm=ARM_B)
+    config = _bare_config(tmp_path, log_path)
+    engine = HypoTreeEngine(":memory:", rng_seed=1)
+
+    _execute_tool(
+        "create_hypotheses",
+        {"hypotheses": '[{"statement": "component=v0", "node_id": "comp_v0"}]'},
+        engine,
+        [],
+        config,
+        logger,
+    )
+
+    assert engine._store.get_node("comp_v0") is not None
+    engine.close()
+
+
+@pytest.mark.integration
+def test_an_unparseable_hypotheses_argument_still_names_the_shape(tmp_path: Path) -> None:
+    """Coercion must not swallow genuine garbage into a confusing failure."""
+    log_path = tmp_path / "bad.jsonl"
+    logger = RunLogger(log_path, seed=1001, arm=ARM_B)
+    config = _bare_config(tmp_path, log_path)
+    engine = HypoTreeEngine(":memory:", rng_seed=1)
+
+    result = _execute_tool(
+        "create_hypotheses", {"hypotheses": "not json at all"}, engine, [], config, logger
+    )
+
+    assert "must be a list of objects" in result
+    engine.close()
+
+
+@pytest.mark.integration
+def test_a_win_lets_the_agent_file_what_it_is_still_holding(tmp_path: Path) -> None:
+    """The environment decides the win mid-protocol; the record has to land.
+
+    The agent probes and reports in separate turns, so at the instant a probe
+    clears the target it is holding an unreported result. Ending the episode
+    there left the belief state inconsistent at exactly the moment it is
+    measured: on the seeds where the swap that names a culprit is also the
+    winning combination, the engine resolved the conflict and the scoreboard
+    recorded it as unresolved. `step` is frozen, so the wind-down cannot move
+    the headline metric.
+    """
+    from unittest.mock import patch
+
+    from eval.runner.runner import _load_win_criteria
+
+    eval_dir = _setup_eval_env(tmp_path, seed=1001)
+    config = make_run_config(ARM_B, 1001, eval_dir, "test-run", llm_backend="openai")
+    config = config.__class__(**{**config.__dict__, "tool_budget": 60, "session_breakpoints": ()})
+
+    import os
+
+    os.environ["XDG_DATA_HOME"] = str(tmp_path / "xdg")
+
+    criteria = _load_win_criteria(config.landscape_path)
+    winning_config = criteria["goal_config"]
+    win_depth = criteria["min_confirm_depth"]
+
+    def _call(name: str, args: dict) -> dict:
+        return {
+            "id": f"call_{name}",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }
+
+    # Turn 1 creates a node and claims it; turn 2 probes the winning config
+    # (which wins while the result is unreported); turn 3 is the wind-down, in
+    # which the agent finally files it.
+    turns = [
+        [
+            _call(
+                "create_hypotheses",
+                {"hypotheses": [{"statement": winning_config, "node_id": "win"}]},
+            ),
+            _call("get_next_targets", {"count": 1}),
+        ],
+        [_call("evaluate_config", {"config": winning_config, "depth": win_depth})],
+        [
+            _call(
+                "record_evidence",
+                {"node_id": "win", "success": 0.95, "depth": win_depth},
+            )
+        ],
+    ]
+    issued: list[int] = []
+
+    def fake_api(*_args: object, **_kwargs: object) -> dict:
+        index = min(len(issued), len(turns) - 1)
+        issued.append(index)
+        return {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": "", "tool_calls": turns[index]},
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {},
+        }
+
+    with (
+        patch("eval.runner.runner._call_openai_api", side_effect=fake_api),
+        patch("eval.runner.runner.landscape_probe", return_value={"success": 0.95, "metrics": {}}),
+    ):
+        result = run(config)
+
+    assert result["goals_met"] is True
+    # The win landed on the first (and only) probe, and the wind-down turn ran no
+    # experiment, so the headline metric is untouched.
+    assert result["steps_to_target"] == 1
+
+    events = [json.loads(line) for line in config.log_path.read_text().strip().split("\n")]
+    recorded = [e for e in events if e["event_type"] == "evidence_recorded"]
+    assert [e["node_id"] for e in recorded] == ["win"]
+
+
+@pytest.mark.integration
+def test_the_wind_down_is_bounded(tmp_path: Path) -> None:
+    """An agent that will not file its results cannot hold the episode open."""
+    from unittest.mock import patch
+
+    from eval.runner.runner import MAX_WINDDOWN_TURNS, _load_win_criteria
+
+    eval_dir = _setup_eval_env(tmp_path, seed=1001)
+    config = make_run_config(ARM_B, 1001, eval_dir, "test-run", llm_backend="openai")
+    config = config.__class__(**{**config.__dict__, "tool_budget": 60, "session_breakpoints": ()})
+
+    import os
+
+    os.environ["XDG_DATA_HOME"] = str(tmp_path / "xdg")
+
+    criteria = _load_win_criteria(config.landscape_path)
+    calls = 0
+
+    def fake_api(*_args: object, **_kwargs: object) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            tool_calls = [
+                {
+                    "id": "c1",
+                    "function": {
+                        "name": "create_hypotheses",
+                        "arguments": json.dumps(
+                            {"hypotheses": [{"statement": "x", "node_id": "n1"}]}
+                        ),
+                    },
+                },
+                {
+                    "id": "c2",
+                    "function": {
+                        "name": "get_next_targets",
+                        "arguments": json.dumps({"count": 1}),
+                    },
+                },
+            ]
+        else:
+            # Never records; just keeps probing. Every probe after the win is
+            # refused, so `step` stays put and only the wind-down bound ends it.
+            tool_calls = [
+                {
+                    "id": f"c{calls}",
+                    "function": {
+                        "name": "evaluate_config",
+                        "arguments": json.dumps(
+                            {
+                                "config": criteria["goal_config"],
+                                "depth": criteria["min_confirm_depth"],
+                            }
+                        ),
+                    },
+                }
+            ]
+        return {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": "", "tool_calls": tool_calls},
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {},
+        }
+
+    with (
+        patch("eval.runner.runner._call_openai_api", side_effect=fake_api),
+        patch("eval.runner.runner.landscape_probe", return_value={"success": 0.95, "metrics": {}}),
+    ):
+        result = run(config)
+
+    assert result["goals_met"] is True
+    assert result["steps_to_target"] == 1
+    # One setup turn, the winning turn, and at most MAX_WINDDOWN_TURNS more.
+    assert calls <= 2 + MAX_WINDDOWN_TURNS
+
+
+@pytest.mark.integration
+def test_a_batch_of_results_is_reported_in_one_call(tmp_path: Path) -> None:
+    """Reporting k results in one turn is the whole point of the batch shape."""
+    eval_dir = _setup_eval_env(tmp_path, seed=1001)
+    config = make_run_config(ARM_B, 1001, eval_dir, "test-run", llm_backend="mock")
+
+    import os
+
+    os.environ["XDG_DATA_HOME"] = str(tmp_path / "xdg")
+
+    engine = HypoTreeEngine(tmp_path / "batch.db", rng_seed=1)
+    logger = RunLogger(tmp_path / "batch.jsonl", seed=1001, arm=ARM_B)
+    try:
+        engine.create_hypotheses(
+            [
+                {"statement": "a=1", "node_id": "n1"},
+                {"statement": "b=1", "node_id": "n2"},
+            ]
+        )
+        out = _execute_tool(
+            "record_evidence",
+            {
+                "results": [
+                    {"node_id": "n1", "success": 1.0, "depth": 1},
+                    {"node_id": "n2", "success": 0.0, "depth": 1},
+                ],
+                "count_next_targets": 0,
+            },
+            engine,
+            [],
+            config,
+            logger,
+            [],
+        )
+    finally:
+        engine.close()
+
+    payload = json.loads(out)
+    assert [p["id"] for p in payload["recorded"]] == ["n1", "n2"]
+
+    lines = (tmp_path / "batch.jsonl").read_text().strip().split("\n")
+    events = [json.loads(line) for line in lines]
+    recorded = [e for e in events if e["event_type"] == "evidence_recorded"]
+    # Both results are instrumented individually, so a batch is analysed exactly
+    # as a sequence of single calls would be.
+    assert [e["node_id"] for e in recorded] == ["n1", "n2"]

@@ -9,7 +9,7 @@ table is an audit/replay log written in the same transaction as state mutations.
 its comment for the rules a new entry has to satisfy.
 """
 
-SCHEMA_VERSION = "9"
+SCHEMA_VERSION = "10"
 
 SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -137,11 +137,21 @@ CREATE TABLE IF NOT EXISTS nogoods (
     -- depth are exonerated: their evidence already covers the context in which
     -- the failure occurred, so they cannot be what the failure revealed.
     conflict_depth      INTEGER NOT NULL DEFAULT 0,
-    -- How far the substitution diagnosis has progressed: members are stored
-    -- sorted, and everything before this index has been cleared by swapping it
-    -- out and watching the composition fail anyway. Persisted because the
-    -- diagnosis spans many turns and must survive a context reset; restarting it
-    -- would re-run experiments whose answers are already in.
+    -- Which members the substitution diagnosis has actually cleared: a JSON
+    -- array of node ids, each swapped out of the composition with the failure
+    -- persisting anyway. Persisted because the diagnosis spans many turns and
+    -- must survive a context reset; restarting it would re-run experiments whose
+    -- answers are already in.
+    --
+    -- A *set* rather than the integer cursor it replaces. A cursor can only say
+    -- "the first k were dealt with", which conflates cleared with skipped: a
+    -- member the plan had to pass over because no substitute was available was
+    -- left behind the cursor and reported as cleared when it had never been
+    -- tested, and could never be revisited once a substitute freed up. A set
+    -- records exactly what was established and nothing more.
+    cleared_ids         TEXT,
+    -- Deprecated in 0.4.0, removed in 0.5.0: kept in step with `cleared_ids` so
+    -- a reader written against the old shape still sees a truthful count.
     probe_index         INTEGER NOT NULL DEFAULT 0,
     resolved_culprit_id TEXT,            -- set once narrowing identifies the culprit
     -- Set when the conflict has been shown to be a genuine interaction effect —
@@ -177,6 +187,11 @@ CREATE INDEX IF NOT EXISTS idx_nogoods_open ON nogoods(resolved_at);
 #     needs a far stronger justification than a new field.
 #   * Chained, not jumped. 7→9 runs 7→8 then 8→9, so every step is exercised by
 #     every longer path instead of accumulating untested direct routes.
+#   * Back-fill lazily where the old column is still readable. 9→10 adds
+#     `nogoods.cleared_ids` and leaves it NULL; the store derives the set from
+#     `probe_index` on read, so an in-flight diagnosis keeps its progress without
+#     the migration having to interpret JSON in SQL.
 MIGRATIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "8": ("9", ("ALTER TABLE evidence ADD COLUMN source_ref TEXT",)),
+    "9": ("10", ("ALTER TABLE nogoods ADD COLUMN cleared_ids TEXT",)),
 }

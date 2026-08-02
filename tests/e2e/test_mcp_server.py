@@ -345,6 +345,72 @@ def test_record_evidence_can_fuse_the_next_dispatch(tmp_path: Path) -> None:
 
 
 @pytest.mark.e2e
+def test_record_evidence_reports_a_whole_batch_in_one_call(tmp_path: Path) -> None:
+    """The tool surface has to expose the batch shape, not just the engine."""
+    from hypotree.engine import HypoTreeEngine
+    from hypotree.mcp_server import _dispatch
+
+    engine = HypoTreeEngine(tmp_path / "batch.db", rng_seed=7)
+    try:
+        _dispatch(
+            engine,
+            "create_hypotheses",
+            {
+                "hypotheses": [
+                    {"statement": "a", "node_id": "n1"},
+                    {"statement": "b", "node_id": "n2"},
+                    {"statement": "c", "node_id": "n3"},
+                ]
+            },
+        )
+        result = _dispatch(
+            engine,
+            "record_evidence",
+            {
+                "results": [
+                    {"node_id": "n1", "success": 1.0, "depth": 1},
+                    {"node_id": "ghost", "success": 1.0},
+                    {"node_id": "n2", "success": 0.0},
+                ],
+                "count_next_targets": 1,
+            },
+        )
+        assert [r["node"]["id"] for r in result["recorded"]] == ["n1", "n2"]
+        # One bad entry does not cost the two results that were paid for.
+        assert [f["node_id"] for f in result["failed"]] == ["ghost"]
+        # The top-up runs once, after the whole batch.
+        assert len(result["next_targets"]) == 1
+    finally:
+        engine.close()
+
+
+@pytest.mark.e2e
+def test_source_ref_survives_the_tool_boundary(tmp_path: Path) -> None:
+    """It was advertised on the tool for a release while the dispatch dropped it.
+
+    An audit trail that says "0.85, from pytest run #4412" is the whole point of
+    the field; one that says "0.85" is what shipped.
+    """
+    from hypotree.engine import HypoTreeEngine
+    from hypotree.mcp_server import _dispatch
+
+    engine = HypoTreeEngine(tmp_path / "ref.db", rng_seed=7)
+    try:
+        _dispatch(
+            engine, "create_hypotheses", {"hypotheses": [{"statement": "a", "node_id": "n1"}]}
+        )
+        _dispatch(
+            engine,
+            "record_evidence",
+            {"node_id": "n1", "success": 1.0, "source_ref": "pytest run #4412"},
+        )
+        history = _dispatch(engine, "get_evidence_history", {"node_id": "n1"})
+        assert history[0]["source_ref"] == "pytest run #4412"
+    finally:
+        engine.close()
+
+
+@pytest.mark.e2e
 def test_a_lease_can_be_renewed_and_handed_back(tmp_path: Path) -> None:
     """Neither is reachable any other way, and both are needed off the agent loop.
 

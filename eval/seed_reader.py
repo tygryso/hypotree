@@ -1076,6 +1076,14 @@ def _section_stratified(logs: list[RunLog]) -> list[str]:
             "those members retired. Both endings must occur — a run where neither does "
             "means the recovery never completed and the agent searched blind instead.",
             "",
+            "A conflict left unresolved on a seed that *won* is worth a look before it is "
+            "read as a failure. The swap that names the culprit is often the winning "
+            "combination itself, so the episode used to end on the environment's verdict "
+            "before the agent could file the record that resolves it — the engine was "
+            "right and this counter could not see it. The wind-down turns added in 0.4.0 "
+            "close that window; an unresolved conflict on a winning seed now means the "
+            "agent did not report within them.",
+            "",
         ]
     return out
 
@@ -1134,11 +1142,17 @@ def _section_cost(logs: list[RunLog]) -> list[str]:
         prompt = sum(log.prompt_tokens for log in done)
         completion = sum(log.completion_tokens for log in done)
         steps = sum(log.steps for log in done) or 1
+        # Results reported per record call. 1.0 means every result cost its own
+        # turn, which is the floor the batch shape exists to break; the ceiling
+        # is the dispatch batch size.
+        record_calls = sum(log.tool_histogram.get("record_evidence", 0) for log in done)
+        results = sum(log.evidence_records for log in done)
         rows.append(
             [
                 arm,
                 f"{calls / len(done):.1f}",
                 f"{calls / steps:.2f}",
+                f"{results / record_calls:.2f}" if record_calls else "–",
                 f"{seconds / calls:.1f}s",
                 f"{seconds / len(done) / 60:.1f}m",
                 f"{prompt / calls:.0f}" if prompt else "–",
@@ -1159,11 +1173,17 @@ def _section_cost(logs: list[RunLog]) -> list[str]:
         "record→dispatch fusion is on: a fused loop should approach the baseline's "
         "turns/step without giving up any of the step reduction.",
         "",
+        "`results/record call` is what batch recording buys. At 1.00 every result cost "
+        "its own turn, which is the two-turns-per-experiment floor the fusion alone "
+        "cannot break; the ceiling is the dispatch batch size. If turns/step has not "
+        "fallen, check this first — the agent may simply not be using the batch shape.",
+        "",
         *_table(
             [
                 "arm",
                 "turns/episode",
                 "turns/step",
+                "results/record call",
                 "mean latency",
                 "wall/episode",
                 "prompt tok/turn",

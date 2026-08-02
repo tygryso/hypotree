@@ -4,8 +4,8 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg)](CHANGELOG.md)
-[![Tests: 641](https://img.shields.io/badge/tests-641-brightgreen.svg)](tests/)
-[![Version: 0.3.2](https://img.shields.io/badge/version-0.3.2-blue.svg)](pyproject.toml)
+[![Tests: 662](https://img.shields.io/badge/tests-662-brightgreen.svg)](tests/)
+[![Version: 0.4.0](https://img.shields.io/badge/version-0.4.0-blue.svg)](pyproject.toml)
 [![PyPI](https://img.shields.io/pypi/v/hypotree.svg)](https://pypi.org/project/hypotree/)
 
 A persistent, self-revising **hypothesis DAG** for agentic R&D — exposed as an [MCP server](https://modelcontextprotocol.io/).
@@ -96,13 +96,14 @@ create_hypotheses(hypotheses=[
 ### 3. Record evidence and let the engine infer
 
 ```python
-# Probe catalyst_A → fails outright
-record_evidence(node_id="catalyst_A", success=0.0)
-# Engine: catalyst_A → INVALIDATED; anything depending on it → PRUNED
-
-# Probe catalyst_B → fails outright
-record_evidence(node_id="catalyst_B", success=0.0)
-# Engine: catalyst_C → VERIFIED by elimination — no probe spent
+# Probe catalyst_A → fails outright, catalyst_B → fails outright.
+# Two experiments, one call:
+record_evidence(results=[
+    {"node_id": "catalyst_A", "success": 0.0},
+    {"node_id": "catalyst_B", "success": 0.0},
+])
+# Engine: catalyst_A, catalyst_B → INVALIDATED; anything depending on them → PRUNED
+#         catalyst_C → VERIFIED by elimination — no probe spent
 ```
 
 ### 4. Ask what you learned
@@ -121,7 +122,7 @@ generate_learning_path()
 |------|-------------|
 | `create_hypotheses` | Create one or many nodes with `parent_ids`, `exclusion_group`, `is_goal` |
 | `get_next_targets` | Thompson Sampling — returns the next hypothesis to test, under a lease |
-| `record_evidence` | Record experiment results; triggers write-back propagation |
+| `record_evidence` | Record one result — or every result from a turn at once with `results=[…]` — and trigger write-back propagation |
 | `generate_learning_path` | What we learned, in order, and what it cost — separates conclusions an experiment paid for from ones the engine inferred free |
 | `get_workspace_info` | Which belief state you are connected to and which layer chose it — start here when the graph is unexpectedly empty |
 | `update_status` | Manually set node status (rarely needed — the engine does it) |
@@ -191,7 +192,8 @@ belief state in hypotree rather than in the conversation.
   retires the rest without testing them — this is where most of the saving is.
 - Ask `get_next_targets` for work and record every result you were handed. A
   target is leased to you; anything you hold and never report is work nobody
-  can do.
+  can do. Probed several things in one turn? Report them in one call with
+  `record_evidence(results=[...])`.
 - Record against the node whose statement you actually tested. A composition's
   failure filed against a premise destroys a confirmation that is still true.
 - When `get_next_targets` returns DONE, read the reason. Only `all_goals_met`
@@ -223,7 +225,7 @@ belief state in hypotree rather than in the conversation.
 └─────────────┼───────────────────────────┘
               │
 ┌─────────────▼───────────────────────────┐
-│   SQLite-WAL (Schema v9, 9 tables)      │
+│   SQLite-WAL (Schema v10, 9 tables)      │
 │   • Bi-temporal history                 │
 │   • Belief state + evidence + conflicts │
 │   • Keyed by workspace_id               │

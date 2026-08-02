@@ -6,8 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from hypotree.engine import CycleError, HypoTreeEngine, NodeNotFoundError
-from hypotree.models.status import Status
+from hypotree.engine import (
+    CycleError,
+    EvidenceReport,
+    HypoTreeEngine,
+    NodeNotFoundError,
+)
+from hypotree.models.evidence import LogicalEvidence
+from hypotree.models.status import Status, utcnow
 
 
 @pytest.fixture
@@ -243,3 +249,150 @@ def test_create_then_bulk_verify(engine: HypoTreeEngine) -> None:
     assert "g1" in table
     assert "s1" in table
     assert "s2" in table
+
+
+# -- record_results ---------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_record_many_results_in_one_call(engine: HypoTreeEngine) -> None:
+    """The whole point: k experiments reported in one turn instead of k."""
+    engine.create_hypotheses(
+        [
+            {"statement": "a", "node_id": "n1"},
+            {"statement": "b", "node_id": "n2"},
+            {"statement": "c", "node_id": "n3"},
+        ]
+    )
+
+    batch = engine.record_results(
+        [
+            EvidenceReport(node_id="n1", evidence=LogicalEvidence(success=1.0)),
+            EvidenceReport(node_id="n2", evidence=LogicalEvidence(success=0.0)),
+            EvidenceReport(node_id="n3", evidence=LogicalEvidence(success=0.5)),
+        ]
+    )
+
+    assert [r.node.id for r in batch.recorded] == ["n1", "n2", "n3"]
+    assert batch.failed == []
+    assert engine._store.get_node("n1").status == Status.VERIFIED
+    assert engine._store.get_node("n2").status == Status.INVALIDATED
+
+
+@pytest.mark.unit
+def test_one_bad_report_does_not_destroy_the_rest(engine: HypoTreeEngine) -> None:
+    """Every result was paid for by an experiment that already ran.
+
+    Aborting the batch on a typo throws away k-1 measurements to punish one, and
+    a rerun of a real experiment is not free. The refusal is returned instead,
+    named and explained.
+    """
+    engine.create_hypotheses(
+        [
+            {"statement": "a", "node_id": "n1"},
+            {"statement": "goal", "node_id": "g1", "is_goal": True, "target_metric": 0.8},
+        ]
+    )
+
+    batch = engine.record_results(
+        [
+            EvidenceReport(node_id="ghost", evidence=LogicalEvidence(success=1.0)),
+            EvidenceReport(node_id="g1", evidence=LogicalEvidence(success=1.0)),
+            EvidenceReport(node_id="n1", evidence=LogicalEvidence(success=1.0)),
+        ]
+    )
+
+    assert [r.node.id for r in batch.recorded] == ["n1"]
+    assert [f.node_id for f in batch.failed] == ["ghost", "g1"]
+    assert "not found" in batch.failed[0].error.lower()
+    assert "goal" in batch.failed[1].error.lower()
+    assert engine._store.get_node("n1").status == Status.VERIFIED
+
+
+@pytest.mark.unit
+def test_a_batch_applies_in_order_so_a_cascade_lands(engine: HypoTreeEngine) -> None:
+    """One refutation can prune the node a later report belongs to.
+
+    The belief state has to end where it would have ended had the results
+    arrived one at a time, so each report is applied in full before the next is
+    read.
+    """
+    engine.create_hypotheses(
+        [
+            {"statement": "premise", "node_id": "p1"},
+            {"statement": "rests on p1", "node_id": "c1", "parent_ids": ["p1"]},
+        ]
+    )
+
+    batch = engine.record_results(
+        [
+            EvidenceReport(node_id="p1", evidence=LogicalEvidence(success=0.0)),
+            EvidenceReport(node_id="c1", evidence=LogicalEvidence(success=0.9)),
+        ]
+    )
+
+    assert len(batch.recorded) == 2
+    assert engine._store.get_node("p1").status == Status.INVALIDATED
+    # c1 was pruned by p1's cascade before its own result was read; recording it
+    # is still the right thing to do with a measurement already paid for.
+    assert engine._store.get_node("c1").status == Status.PRUNED
+
+
+@pytest.mark.unit
+def test_the_fused_dispatch_is_a_top_up_not_a_per_result_addition(
+    engine: HypoTreeEngine,
+) -> None:
+    """Handing out work faster than it is reported is the waste the fusion removes."""
+    engine.create_hypotheses([{"statement": f"h{i}", "node_id": f"n{i}"} for i in range(6)])
+
+    batch = engine.record_results(
+        [
+            EvidenceReport(node_id="n0", evidence=LogicalEvidence(success=1.0)),
+            EvidenceReport(node_id="n1", evidence=LogicalEvidence(success=1.0)),
+            EvidenceReport(node_id="n2", evidence=LogicalEvidence(success=1.0)),
+        ],
+        count_next_targets=2,
+    )
+
+    assert len(batch.next_targets) == 2
+    assert len(engine._store.get_active_claims(utcnow())) == 2
+
+
+@pytest.mark.unit
+def test_a_negative_top_up_is_refused(engine: HypoTreeEngine) -> None:
+    with pytest.raises(ValueError, match="count_next_targets must be >= 0"):
+        engine.record_results([], count_next_targets=-1)
+
+
+@pytest.mark.unit
+def test_recording_one_result_still_raises_rather_than_reporting(
+    engine: HypoTreeEngine,
+) -> None:
+    """With no rest-of-the-batch to protect, a caller wants the failure in its face."""
+    with pytest.raises(NodeNotFoundError):
+        engine.record_evidence("ghost", LogicalEvidence(success=1.0))
+
+
+@pytest.mark.unit
+def test_a_success_does_not_resurrect_a_pruned_branch(engine: HypoTreeEngine) -> None:
+    """A pruned node's status states something about its ancestry, not itself.
+
+    Flipping it to VERIFIED left the belief state asserting both that the branch
+    is dead and that it holds. The measurement is kept either way, so nothing is
+    lost if the prune is later retracted.
+    """
+    engine.create_hypotheses(
+        [
+            {"statement": "premise", "node_id": "p1"},
+            {"statement": "rests on p1", "node_id": "c1", "parent_ids": ["p1"]},
+        ]
+    )
+    engine.record_evidence("p1", LogicalEvidence(success=0.0))
+    assert engine._store.get_node("c1").status == Status.PRUNED
+
+    engine.record_evidence("c1", LogicalEvidence(success=1.0))
+
+    node = engine._store.get_node("c1")
+    assert node.status == Status.PRUNED
+    assert node.evidence_count == 1
+    assert node.alpha > 1.0

@@ -19,6 +19,7 @@ scratchpad tool; Arm B gets the full hypotree engine tool surface.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import time
 import urllib.request
@@ -55,6 +56,19 @@ MAX_RESET_DEFERRAL = 3
 # experiments keeps the harness in an unbounded loop, which on an unattended
 # multi-hour gate run means one stuck seed blocks every seed after it.
 MAX_IDLE_TURNS = 12
+
+# Turns granted after a win so the agent can file results it already holds.
+#
+# The environment decides the win the moment a probe clears the target, but the
+# agent is mid-protocol when that happens: it has run an experiment and not yet
+# reported it. Cutting the episode there left the belief state inconsistent at
+# the exact moment it is measured — and on the seeds where the swap that
+# identifies a culprit *is* the winning combination, the conflict was resolved
+# by the engine and scored as unresolved, because the record that proves it was
+# never allowed to land. Two turns is enough to report a batch; the step counter
+# is frozen and further experiments are refused, so this cannot flatter the
+# headline metric.
+MAX_WINDDOWN_TURNS = 2
 
 # DONE reasons that are instructions rather than endings. The navigator returns
 # a DONE sentinel whenever it has nothing to hand out, but "nothing to hand out"
@@ -446,15 +460,36 @@ def _tool_record_evidence() -> dict[str, Any]:
         "function": {
             "name": "record_evidence",
             "description": (
-                "Record evidence for a hypothesis (consumes the claim_id when one is "
-                "given). Updates posterior + transitions. Record against the hypothesis "
-                "whose statement you actually probed. Leave count_next_targets at its "
-                "default so your next targets come back with the result — that is one "
-                "round-trip instead of two, on the call you make most often."
+                "Record one result, or every result from this turn at once. Updates "
+                "posterior + transitions and consumes the claim_id when one is given. "
+                "Record against the hypothesis whose statement you actually probed. "
+                "Probed several configurations this turn? Pass them together in "
+                "`results` — one call instead of one per probe. Leave "
+                "count_next_targets at its default so your next targets come back with "
+                "the result, which is one round-trip instead of two."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "results": {
+                        "type": "array",
+                        "description": (
+                            "Several results at once, applied in the order given. Use "
+                            "this whenever you ran more than one experiment this turn. "
+                            "When present, the single-result fields below are ignored."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "node_id": {"type": "string"},
+                                "success": {"type": "number"},
+                                "depth": {"type": "integer", "default": 0},
+                                "claim_id": {"type": "string"},
+                                "notes": {"type": "string", "default": ""},
+                            },
+                            "required": ["node_id", "success"],
+                        },
+                    },
                     "node_id": {"type": "string"},
                     "success": {
                         "type": "number",
@@ -491,7 +526,7 @@ def _tool_record_evidence() -> dict[str, Any]:
                     },
                     "notes": {"type": "string", "default": ""},
                 },
-                "required": ["node_id", "success"],
+                "required": [],
             },
         },
     }
@@ -624,9 +659,16 @@ def _dispatch_stop_reason(result_str: str) -> str | None:
         payload = json.loads(result_str)
     except (json.JSONDecodeError, TypeError):
         return None
-    # A bare list is a dispatch call; a dict is a record, which carries the
-    # fused dispatch under next_targets when one was asked for.
-    batch = payload if isinstance(payload, list) else payload.get("next_targets")
+    # A bare list is a dispatch call. A dict is a record: a single result carries
+    # the fused dispatch under next_targets, a batch wraps the per-result
+    # payloads under `recorded` and the dispatch rides on the last of them,
+    # because the top-up runs once after the whole batch has landed.
+    if isinstance(payload, list):
+        batch = payload
+    elif isinstance(payload.get("recorded"), list) and payload["recorded"]:
+        batch = payload["recorded"][-1].get("next_targets")
+    else:
+        batch = payload.get("next_targets")
     if not isinstance(batch, list) or not batch or not isinstance(batch[0], dict):
         return None
     if batch[0].get("status") != "DONE":
@@ -726,6 +768,118 @@ def _log_targets(engine: HypoTreeEngine, logger: RunLogger, targets: list[Target
             exclusion_group=node.exclusion_group if node else None,
             reason=target.reason or None,
         )
+
+
+def _record_one_result(
+    item: dict[str, Any],
+    engine: HypoTreeEngine,
+    logger: RunLogger,
+    transcript: list[dict[str, Any]] | None,
+    *,
+    count_next: int,
+) -> dict[str, Any]:
+    """Record one result and log every side effect it caused.
+
+    Split out of the tool handler so a batch of results is instrumented exactly
+    as a sequence of single calls would be: the belief-revision events a result
+    triggers are attributed to that result, not to whichever one happened to be
+    last in the batch.
+    """
+    node_id = item["node_id"]
+    success = item["success"]
+    claim_id = item.get("claim_id")
+    notes = item.get("notes", "")
+    prior = engine._store.get_node(node_id)
+    # Depth of the test that produced this result. The agent may state it;
+    # if it does not, inherit the depth its own configuration was last
+    # probed at. The harness already saw that number, and making the agent
+    # restate it turns bookkeeping into a reasoning step it can silently get
+    # wrong — a wrong depth quietly disables the depth-aware blame machinery.
+    depth = int(item.get("depth") or 0)
+    if not depth and prior is not None:
+        depth = _last_probe_depth(transcript, prior.statement)
+
+    # Hard gate signal: spending an experiment on a branch that was already
+    # dead. The probe has to post-date the prune for that to be true —
+    # recording a result obtained *before* the branch died is not waste, it
+    # is the only sensible thing to do with a measurement already paid for,
+    # and the batching protocol makes it routine: probe two configs, record
+    # the first, and its cascade can prune the node the second belongs to.
+    # Counting that flipped a GO to an ITERATE on a single event.
+    if (
+        prior is not None
+        and prior.status == Status.PRUNED
+        and _probe_postdates_prune(transcript, prior.statement, prior.pruned_at)
+    ):
+        logger.log_pruned_reexecution(node_id)
+    old_status = prior.status.value if prior is not None else None
+
+    # Snapshot statuses so we can surface the transitions the engine performs
+    # internally (cascading prune of descendants + upstream propagation).
+    before = _status_snapshot(engine)
+    conflicts_before = {c["id"] for c in engine._store.get_nogoods()}
+    resolved_before = {c["id"] for c in engine._store.get_nogoods() if c["resolved_at"] is not None}
+
+    evidence = LogicalEvidence(success=success, depth=depth, notes=notes)
+    outcome = engine.record_evidence(
+        node_id, evidence, claim_id=claim_id, count_next_targets=count_next
+    )
+    node = outcome.node
+
+    # Conflicts recorded / narrowed by this observation. These are the
+    # belief-revision events that a per-node status simply cannot express.
+    for conflict in engine._store.get_nogoods():
+        if conflict["id"] not in conflicts_before:
+            logger.log_conflict_recorded(conflict["source_node_id"], conflict["member_ids"])
+        if (
+            conflict["resolved_at"] is not None
+            and conflict["id"] not in resolved_before
+            and conflict["resolved_culprit_id"]
+        ):
+            logger.log_conflict_resolved(conflict["id"], str(conflict["resolved_culprit_id"]))
+
+    after = _status_snapshot(engine)
+    for node_id_after, (status_after, reason_after) in after.items():
+        prior_entry = before.get(node_id_after)
+        if prior_entry is None or prior_entry == (status_after, reason_after):
+            continue
+        # A transition on a node other than the evidence target can only
+        # come from propagation (cascading prune / upstream revision).
+        #
+        # The engine's own reason is carried through rather than being
+        # re-derived from the (old, new) pair: several distinct
+        # mechanisms share a transition — UNTESTED->EXHAUSTED is the
+        # exclusion inference, IN_PROGRESS->VERIFIED is either direct
+        # evidence or deduction by elimination — so the pair alone
+        # cannot say which fired, and the analysis was silently
+        # reporting zero for mechanisms that were working.
+        logger.log_status_transition(
+            node_id_after,
+            prior_entry[0].value,
+            status_after.value,
+            propagated=node_id_after != node_id,
+            reason=reason_after,
+        )
+
+    logger.log_evidence_recorded(
+        node_id,
+        success,
+        node.status.value,
+        old_status=old_status,
+        regime=node.evidence_regime,
+        evidence_count=node.evidence_count,
+        posterior_mean=posterior_mean(node.alpha, node.beta),
+        # Whether this result answered a dispatch or a probe the agent chose
+        # for itself. Without the distinction, "dispatches never reported"
+        # was computed as targets minus *all* records and went negative,
+        # because a combination the agent composes has no dispatch behind it.
+        claimed=claim_id is not None,
+    )
+    _log_targets(engine, logger, outcome.next_targets)
+    payload: dict[str, Any] = json.loads(node.model_dump_json())
+    if outcome.next_targets:
+        payload["next_targets"] = [t.model_dump(mode="json") for t in outcome.next_targets]
+    return payload
 
 
 def _execute_tool(
@@ -849,6 +1003,12 @@ def _execute_tool_inner(
 
     elif tool_name == "create_hypotheses":
         raw = args.get("hypotheses")
+        if isinstance(raw, str):
+            # Double-encoded JSON: the model emitted the argument as a *string*
+            # containing the list rather than as the list. Unambiguous, common,
+            # and the only alternative is bouncing a turn over quoting.
+            with contextlib.suppress(json.JSONDecodeError):
+                raw = json.loads(raw)
         if isinstance(raw, dict):
             # A single object where a list was asked for is the one malformation
             # worth accepting rather than rejecting: the intent is unambiguous,
@@ -894,107 +1054,32 @@ def _execute_tool_inner(
         return json.dumps([t.model_dump(mode="json") for t in targets], default=str)
 
     elif tool_name == "record_evidence":
-        node_id = args["node_id"]
-        success = args["success"]
-        claim_id = args.get("claim_id")
-        notes = args.get("notes", "")
-        prior = engine._store.get_node(node_id)
-        # Depth of the test that produced this result. The agent may state it;
-        # if it does not, inherit the depth its own configuration was last
-        # probed at. The harness already saw that number, and making the agent
-        # restate it turns bookkeeping into a reasoning step it can silently get
-        # wrong — a wrong depth quietly disables the depth-aware blame machinery.
-        depth = int(args.get("depth") or 0)
-        if not depth and prior is not None:
-            depth = _last_probe_depth(transcript, prior.statement)
-
-        # Hard gate signal: spending an experiment on a branch that was already
-        # dead. The probe has to post-date the prune for that to be true —
-        # recording a result obtained *before* the branch died is not waste, it
-        # is the only sensible thing to do with a measurement already paid for,
-        # and the batching protocol makes it routine: probe two configs, record
-        # the first, and its cascade can prune the node the second belongs to.
-        # Counting that flipped a GO to an ITERATE on a single event.
-        if (
-            prior is not None
-            and prior.status == Status.PRUNED
-            and _probe_postdates_prune(transcript, prior.statement, prior.pruned_at)
-        ):
-            logger.log_pruned_reexecution(node_id)
-        old_status = prior.status.value if prior is not None else None
-
-        # Snapshot statuses so we can surface the transitions the engine performs
-        # internally (cascading prune of descendants + upstream propagation).
-        before = _status_snapshot(engine)
-        conflicts_before = {c["id"] for c in engine._store.get_nogoods()}
-        resolved_before = {
-            c["id"] for c in engine._store.get_nogoods() if c["resolved_at"] is not None
-        }
-
-        evidence = LogicalEvidence(success=success, depth=depth, notes=notes)
+        # One call may carry several results. They are applied one at a time so
+        # every instrumented side effect — conflicts opened and narrowed,
+        # cascading prunes, upstream revisions — is attributed to the result that
+        # actually caused it. Folding them into one before/after snapshot would
+        # credit the whole batch with the last result's transitions.
+        items = args.get("results") or [args]
         # Fusing the next dispatch into the record is the whole point of the
         # parameter: the two calls are one decision for a synchronous agent and
-        # cost it a full model round-trip each.
+        # cost it a full model round-trip each. Topped up once, after every
+        # result in the batch has landed.
         count_next = int(args.get("count_next_targets", 2) or 0)
-        outcome = engine.record_evidence(
-            node_id, evidence, claim_id=claim_id, count_next_targets=count_next
-        )
-        node = outcome.node
-
-        # Conflicts recorded / narrowed by this observation. These are the
-        # belief-revision events that a per-node status simply cannot express.
-        for conflict in engine._store.get_nogoods():
-            if conflict["id"] not in conflicts_before:
-                logger.log_conflict_recorded(conflict["source_node_id"], conflict["member_ids"])
-            if (
-                conflict["resolved_at"] is not None
-                and conflict["id"] not in resolved_before
-                and conflict["resolved_culprit_id"]
-            ):
-                logger.log_conflict_resolved(conflict["id"], str(conflict["resolved_culprit_id"]))
-
-        after = _status_snapshot(engine)
-        for node_id_after, (status_after, reason_after) in after.items():
-            prior_entry = before.get(node_id_after)
-            if prior_entry is None or prior_entry == (status_after, reason_after):
-                continue
-            # A transition on a node other than the evidence target can only
-            # come from propagation (cascading prune / upstream revision).
-            #
-            # The engine's own reason is carried through rather than being
-            # re-derived from the (old, new) pair: several distinct
-            # mechanisms share a transition — UNTESTED->EXHAUSTED is the
-            # exclusion inference, IN_PROGRESS->VERIFIED is either direct
-            # evidence or deduction by elimination — so the pair alone
-            # cannot say which fired, and the analysis was silently
-            # reporting zero for mechanisms that were working.
-            logger.log_status_transition(
-                node_id_after,
-                prior_entry[0].value,
-                status_after.value,
-                propagated=node_id_after != node_id,
-                reason=reason_after,
+        payloads: list[dict[str, Any]] = []
+        for index, item in enumerate(items):
+            last = index == len(items) - 1
+            payloads.append(
+                _record_one_result(
+                    item,
+                    engine,
+                    logger,
+                    transcript,
+                    count_next=count_next if last else 0,
+                )
             )
-
-        logger.log_evidence_recorded(
-            node_id,
-            success,
-            node.status.value,
-            old_status=old_status,
-            regime=node.evidence_regime,
-            evidence_count=node.evidence_count,
-            posterior_mean=posterior_mean(node.alpha, node.beta),
-            # Whether this result answered a dispatch or a probe the agent chose
-            # for itself. Without the distinction, "dispatches never reported"
-            # was computed as targets minus *all* records and went negative,
-            # because a combination the agent composes has no dispatch behind it.
-            claimed=claim_id is not None,
-        )
-        _log_targets(engine, logger, outcome.next_targets)
-        payload = json.loads(node.model_dump_json())
-        if outcome.next_targets:
-            payload["next_targets"] = [t.model_dump(mode="json") for t in outcome.next_targets]
-        return json.dumps(payload, default=str)
+        if args.get("results"):
+            return json.dumps({"recorded": payloads}, default=str)
+        return json.dumps(payloads[0], default=str)
 
     elif tool_name == "get_goal_status":
         result = engine.get_goal_status()
@@ -1577,10 +1662,13 @@ def run(config: EvalConfig) -> dict[str, Any]:
     # Steps a reset may be postponed by while the agent still owes results for
     # dispatches it has already made. See _reset_is_safe.
     reset_slack = 0
+    # Turns spent letting the agent file results it already holds after the win.
+    # See MAX_WINDDOWN_TURNS.
+    winddown_turns = 0
 
     while step < config.tool_budget:
         step_at_turn_start = step
-        while pending_breakpoints and step >= pending_breakpoints[0]:
+        while pending_breakpoints and step >= pending_breakpoints[0] and not goals_met:
             if (
                 not _reset_is_safe(engine, config.arm, transcript)
                 and reset_slack < MAX_RESET_DEFERRAL
@@ -1674,7 +1762,7 @@ def run(config: EvalConfig) -> dict[str, Any]:
                 # it must still fall through to the turn's progress accounting,
                 # or a permanently unreachable oracle would spin here forever.
                 eval_data = _probe_result(result_str)
-                if eval_data is not None:
+                if eval_data is not None and not goals_met:
                     step += 1
                     _progress(
                         f"step {step}/{config.tool_budget}: probed config "
@@ -1796,6 +1884,11 @@ def run(config: EvalConfig) -> dict[str, Any]:
                         if eval_data is None:
                             # Not an experiment; the next tool call in this turn still runs.
                             continue
+                        if goals_met:
+                            # Winding down. The target is already cleared, so a
+                            # further probe buys nothing and must not move the
+                            # step counter the headline metric is read from.
+                            continue
                         step += 1
                         # Arm-agnostic win check (same as mock path).
                         if _check_landscape_win(
@@ -1817,8 +1910,32 @@ def run(config: EvalConfig) -> dict[str, Any]:
         # agent cannot make progress, and looping until the budget runs out would
         # just burn wall-clock on identical turns.
         if goals_met:
-            _progress(f"GOAL MET at step={step} (landscape target cleared)")
-            break
+            # ...but not the instant the probe lands. The agent is mid-protocol:
+            # it has just run an experiment and not yet reported it, and on the
+            # seeds where the swap that names a culprit is also the winning
+            # combination, that unfiled record is the one that resolves the
+            # conflict. Ending here left the engine correct and the scoreboard
+            # unable to see it. Give it a bounded number of turns to file what it
+            # is holding — no further experiments are accepted and `step` is
+            # frozen, so this cannot move the headline metric.
+            if _reset_is_safe(engine, config.arm, transcript):
+                _progress(f"GOAL MET at step={step} (landscape target cleared)")
+                break
+            if winddown_turns >= MAX_WINDDOWN_TURNS:
+                _progress(f"GOAL MET at step={step}; results still unreported after wind-down")
+                break
+            winddown_turns += 1
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "The target is cleared — this task is finished and no further "
+                        "experiments will be accepted. Record the results you are still "
+                        "holding so the belief state is complete, then stop."
+                    ),
+                }
+            )
+            continue
         if stop_reason:
             _progress(f"stopping at step={step}: {stop_reason}")
             break

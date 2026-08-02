@@ -243,6 +243,36 @@ class RecordEvidenceResult(BaseModel):
     next_targets: list[TargetResponse] = []
 
 
+class EvidenceReport(BaseModel):
+    """One result in a batch: which hypothesis, what happened, under which lease."""
+
+    node_id: str
+    evidence: Evidence
+    claim_id: str | None = None
+
+
+class FailedRecord(BaseModel):
+    """A report the engine refused, and why — so the rest of the batch survives."""
+
+    node_id: str
+    error: str
+
+
+class BatchRecordResult(BaseModel):
+    """Return value of record_results — every report applied, in order.
+
+    A rejected report does not abort the batch. Each result was paid for by an
+    experiment that has already run, and throwing k-1 of them away because the
+    k-th named a node that does not exist destroys evidence to punish a typo.
+    The refusals are returned instead, named and explained, so the caller can fix
+    exactly the one that was wrong.
+    """
+
+    recorded: list[RecordEvidenceResult] = []
+    failed: list[FailedRecord] = []
+    next_targets: list[TargetResponse] = []
+
+
 class UpdateStatusResult(BaseModel):
     """Return value of update_status — carries node + prior-status audit trail."""
 
@@ -591,6 +621,15 @@ class HypoTreeEngine:
                 self._review_dispatches[key] += 1
             cleared = plan["cleared"]
             already = f" Already cleared: {cleared}." if cleared else ""
+            skipped = plan["skipped"]
+            # Named rather than hidden: a member with no live alternative left
+            # cannot be swapped out, so the diagnosis will never reach it on its
+            # own and the caller is the only one who can free a sibling.
+            no_swap = (
+                f" No alternative left to swap in for {skipped}, so those stay untested."
+                if skipped
+                else ""
+            )
             parents = sorted([*plan["keep_ids"], plan["candidate_id"]])
             return TargetResponse(
                 status="DONE",
@@ -604,7 +643,7 @@ class HypoTreeEngine:
                     f"{plan['min_depth']}. If it still fails, '{plan['member_id']}' is "
                     f"cleared and I will name the next one; if it stops failing, "
                     f"'{plan['member_id']}' was the cause and its alternatives reopen."
-                    f"{already} Do not re-test the assumptions on their own — each "
+                    f"{already}{no_swap} Do not re-test the assumptions on their own — each "
                     f"already passed that test, which is why this is unresolved."
                 ),
                 min_depth=plan["min_depth"],
@@ -1135,33 +1174,88 @@ class HypoTreeEngine:
         count_next_targets: int = 0,
         lease_ttl_s: int | None = None,
     ) -> RecordEvidenceResult:
+        """Record one result. The ``k=1`` shorthand for ``record_results``.
+
+        Raises on refusal rather than returning it, because with a single report
+        there is no rest-of-the-batch to protect and a caller reporting one
+        result wants the failure in its face.
+
+        See ``record_results`` for the batch form and ``count_next_targets`` for
+        the fused dispatch.
+        """
+        if count_next_targets < 0:
+            raise ValueError(f"count_next_targets must be >= 0, got {count_next_targets}")
+        node = self._record_one(node_id, evidence, claim_id)
+        return RecordEvidenceResult(
+            node=node, next_targets=self._top_up(count_next_targets, lease_ttl_s)
+        )
+
+    def record_results(
+        self,
+        reports: list[EvidenceReport],
+        *,
+        count_next_targets: int = 0,
+        lease_ttl_s: int | None = None,
+    ) -> BatchRecordResult:
+        """Record several results in one call, in order.
+
+        Batch-native for the same reason ``create_hypotheses`` and
+        ``get_next_targets`` are: the caller pays a full model round-trip per
+        call, so reporting k results one at a time is a k-fold tax on the loop
+        that runs most often. With dispatch already fused into the record, the
+        floor for a synchronous agent was two turns per experiment — probe, then
+        report — and this is what takes it below that: probe k configurations in
+        one turn, report all k in the next.
+
+        **Order is significant and preserved.** One refutation can prune the node
+        another report in the same batch belongs to, and the belief state must
+        end where it would have ended had the results arrived separately. So each
+        report is applied in full — posterior, transitions, cascade, conflict
+        narrowing — before the next is read.
+
+        The fused dispatch happens **once, at the end**, and is a top-up: a
+        caller that reports four results and asks for two targets ends holding
+        two. Topping up per report would hand out work faster than it is being
+        reported, which is the waste the fusion exists to remove.
+        """
+        if count_next_targets < 0:
+            raise ValueError(f"count_next_targets must be >= 0, got {count_next_targets}")
+
+        recorded: list[RecordEvidenceResult] = []
+        failed: list[FailedRecord] = []
+        for report in reports:
+            try:
+                node = self._record_one(report.node_id, report.evidence, report.claim_id)
+            except (NodeNotFoundError, GoalEvidenceError, ClaimError) as exc:
+                failed.append(FailedRecord(node_id=report.node_id, error=str(exc)))
+                continue
+            recorded.append(RecordEvidenceResult(node=node))
+        return BatchRecordResult(
+            recorded=recorded,
+            failed=failed,
+            next_targets=self._top_up(count_next_targets, lease_ttl_s),
+        )
+
+    def _top_up(self, count: int, lease_ttl_s: int | None) -> list[TargetResponse]:
+        """Bring the caller up to ``count`` outstanding leases, counting what it holds."""
+        shortfall = count - len(self._store.get_active_claims(utcnow()))
+        if shortfall <= 0:
+            return []
+        return self.get_next_targets(count=shortfall, lease_ttl_s=lease_ttl_s)
+
+    def _record_one(
+        self,
+        node_id: str,
+        evidence: Evidence,
+        claim_id: str | None = None,
+    ) -> Node:
         """Validate + consume claim, update posterior, apply transitions.
 
         Auto-captures git context_hash + git_branch from the working tree when
         the evidence does not carry them (best-effort; None outside a git repo).
 
         Evidence against a goal is refused — see ``GoalEvidenceError``.
-
-        ``count_next_targets`` fuses the next dispatch into this call, and
-        defaults to **0** — no dispatch. Recording what happened and asking what
-        to do next are genuinely separate questions: an experiment that runs for
-        hours or days is reported by someone who is not, in that moment, asking
-        to be handed the next one, and pushing work at them would either strand a
-        lease or force them to release it. A caller that *is* a synchronous loop
-        pays a full model round-trip for each of the two calls, so asking for
-        both at once roughly halves its turn count — which is why this is an
-        accelerator the caller opts into rather than the shape of the API.
-
-        It is a **top-up**, not an addition: the number is how many targets the
-        caller wants to be holding when this returns, so a caller that records
-        two results in a batch ends the batch holding two, not four. Adding to
-        the outstanding set instead would hand work out faster than it is
-        reported, which is precisely the waste the fusion is meant to remove —
-        the accelerator would have paid for itself in round-trips and then spent
-        the saving on stranded leases.
         """
-        if count_next_targets < 0:
-            raise ValueError(f"count_next_targets must be >= 0, got {count_next_targets}")
         # A blank claim id is a caller reaching for the field it was told to omit,
         # not a claim. Rejecting it threw away a probe that had already been paid
         # for, over punctuation.
@@ -1252,6 +1346,20 @@ class HypoTreeEngine:
 
         if isinstance(evidence, InfraError):
             self._handle_infra_error(node, now)
+        elif last_success is not None and node.status is Status.PRUNED:
+            # A pruned node's status is a statement about its ancestry, not about
+            # itself: the premise it rests on was refuted, so the branch is dead
+            # whatever this measurement says. Letting a success flip it to
+            # VERIFIED produced a node confirmed on top of an invalidated parent
+            # — the belief state asserting both that the branch is dead and that
+            # it holds. The measurement is kept and the posterior updated, so
+            # nothing is lost if the prune is later retracted and the node
+            # returns to the frontier with its evidence intact.
+            #
+            # Rare while probe and record alternated in fixed pairs; routine once
+            # results arrive in batches, because one refutation in a batch can
+            # prune the node a later result in the same batch belongs to.
+            pass
         elif last_success is not None:
             depth = evidence.depth if isinstance(evidence, LogicalEvidence) else 0
             new_logical_count = logical_count + 1
@@ -1267,13 +1375,7 @@ class HypoTreeEngine:
         self._refresh_node_in_graph(node_id)
         updated = self._store.get_node(node_id)
         assert updated is not None
-        # Top up to the requested number in flight, counting what the caller
-        # already holds.
-        shortfall = count_next_targets - len(self._store.get_active_claims(utcnow()))
-        next_targets = (
-            self.get_next_targets(count=shortfall, lease_ttl_s=lease_ttl_s) if shortfall > 0 else []
-        )
-        return RecordEvidenceResult(node=updated, next_targets=next_targets)
+        return updated
 
     def _recoverable_claim(self, node_id: str, now: datetime) -> Any | None:
         """The lease an unknown claim id was almost certainly meant to name.
@@ -1351,14 +1453,21 @@ class HypoTreeEngine:
         own. Each has already passed that test — that is what makes the conflict
         indeterminate — so the only experiment that moves it is another
         composition with one assumption swapped out.
+
+        A member the diagnosis could not construct a swap for is reported as
+        ``skipped_no_substitute``, not as cleared. The two are opposite claims —
+        one says the member was tested and exonerated, the other that it has
+        never been interrogated at all — and reporting the second as the first
+        would credit the belief state with knowledge it does not have.
         """
         exonerated = self._exonerated_nodes()
         out: list[dict[str, Any]] = []
         for nogood in self._store.get_nogoods(open_only=open_only):
             members = nogood["member_ids"]
             suspects = self._remaining_suspects(nogood, exonerated)
-            cleared = set(members[: int(nogood["probe_index"] or 0)])
+            cleared = set(nogood["cleared_ids"])
             plan = self._substitution_plan(nogood) if not nogood["resolved_at"] else None
+            skipped = set(plan["skipped"]) if plan else set()
             out.append(
                 {
                     **nogood,
@@ -1369,6 +1478,7 @@ class HypoTreeEngine:
                             "confirmed_depth": (n.confirmed_depth if n else None),
                             "exonerated": mid not in suspects,
                             "cleared_by_substitution": mid in cleared,
+                            "skipped_no_substitute": mid in skipped,
                         }
                         for mid in members
                     ],
@@ -1377,8 +1487,9 @@ class HypoTreeEngine:
                         f"rebuild this combination with '{plan['member_id']}' replaced by "
                         f"'{plan['candidate_id']}' and probe at depth >= {plan['min_depth']}"
                         if plan
-                        else "every assumption has been swapped out and it still failed — "
-                        "this is an interaction effect and the alternatives are reopened"
+                        else "every assumption that could be swapped out has been, and it "
+                        "still failed — this is an interaction effect and the alternatives "
+                        "are reopened"
                     ),
                 }
             )
@@ -2231,7 +2342,7 @@ class HypoTreeEngine:
         return [
             n
             for n in self._store.get_nogoods(open_only=True)
-            if not n["reopened_at"] and int(n["probe_index"] or 0) < len(n["member_ids"])
+            if not n["reopened_at"] and set(n["member_ids"]) - set(n["cleared_ids"])
         ]
 
     def _diagnosis_order(self, member_ids: list[str]) -> list[str]:
@@ -2293,9 +2404,7 @@ class HypoTreeEngine:
         siblings = self._store.get_nodes_in_exclusion_group(node.exclusion_group, node.id)
         return sum(1 for s in siblings if self._is_eliminated(s))
 
-    def _substitution_plan(
-        self, nogood: dict[str, Any], from_index: int | None = None
-    ) -> dict[str, Any] | None:
+    def _substitution_plan(self, nogood: dict[str, Any]) -> dict[str, Any] | None:
         """The next single-assumption swap that would narrow this conflict.
 
         The discriminating experiment for "these cannot all hold together" is
@@ -2324,32 +2433,43 @@ class HypoTreeEngine:
 
         Members with no competing answer left to swap in are skipped — there is
         no experiment to run for them — as are swaps whose result is already
-        recorded, because an experiment whose answer is known buys nothing.
+        recorded, because an experiment whose answer is known buys nothing. A
+        skipped member is **not** cleared: nothing was learned about it, and if a
+        retraction later frees a sibling to stand in, this proposes it. That
+        distinction is why the progress is a set of cleared ids rather than a
+        cursor — a cursor leaves a skipped member behind it and reports it as
+        cleared when it was never tested.
 
-        Pure: the cursor is advanced only by ``_diagnose_substitution``, when a
-        member has actually been cleared. Skipping is recomputed each call so a
+        Pure: the cleared set is written only by ``_diagnose_substitution``, when
+        a member has actually been cleared. Skipping is recomputed each call so a
         read of the conflict never quietly rewrites it.
         """
         members: list[str] = list(nogood["member_ids"])
+        cleared: list[str] = list(nogood["cleared_ids"])
         known = {frozenset(n["member_ids"]) for n in self._store.get_nogoods()}
-        start = int(nogood["probe_index"] or 0) if from_index is None else from_index
-        for index in range(start, len(members)):
-            member = members[index]
+        skipped: list[str] = []
+        plan: dict[str, Any] | None = None
+        for member in members:
+            if member in cleared:
+                continue
             keep = [m for m in members if m != member]
             candidate = self._substitution_candidate(member, keep, known)
             if candidate is None:
+                skipped.append(member)
                 continue
-            return {
-                "nogood_id": nogood["id"],
-                "member_id": member,
-                "candidate_id": candidate,
-                "keep_ids": keep,
-                "min_depth": int(nogood["conflict_depth"] or 0),
-                "cleared": members[: int(nogood["probe_index"] or 0)],
-                "remaining": len(members) - index,
-                "index": index,
-            }
-        return None
+            if plan is None:
+                plan = {
+                    "nogood_id": nogood["id"],
+                    "member_id": member,
+                    "candidate_id": candidate,
+                    "keep_ids": keep,
+                    "min_depth": int(nogood["conflict_depth"] or 0),
+                    "cleared": cleared,
+                    "remaining": len(members) - len(cleared),
+                }
+        if plan is not None:
+            plan["skipped"] = skipped
+        return plan
 
     def _substitution_candidate(
         self, member_id: str, keep: list[str], known: set[frozenset[str]]
@@ -2439,23 +2559,16 @@ class HypoTreeEngine:
         members: list[str] = list(nogood["member_ids"])
 
         if refuted:
-            self._store.advance_nogood_probe(nogood["id"], members.index(member) + 1, now)
+            self._store.clear_nogood_member(nogood["id"], member, now)
             refreshed = self._refetch_nogood(nogood["id"]) or nogood
             if self._substitution_plan(refreshed) is None:
-                # Every member has been swapped out and the composition failed
-                # every time: no single assumption is the cause, so the answer is
-                # somewhere among all the alternatives they retired.
-                #
-                # Known limitation: the cursor only moves forward, so a member the
-                # plan had to skip for want of a usable substitute is left behind
-                # it and reported as cleared. Rescuing it needs to distinguish
-                # "cleared" from "skipped", which a single integer cursor cannot
-                # express — a rescan from the front re-proposes cleared members
-                # and never terminates. It needs a settled-set rather than a
-                # cursor, so it is scoped as a schema change rather than patched
-                # here. The broad recovery below still fires, so the conflict
-                # ends in a sound state; it just ends more expensively than it
-                # had to.
+                # Every member that *could* be swapped out has been, and the
+                # composition failed every time: no single assumption is the
+                # cause, so the answer is somewhere among all the alternatives
+                # they retired. Members with no substitute left are not cleared —
+                # nothing was learned about them — but there is also no
+                # experiment that would clear them, so the diagnosis has run out
+                # of moves and the broad recovery is the remaining sound step.
                 self._recover_from_interaction(self._refetch_nogood(nogood["id"]) or refreshed, now)
             return True
 

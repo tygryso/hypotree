@@ -33,8 +33,9 @@ Select the next best hypotheses to investigate and claim them. Returns a **LIST*
 - You will never be given two competing answers to the same question in one batch, because the first answer would have retired the second.
 
 #### `record_evidence`
-Record evidence for a hypothesis (consumes the `claim_id`). Updates the Beta posterior, handles verification/invalidation, cascading prune, and upstream propagation automatically. **Hands you your next targets in the same reply.**
-- Parameters: `node_id`, `success` (float 0-1), `depth` (the depth you probed at), `claim_id` (**optional** — omit it for a probe you chose yourself; never invent one), `count_next_targets` (default 2), `notes` (string)
+Record one result, or every result from this turn at once (consumes the `claim_id`). Updates the Beta posterior, handles verification/invalidation, cascading prune, and upstream propagation automatically. **Hands you your next targets in the same reply.**
+- Parameters: `results` (a list of results — use this whenever you probed more than one thing), or the single-result fields `node_id`, `success` (float 0-1), `depth` (the depth you probed at), `claim_id` (**optional** — omit it for a probe you chose yourself; never invent one); plus `count_next_targets` (default 2) and `notes` (string)
+- **Probed two configs? Report both in one call**: `record_evidence(results=[{node_id, success, depth, claim_id}, {…}])`. One call instead of two, and the reply still carries your next targets. This is the single biggest saving available to you — reporting one at a time doubles the turns you spend on bookkeeping.
 - **Leave `count_next_targets` at 2.** The reply then carries a `next_targets` list, identical to what `get_next_targets` would have returned — one round-trip instead of two, on the call you make most often. It is a **top-up**: it is how many targets you want to be *holding*, so recording a batch of two leaves you holding two, not four. Set it to `0` only when you do not want more work yet.
 - **CRITICAL**: record on the SAME `node_id` that was handed to you, using the `success` you got from probing THAT node's `statement`. If you probed something the navigator did not hand you — a combination you assembled yourself — it needs its own node, created with `parent_ids`. Recording it against the goal is **rejected**, and recording it against a premise corrupts a confirmation that is still true on its own.
 - **Always pass the same `depth` you gave `evaluate_config`.** A confirmation obtained at a shallow depth does not support a combination tested deeper, and hypotree uses exactly this to work out which assumption broke.
@@ -93,14 +94,14 @@ Filter/search/sort nodes. Use to review what you've tried and to recover after a
    `statement`, and sometimes a `min_depth`. After that, your next targets arrive
    with every `record_evidence` reply, so you should rarely need this call again.
 4. **Probe then Record, in batches** — for each returned target, probe
-   `evaluate_config(config=<statement>, depth=<min_depth or your usual depth>)`,
-   then `record_evidence(node_id=<the returned node_id>, success=<result>,
-   depth=<the depth you used>, claim_id=<the returned claim_id>)`. Issue all the
-   probes for one batch in a single turn, and all the records in the next. The
-   probed statement and the recorded node MUST be the same hypothesis.
+   `evaluate_config(config=<statement>, depth=<min_depth or your usual depth>)`.
+   Issue all the probes for one batch in a single turn, then report them all in
+   the next with **one** call:
+   `record_evidence(results=[{node_id, success, depth, claim_id}, …])`.
+   The probed statement and the recorded node MUST be the same hypothesis.
 
-   The last record of a batch comes back with `next_targets` — use those
-   directly instead of calling `get_next_targets` again.
+   The batch reply comes back with `next_targets` — use those directly instead
+   of calling `get_next_targets` again.
 
    **Always close a batch before opening the next one.** A claimed hypothesis is
    reserved for you; until you record its result nobody — including you — can be

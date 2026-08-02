@@ -519,22 +519,37 @@ def test_exclusion_group_round_trips(store: HypoTreeStore) -> None:
 # -- schema migration ------------------------------------------------------
 
 
-def _write_v8_database(db_path: Path) -> None:
-    """A genuine v8 database: the current DDL minus the column v9 added.
+# Columns each schema version added, so an "old database" fixture can be built by
+# removing everything introduced after the version being simulated. Derived from
+# the real DDL rather than hand-written, so a fixture cannot drift away from what
+# that release actually shipped.
+_COLUMNS_ADDED_AFTER = {
+    "8": ("    source_ref    TEXT,\n", "    cleared_ids         TEXT,\n"),
+    "9": ("    cleared_ids         TEXT,\n",),
+}
 
-    Built from the real DDL rather than a hand-written fixture so it cannot
-    drift away from what v0.3.1 actually shipped, and stamped v8 so the store
-    takes the migration path rather than the fresh-stamp path.
+
+def _write_old_database(db_path: Path, version: str) -> None:
+    """A genuine database at ``version``: the current DDL minus later columns.
+
+    Stamped with the old version so the store takes the migration path rather
+    than the fresh-stamp path.
     """
     from hypotree.store.schema import SCHEMA_DDL
 
-    v8_ddl = SCHEMA_DDL.replace("    source_ref    TEXT,\n", "")
-    assert "source_ref" not in v8_ddl, "the v8 fixture must not carry the v9 column"
+    ddl = SCHEMA_DDL
+    for fragment in _COLUMNS_ADDED_AFTER[version]:
+        assert fragment in ddl, f"DDL no longer contains {fragment!r}; update the fixture"
+        ddl = ddl.replace(fragment, "")
     conn = sqlite3.connect(str(db_path))
-    conn.executescript(v8_ddl)
-    conn.execute("INSERT INTO schema_meta (key, value) VALUES ('schema_version', '8')")
+    conn.executescript(ddl)
+    conn.execute("INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)", (version,))
     conn.commit()
     conn.close()
+
+
+def _write_v8_database(db_path: Path) -> None:
+    _write_old_database(db_path, "8")
 
 
 @pytest.mark.unit
@@ -549,11 +564,55 @@ def test_a_v8_database_is_migrated_rather_than_rejected(tmp_path: Path) -> None:
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()["value"]
         columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(evidence)")}
+        nogood_columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(nogoods)")}
     finally:
         store.close()
 
     assert version == SCHEMA_VERSION
     assert "source_ref" in columns
+    assert "cleared_ids" in nogood_columns
+
+
+@pytest.mark.unit
+def test_a_v9_database_is_migrated_to_the_cleared_set(tmp_path: Path) -> None:
+    """The shortest chain has to work too, not just the longest."""
+    db = tmp_path / "v9.db"
+    _write_old_database(db, "9")
+
+    store = HypoTreeStore(db)
+    try:
+        columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(nogoods)")}
+        version = store._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()["value"]
+    finally:
+        store.close()
+
+    assert version == SCHEMA_VERSION
+    assert "cleared_ids" in columns
+
+
+@pytest.mark.unit
+def test_a_diagnosis_in_flight_survives_the_cleared_set_migration(tmp_path: Path) -> None:
+    """A v9 cursor names real cleared members; the upgrade may not forget them."""
+    db = tmp_path / "v9.db"
+    _write_old_database(db, "9")
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO nogoods (source_node_id, member_ids, conflict_depth, probe_index,"
+        ' recorded_at) VALUES (\'combo\', \'["a","b","c"]\', 2, 2, ?)',
+        (_dt_to_str(utcnow()),),
+    )
+    conn.commit()
+    conn.close()
+
+    store = HypoTreeStore(db)
+    try:
+        nogood = store.get_nogoods()[0]
+    finally:
+        store.close()
+
+    assert nogood["cleared_ids"] == ["a", "b"]
 
 
 @pytest.mark.unit
@@ -594,9 +653,10 @@ def test_migration_is_recorded_in_the_audit_log(tmp_path: Path) -> None:
     finally:
         store.close()
 
-    migrated = [r for r in rows if r["type"] == "SchemaMigrated"]
-    assert len(migrated) == 1
-    assert json.loads(migrated[0]["payload"]) == {"from": "8", "to": SCHEMA_VERSION}
+    # Every step of the chain is logged separately, so the audit trail says which
+    # upgrades ran rather than only where the database ended up.
+    migrated = [json.loads(r["payload"]) for r in rows if r["type"] == "SchemaMigrated"]
+    assert migrated == [{"from": "8", "to": "9"}, {"from": "9", "to": SCHEMA_VERSION}]
 
 
 @pytest.mark.unit
@@ -625,6 +685,24 @@ def test_an_unroutable_version_says_keep_the_file(tmp_path: Path) -> None:
 
     with pytest.raises(SchemaVersionError, match="do not delete it"):
         HypoTreeStore(db)
+
+
+@pytest.mark.unit
+def test_schema_versions_are_ordered_as_numbers_not_strings() -> None:
+    """A string compare read '9' and even '3' as newer than '10'.
+
+    Which sent a user with a corrupt stamp the instruction to upgrade the
+    package instead of the one to keep the file. Only reachable once the counter
+    reached two digits, so nothing caught it before v10.
+    """
+    from hypotree.store.store import _is_newer_version
+
+    assert _is_newer_version("11", "10")
+    assert not _is_newer_version("9", "10")
+    assert not _is_newer_version("3", "10")
+    # A hand-edited stamp cannot be ordered, so it is not newer — the caller's
+    # other branch tells the user to keep the file, which is the right answer.
+    assert not _is_newer_version("wat", "10")
 
 
 @pytest.mark.unit

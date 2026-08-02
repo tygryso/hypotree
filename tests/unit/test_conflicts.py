@@ -373,11 +373,112 @@ def test_a_swap_that_still_fails_clears_the_assumption_it_removed(
 
     nogood = engine._store.get_nogoods()[0]
     assert nogood["probe_index"] == 1
+    assert nogood["cleared_ids"] == ["comp_v1"]
     assert nogood["resolved_at"] is None
     assert engine._store.get_node("comp_v1").status == Status.NEEDS_REVISION
     assert engine._store.get_node("comp_v2").status == Status.EXHAUSTED
     # ...and the engine now asks about the *other* assumption.
     assert "reg_v1" in engine.get_next_targets()[0].rationale
+
+
+def _strip_substitute(engine: HypoTreeEngine, member_id: str) -> None:
+    """Refute every live alternative to ``member_id``, so no swap can be built for it."""
+    node = engine._store.get_node(member_id)
+    assert node is not None and node.exclusion_group
+    for sibling in engine._store.get_nodes_in_exclusion_group(node.exclusion_group, member_id):
+        engine.update_status(sibling.id, Status.INVALIDATED, reason="ruled out separately")
+
+
+@pytest.mark.unit
+def test_a_member_with_no_substitute_is_reported_as_skipped_not_cleared(
+    engine: HypoTreeEngine,
+) -> None:
+    """Opposite claims: one says it was tested and exonerated, the other untested.
+
+    The integer cursor this replaced could only say "the first k were dealt
+    with", so a member the plan passed over for want of a live alternative was
+    left *behind* the cursor the moment a later member was cleared, and reported
+    as cleared — crediting the belief state with a conclusion no experiment had
+    produced. The first member in the diagnosis order is stripped deliberately,
+    because that is the position where the two records disagree.
+    """
+    _build_two_axis_landscape(engine)
+    engine.record_evidence("combo1", LogicalEvidence(success=0.0, depth=2))
+
+    first, second = engine._store.get_nogoods()[0]["member_ids"]
+    _strip_substitute(engine, first)
+
+    members = {m["node_id"]: m for m in engine.get_conflicts()[0]["members"]}
+    assert members[first]["skipped_no_substitute"] is True
+    assert members[first]["cleared_by_substitution"] is False
+
+    # Clear the member that *can* be swapped out. A cursor would now sit past
+    # both and report both as cleared.
+    stand_in = engine._store.get_nodes_in_exclusion_group(
+        engine._store.get_node(second).exclusion_group, second
+    )[0]
+    _substitute(engine, "swap", [first, stand_in.id], success=0.0)
+
+    assert engine._store.get_nogoods()[0]["cleared_ids"] == [second]
+
+
+@pytest.mark.unit
+def test_a_skipped_member_is_revisited_once_a_substitute_frees_up(
+    engine: HypoTreeEngine,
+) -> None:
+    """A cursor could never come back to it; a cleared-set can.
+
+    The member was passed over because its question had no live alternative. The
+    moment one appears, the swap that interrogates it exists — and the diagnosis
+    proposes it instead of giving up and reopening every question by hand.
+    """
+    _build_two_axis_landscape(engine)
+    engine.record_evidence("combo1", LogicalEvidence(success=0.0, depth=2))
+
+    first, second = engine._store.get_nogoods()[0]["member_ids"]
+    _strip_substitute(engine, first)
+
+    plan = engine._substitution_plan(engine._store.get_nogoods()[0])
+    assert plan["member_id"] == second
+    assert plan["skipped"] == [first]
+
+    # A fresh answer to the same question appears.
+    group = engine._store.get_node(first).exclusion_group
+    engine.create_hypothesis("late_v9", node_id="late_v9", exclusion_group=group)
+
+    plan = engine._substitution_plan(engine._store.get_nogoods()[0])
+    assert plan["member_id"] == first
+    assert plan["candidate_id"] == "late_v9"
+    assert plan["skipped"] == []
+
+
+@pytest.mark.unit
+def test_a_repeated_swap_clears_a_member_only_once(engine: HypoTreeEngine) -> None:
+    """A caller re-reporting the same swap has established nothing new."""
+    _build_two_axis_landscape(engine)
+    engine.record_evidence("combo1", LogicalEvidence(success=0.0, depth=2))
+    nogood_id = engine._store.get_nogoods()[0]["id"]
+
+    engine._store.clear_nogood_member(nogood_id, "comp_v1", datetime.now())
+    cleared = engine._store.clear_nogood_member(nogood_id, "comp_v1", datetime.now())
+
+    assert cleared == ["comp_v1"]
+    assert engine._store.get_nogoods()[0]["probe_index"] == 1
+
+
+@pytest.mark.unit
+def test_the_deprecated_cursor_api_still_clears_the_right_members(
+    engine: HypoTreeEngine,
+) -> None:
+    """Deprecation precedes removal: an external caller is warned, not broken."""
+    _build_two_axis_landscape(engine)
+    engine.record_evidence("combo1", LogicalEvidence(success=0.0, depth=2))
+    nogood = engine._store.get_nogoods()[0]
+
+    with pytest.deprecated_call():
+        engine._store.advance_nogood_probe(nogood["id"], 1, datetime.now())
+
+    assert engine._store.get_nogoods()[0]["cleared_ids"] == [nogood["member_ids"][0]]
 
 
 @pytest.mark.unit

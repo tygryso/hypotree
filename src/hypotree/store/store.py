@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -25,6 +26,24 @@ from hypotree.store.schema import MIGRATIONS, SCHEMA_DDL, SCHEMA_VERSION
 
 class SchemaVersionError(RuntimeError):
     """Raised when the DB schema version does not match the code's expectation."""
+
+
+def _is_newer_version(version: str, current: str) -> bool:
+    """Whether a stamp names a release later than this one.
+
+    Ordered numerically, not lexicographically: schema versions are counters,
+    and the moment one reached two digits a string compare started reading '9'
+    and even '3' as newer than '10' — which sent a user with a corrupt stamp the
+    instruction to upgrade the package instead of the one to keep the file.
+
+    A stamp that is not a number cannot be ordered at all, so it is not newer:
+    the caller's other branch tells them to keep the database and open an issue,
+    which is the right answer for a hand-edited or garbage value.
+    """
+    try:
+        return int(version) > int(current)
+    except ValueError:
+        return False
 
 
 def _dt_to_str(dt: datetime | None) -> str | None:
@@ -173,7 +192,7 @@ class HypoTreeStore:
                     + (
                         "This database was written by a newer hypotree; upgrade the "
                         "package rather than downgrading the data."
-                        if version > SCHEMA_VERSION
+                        if _is_newer_version(version, SCHEMA_VERSION)
                         else "Back the file up and open an issue — do not delete it."
                     )
                 )
@@ -735,9 +754,10 @@ class HypoTreeStore:
         payload = json.dumps(list(member_ids))
         with self.transaction() as conn:
             cur = conn.execute(
-                """INSERT INTO nogoods (source_node_id, member_ids, conflict_depth, recorded_at)
-                   VALUES (?,?,?,?)""",
-                (source_node_id, payload, conflict_depth, _dt_to_str(now)),
+                """INSERT INTO nogoods
+                       (source_node_id, member_ids, conflict_depth, cleared_ids, recorded_at)
+                   VALUES (?,?,?,?,?)""",
+                (source_node_id, payload, conflict_depth, "[]", _dt_to_str(now)),
             )
             nogood_id = int(cur.lastrowid or 0)
             self._write_event(
@@ -759,46 +779,97 @@ class HypoTreeStore:
 
         ``open_only`` restricts to conflicts whose culprit has not been pinned
         down yet — the ones a discriminating experiment could still resolve.
+
+        ``cleared_ids`` is back-filled from the deprecated ``probe_index`` when a
+        row predates the column, so a diagnosis in flight across the upgrade
+        keeps the members it had already cleared.
         """
         sql = "SELECT * FROM nogoods"
         if open_only:
             sql += " WHERE resolved_at IS NULL"
         sql += " ORDER BY id DESC"
-        return [
-            {
-                "id": row["id"],
-                "source_node_id": row["source_node_id"],
-                "member_ids": json.loads(row["member_ids"]),
-                "conflict_depth": row["conflict_depth"],
-                "probe_index": row["probe_index"],
-                "resolved_culprit_id": row["resolved_culprit_id"],
-                "reopened_at": row["reopened_at"],
-                "recorded_at": row["recorded_at"],
-                "resolved_at": row["resolved_at"],
-            }
-            for row in self._conn.execute(sql).fetchall()
-        ]
+        return [self._row_to_nogood(row) for row in self._conn.execute(sql).fetchall()]
 
-    def advance_nogood_probe(self, nogood_id: int, probe_index: int, now: datetime) -> None:
-        """Record that one more member has been cleared by substitution.
+    @staticmethod
+    def _row_to_nogood(row: sqlite3.Row) -> dict[str, Any]:
+        members: list[str] = json.loads(row["member_ids"])
+        raw_cleared = row["cleared_ids"]
+        cleared = (
+            json.loads(raw_cleared) if raw_cleared else members[: int(row["probe_index"] or 0)]
+        )
+        return {
+            "id": row["id"],
+            "source_node_id": row["source_node_id"],
+            "member_ids": members,
+            "conflict_depth": row["conflict_depth"],
+            "cleared_ids": cleared,
+            "probe_index": row["probe_index"],
+            "resolved_culprit_id": row["resolved_culprit_id"],
+            "reopened_at": row["reopened_at"],
+            "recorded_at": row["recorded_at"],
+            "resolved_at": row["resolved_at"],
+        }
+
+    def clear_nogood_member(self, nogood_id: int, member_id: str, now: datetime) -> list[str]:
+        """Record that ``member_id`` has been cleared by substitution.
 
         Swapping a member out and watching the composition fail anyway rules that
-        member out as the sole cause. The cursor is stored rather than recomputed
-        so the diagnosis survives a context reset: without it every reset would
-        restart the elimination and re-run experiments already paid for.
+        member out as the sole cause. Stored as a set rather than a cursor so
+        "cleared" cannot be confused with "passed over for want of a substitute";
+        idempotent, because a caller re-reporting the same swap has established
+        nothing new. Returns the full cleared set.
+
+        ``probe_index`` is written in step purely so a reader still on the
+        deprecated column sees a truthful count.
         """
         txn = self._txn_id()
         with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT member_ids, cleared_ids, probe_index FROM nogoods WHERE id=?",
+                (nogood_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"No such conflict: {nogood_id}")
+            members: list[str] = json.loads(row["member_ids"])
+            raw = row["cleared_ids"]
+            cleared: list[str] = json.loads(raw) if raw else members[: int(row["probe_index"] or 0)]
+            if member_id not in cleared:
+                cleared.append(member_id)
             conn.execute(
-                "UPDATE nogoods SET probe_index=? WHERE id=?",
-                (probe_index, nogood_id),
+                "UPDATE nogoods SET cleared_ids=?, probe_index=? WHERE id=?",
+                (json.dumps(cleared), len(cleared), nogood_id),
             )
             self._write_event(
                 conn,
                 "ConflictMemberCleared",
-                json.dumps({"nogood_id": nogood_id, "probe_index": probe_index}),
+                json.dumps(
+                    {"nogood_id": nogood_id, "member_id": member_id, "cleared_ids": cleared}
+                ),
                 txn,
             )
+        return cleared
+
+    def advance_nogood_probe(self, nogood_id: int, probe_index: int, now: datetime) -> None:
+        """Deprecated: clear members by *position*. Use ``clear_nogood_member``.
+
+        A position cannot distinguish a member that was cleared from one the plan
+        passed over, which is the defect the cleared-set replaced. Retained for
+        one minor version so an external caller is warned rather than broken.
+        """
+        warnings.warn(
+            "advance_nogood_probe is deprecated and will be removed in 0.5.0; "
+            "use clear_nogood_member(nogood_id, member_id, now)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        row = self._conn.execute(
+            "SELECT member_ids FROM nogoods WHERE id=?", (nogood_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No such conflict: {nogood_id}")
+        members: list[str] = json.loads(row["member_ids"])
+        for member in members[:probe_index]:
+            self.clear_nogood_member(nogood_id, member, now)
 
     def mark_nogood_reopened(self, nogood_id: int, now: datetime) -> None:
         """Record that a conflict's alternatives have been reopened.

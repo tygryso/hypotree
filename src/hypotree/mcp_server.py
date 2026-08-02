@@ -32,7 +32,8 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from hypotree import __version__
-from hypotree.engine import HypoTreeEngine
+from hypotree.engine import EvidenceReport, HypoTreeEngine
+from hypotree.models.evidence import Evidence, InfraError, LogicalEvidence
 from hypotree.store.identity import resolve_project_path, store_root
 
 GUIDE_RESOURCE_URI = "hypotree://guide"
@@ -126,11 +127,13 @@ def _prompt_text(name: str, arguments: dict[str, str] | None) -> str:
         )
     if name == "hypotree-next":
         return (
-            "Call `get_next_targets(count=1)`.\n\n"
-            "If it returns a target, test that hypothesis for real — run the code, the "
-            "query or the experiment — then call `record_evidence` against that same "
-            "node with the claim_id you were given and a `success` score in [0, 1]. Do "
-            "not guess the result and do not record against a different node.\n\n"
+            "Call `get_next_targets(count=2)`.\n\n"
+            "If it returns targets, test each hypothesis for real — run the code, the "
+            "query or the experiment — then report them together in one call: "
+            "`record_evidence(results=[{node_id, success, depth, claim_id}, ...])`, "
+            "each entry against the node you actually tested, with a `success` score "
+            "in [0, 1]. Do not guess a result and do not record against a different "
+            "node.\n\n"
             "If it returns DONE, the `reason` tells you what to do: "
             "`awaiting_evidence` means report what you are already holding, "
             "`awaiting_composition` means build the combination its rationale names, "
@@ -275,14 +278,48 @@ def _tool_definitions() -> list[types.Tool]:
         ),
         types.Tool(
             name="record_evidence",
-            description="Record evidence, consume claim, update posterior. "
-            "Auto-captures git context_hash + git_branch when unset. Record against "
-            "the hypothesis whose statement you actually tested: evidence against a "
-            "goal is refused, and evidence against a premise a composition assumed "
-            "corrupts a confirmation that is still true on its own.",
+            description="Record one result, or many in one call, and update the belief "
+            "state. Auto-captures git context_hash + git_branch when unset. Record "
+            "against the hypothesis whose statement you actually tested: evidence "
+            "against a goal is refused, and evidence against a premise a composition "
+            "assumed corrupts a confirmation that is still true on its own. Ran several "
+            "experiments this turn? Report them together with `results` — one call, "
+            "applied in order.",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "results": {
+                        "type": "array",
+                        "description": "Several results at once, applied in the order "
+                        "given. Use this whenever you ran more than one experiment: "
+                        "reporting k results costs one call instead of k. Each entry "
+                        "takes the same fields as a single result. When present, the "
+                        "single-result fields below are ignored.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "node_id": {"type": "string"},
+                                "success": {
+                                    "type": "number",
+                                    "minimum": 0.0,
+                                    "maximum": 1.0,
+                                },
+                                "depth": {"type": "integer", "default": 0, "minimum": 0},
+                                "claim_id": {"type": "string"},
+                                "evidence_kind": {
+                                    "type": "string",
+                                    "enum": ["logical", "infra"],
+                                    "default": "logical",
+                                },
+                                "error_type": {"type": "string"},
+                                "message": {"type": "string"},
+                                "metrics": {"type": "object"},
+                                "source_ref": {"type": "string"},
+                                "notes": {"type": "string"},
+                            },
+                            "required": ["node_id"],
+                        },
+                    },
                     "node_id": {"type": "string"},
                     "success": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                     "depth": {
@@ -335,7 +372,7 @@ def _tool_definitions() -> list[types.Tool]:
                         "description": "TTL for the fused dispatch, if any.",
                     },
                 },
-                "required": ["node_id"],
+                "required": [],
             },
         ),
         types.Tool(
@@ -697,6 +734,34 @@ async def _handle_call_tool(
     return [types.TextContent(type="text", text=json.dumps(result, default=str))]
 
 
+def _evidence_report(item: dict) -> EvidenceReport:
+    """Build one evidence report from a tool-call payload.
+
+    Shared by the single and batch shapes so the two can never drift — the
+    `source_ref` field was advertised on the tool for a release while the
+    dispatch that was supposed to read it silently dropped it.
+    """
+    ev: Evidence
+    if item.get("evidence_kind", "logical") == "infra":
+        ev = InfraError(
+            error_type=item.get("error_type", "unknown"),
+            message=item.get("message", ""),
+        )
+    else:
+        ev = LogicalEvidence(
+            success=item.get("success", 0.5),
+            depth=item.get("depth", 0),
+            metrics=item.get("metrics", {}),
+            notes=item.get("notes", ""),
+            source_ref=item.get("source_ref"),
+        )
+    return EvidenceReport(
+        node_id=item["node_id"],
+        evidence=ev,
+        claim_id=item.get("claim_id"),
+    )
+
+
 def _dispatch(engine: HypoTreeEngine, name: str, arguments: dict) -> object:
     """Route a tool call to the corresponding engine method."""
     if name == "create_hypotheses":
@@ -711,27 +776,20 @@ def _dispatch(engine: HypoTreeEngine, name: str, arguments: dict) -> object:
         return [t.model_dump(mode="json") for t in targets]
 
     if name == "record_evidence":
-        from hypotree.models.evidence import InfraError, LogicalEvidence
-
-        node_id = arguments.pop("node_id")
-        claim_id = arguments.pop("claim_id", None)
-        kind = arguments.pop("evidence_kind", "logical")
         count_next = arguments.pop("count_next_targets", 0)
         ttl = arguments.pop("lease_ttl_s", None)
-        if kind == "infra":
-            ev = InfraError(
-                error_type=arguments.pop("error_type", "unknown"),
-                message=arguments.pop("message", ""),
-            )
-        else:
-            ev = LogicalEvidence(
-                success=arguments.pop("success", 0.5),
-                depth=arguments.pop("depth", 0),
-                metrics=arguments.pop("metrics", {}),
-                notes=arguments.pop("notes", ""),
-            )
+        raw_results = arguments.pop("results", None)
+        if raw_results:
+            reports = [_evidence_report(item) for item in raw_results]
+            batch = engine.record_results(reports, count_next_targets=count_next, lease_ttl_s=ttl)
+            return batch.model_dump(mode="json")
+        report = _evidence_report(arguments)
         result = engine.record_evidence(
-            node_id, ev, claim_id=claim_id, count_next_targets=count_next, lease_ttl_s=ttl
+            report.node_id,
+            report.evidence,
+            claim_id=report.claim_id,
+            count_next_targets=count_next,
+            lease_ttl_s=ttl,
         )
         return result.model_dump(mode="json")
 
