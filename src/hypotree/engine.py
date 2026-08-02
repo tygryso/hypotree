@@ -412,13 +412,28 @@ class HypoTreeEngine:
         return self._project_path
 
     def _sync_graph_from_store(self) -> None:
-        """Rebuild the in-memory graph from the persisted store."""
+        """Rebuild the in-memory graph from the persisted store.
+
+        Edges are loaded in bulk so acyclicity is checked once rather than once
+        per edge. The store is the source of truth and was acyclic when written,
+        so the per-edge check was re-proving a property nothing had threatened —
+        at a cost that grows with the square of the graph.
+
+        A store that somehow *is* cyclic falls back to loading edge by edge,
+        which drops only the edges that close a cycle. Rolling the whole set back
+        would leave every node looking like a root, and a frontier computed from
+        that is not a degraded answer but a wrong one.
+        """
         self._graph = HypoTreeGraph()
         for node in self._store.get_all_nodes():
             self._graph.add_node(node)
-        for edge in self._store.get_all_edges():
-            with contextlib.suppress(CycleError):
-                self._graph.add_edge(edge)
+        edges = self._store.get_all_edges()
+        try:
+            self._graph.add_edges_bulk(edges)
+        except CycleError:
+            for edge in edges:
+                with contextlib.suppress(CycleError):
+                    self._graph.add_edge(edge)
 
     def _refresh_node_in_graph(self, node_id: str) -> None:
         """Reload a single node from the store into the in-memory graph."""
@@ -958,6 +973,11 @@ class HypoTreeEngine:
 
         now = utcnow()
         self._store.expire_stale_claims(now)
+        # Synced once for the whole batch rather than once per pick: the batch
+        # loop takes leases, which change node rows but never the topology, and
+        # `_select_one` refreshes the single node it claims. Rebuilding the whole
+        # graph per pick made a `count=2` call pay for two full reloads.
+        self._sync_graph_from_store()
 
         responses: list[TargetResponse] = []
         claimed_groups: set[str] = set()
@@ -984,9 +1004,12 @@ class HypoTreeEngine:
         claimed_groups: set[str] | None = None,
         _retry: bool = True,
     ) -> TargetResponse:
-        """Select and claim a single target. See get_next_targets."""
-        self._sync_graph_from_store()
+        """Select and claim a single target. See get_next_targets.
 
+        Assumes the caller has synced the graph. Every mutation this makes goes
+        through `_refresh_node_in_graph`, so the topology it was handed stays
+        correct for the rest of the batch.
+        """
         frontier = self._frontier_nodes()
         # Never offer a second answer to a question that already has one in
         # flight — whether it was claimed a moment ago in this same batch or in
@@ -2449,6 +2472,14 @@ class HypoTreeEngine:
         known = {frozenset(n["member_ids"]) for n in self._store.get_nogoods()}
         skipped: list[str] = []
         plan: dict[str, Any] | None = None
+        # Walked in the order frozen at conflict creation. Re-ranking against the
+        # current belief state is now *possible* — the cleared set replaced the
+        # integer cursor that forced the freeze — and it would use strictly more
+        # information. It is deliberately not done: run H's logs show no
+        # elimination ever lands between one swap and the next, so within a
+        # diagnosis there is nothing new to rank on, and an ordering change to
+        # this path that looked principled and went unmeasured is exactly what
+        # regressed run F. It needs an eval that can see it first.
         for member in members:
             if member in cleared:
                 continue

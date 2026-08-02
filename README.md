@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg)](CHANGELOG.md)
-[![Tests: 662](https://img.shields.io/badge/tests-662-brightgreen.svg)](tests/)
+[![Tests: 669](https://img.shields.io/badge/tests-669-brightgreen.svg)](tests/)
 [![Version: 0.4.0](https://img.shields.io/badge/version-0.4.0-blue.svg)](pyproject.toml)
 [![PyPI](https://img.shields.io/pypi/v/hypotree.svg)](https://pypi.org/project/hypotree/)
 

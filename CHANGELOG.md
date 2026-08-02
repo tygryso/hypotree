@@ -6,6 +6,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.4.0] - 2026-08-02
 
+### Performance
+- **Selecting a target is 41× faster on a large belief state**: 1200 nodes went from
+  **4 494 ms to 110 ms** per dispatch, and the curve from ~3.8× to ~2.3× per doubling of
+  nodes. None of this was visible at the 40–60 nodes an evaluation episode produces, which
+  is why it survived 662 tests — but every long-lived workspace lands on the wrong side of
+  it, and "the belief state survives across sessions" is the product claim.
+  - **The dominant cost was an N+1 query.** `get_all_nodes` derives each node's `parent_ids`
+    from the edges table and was issuing **one query per node**; the navigator calls it
+    several times per dispatch, so handing out two targets cost ~6 000 SQL round-trips.
+    Parents are now resolved for every row in a single query.
+  - `HypoTreeGraph.add_edge` ran a full `is_directed_acyclic_graph()` check **per edge**, so
+    reloading *E* edges cost *O(E·(V+E))*. New `add_edges_bulk` checks the finished set once
+    and rolls back if it is cyclic. The per-edge path stays for interactive creation, where
+    naming the offending edge is worth the cost.
+  - `HypoTreeGraph.parents()` scanned every edge in the graph and the frontier calls it once
+    per node. Parents are now indexed by `dst`.
+  - `get_next_targets` syncs the in-memory graph **once per batch** instead of once per pick.
+    The batch loop takes leases, which change node rows but never the topology.
+  - A long-lived incremental graph — invalidating on write, never rebuilding — is
+    deliberately **not** done. A cached graph that disagrees with SQLite would produce
+    silently wrong selections, and at 110 ms there is no case for taking that risk.
+
 ### Added
 - **`record_evidence` is batch-native.** Pass `results=[{node_id, success, depth, claim_id}, …]`
   to report every experiment from one turn in one call. `create_hypotheses`, `update_status`
@@ -56,6 +78,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `/hypotree-next` and the server-level instructions now teach the batch shape.
 
 ### Eval harness
+- **One bad result no longer discards the rest of a batch.** The harness looped the
+  single-result call, so a batch containing an unknown node id aborted: the results already
+  applied stayed in the belief state while the whole call was reported as an error, and every
+  result *after* the bad one was never attempted. Each of those is an experiment that has
+  already been paid for — which is exactly what `engine.record_results` per-item isolation
+  exists to prevent, and the harness was silently overriding it. Never fired in run H (zero
+  record failures), so no result is affected.
+- Rejected batch items are logged (`record_rejected`) and reported. Per-item isolation makes
+  the containing call succeed, so without this a refusal appeared nowhere: not in the tool
+  census, which sees an ok call, and not in the evidence count, which never saw the result.
+- **`seed_reader` reports probes to name the culprit.** The report said how many conflicts
+  were narrowed and never what they cost, so the member ordering — the thing that decides
+  that cost, one probe per position — was invisible. Run G: **1.73**. Run H: **2.13**. A run
+  can resolve every conflict and still have got slower, and nothing said so.
 - **A win no longer cuts the episode off mid-protocol.** The environment decides the win the
   instant a probe clears the target, but the agent is holding an unreported result at that
   moment. On the seeds where the swap that identifies a culprit *is also* the winning

@@ -430,7 +430,8 @@ def test_a_skipped_member_is_revisited_once_a_substitute_frees_up(
 
     The member was passed over because its question had no live alternative. The
     moment one appears, the swap that interrogates it exists — and the diagnosis
-    proposes it instead of giving up and reopening every question by hand.
+    stops reporting it as unreachable instead of giving up and reopening every
+    question by hand.
     """
     _build_two_axis_landscape(engine)
     engine.record_evidence("combo1", LogicalEvidence(success=0.0, depth=2))

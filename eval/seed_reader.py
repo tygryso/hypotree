@@ -167,6 +167,13 @@ class RunLog:
     conflicts_recorded: int = 0
     conflict_members: int = 0
     conflicts_resolved: int = 0
+    # Composition probes spent between recording a conflict and naming its
+    # culprit. This is what the diagnosis ordering actually buys, and it was
+    # invisible: the report said how many conflicts resolved but never what they
+    # cost, so an ordering that quietly doubled the swaps read as a clean run.
+    diagnosis_swaps: list[int] = field(default_factory=list)
+    # Results the engine refused inside a batch while the rest still applied.
+    records_rejected: int = 0
     revision_fired: bool = False
 
     # Memory maintenance
@@ -278,6 +285,9 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
     # the first answer cannot retire the second, so the second probe is spent on
     # a question the batch had already asked.
     batch_groups: list[str] = []
+    # Probe count when the currently-open conflict was recorded, so the swaps it
+    # took to name a culprit can be attributed to it.
+    open_conflict_at: int | None = None
 
     for ev in events:
         kind = ev.get("event_type")
@@ -405,9 +415,16 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
         elif kind == "conflict_recorded":
             log.conflicts_recorded += 1
             log.conflict_members += ev.get("n_members", 0)
+            open_conflict_at = log.experiments
 
         elif kind == "conflict_resolved":
             log.conflicts_resolved += 1
+            if open_conflict_at is not None:
+                log.diagnosis_swaps.append(log.experiments - open_conflict_at)
+                open_conflict_at = None
+
+        elif kind == "record_rejected":
+            log.records_rejected += 1
 
         elif kind == "session_reset":
             log.session_resets += 1
@@ -951,6 +968,12 @@ def _section_belief_state(logs: list[RunLog]) -> list[str]:
             "it tested is still untested",
         ],
         [
+            "results rejected inside a batch",
+            str(sum(log.records_rejected for log in b_logs)),
+            "the engine refused one result while the rest of the batch still applied — "
+            "isolation working, but each one is still a probe whose answer was lost",
+        ],
+        [
             "evidence-regime overrides",
             str(sum(log.regime_overrides for log in b_logs)),
             "agent asked for a regime the environment does not have",
@@ -1061,7 +1084,19 @@ def _section_stratified(logs: list[RunLog]) -> list[str]:
         resolved = sum(log.conflicts_resolved for log in conflict_logs)
         recorded = sum(log.conflicts_recorded for log in conflict_logs)
         interaction = sum(log.interaction_reopens for log in conflict_logs)
+        swaps = [n for log in conflict_logs for n in log.diagnosis_swaps]
+        swap_line = (
+            f"{statistics.mean(swaps):.2f} probes to name the culprit "
+            f"(min {min(swaps)}, max {max(swaps)})"
+            if swaps
+            else "no culprit was named, so the diagnosis cost nothing and bought nothing"
+        )
         out += [
+            f"Diagnosis cost: {swap_line}. This is what the member ordering buys and it is "
+            "the number to watch — one swap per position, so a culprit ranked second costs "
+            "exactly one probe more than a culprit ranked first. A run can resolve every "
+            "conflict and still have got slower.",
+            "",
             f"Recovery health: {resolved}/{recorded} conflicts narrowed to a culprit, "
             f"{interaction} alternative(s) reopened after a conflict was shown to be an "
             f"interaction effect, "

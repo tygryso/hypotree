@@ -7,8 +7,11 @@ and termination on adversarial graphs.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from hypotree.engine import HypoTreeEngine
 from hypotree.graph import CycleError, HypoTreeGraph
 from hypotree.models import Edge, EdgeType, Node, Status
 
@@ -360,3 +363,108 @@ def test_dependency_child_of_exhausted_parent_is_blocked() -> None:
     g.add_node(Node(id="c", statement="c", status=Status.UNTESTED))
     g.add_edge(Edge(src="p", dst="c", type=EdgeType.DEPENDENCY))
     assert "c" not in g.eligible_frontier()
+
+
+@pytest.mark.unit
+def test_bulk_edge_load_checks_acyclicity_once() -> None:
+    """Rebuilding edge by edge cost O(E*(V+E)) — the quadratic dispatch term."""
+    g = HypoTreeGraph()
+    for i in range(6):
+        g.add_node(Node(id=f"n{i}", statement=f"h{i}"))
+    edges = [Edge(src=f"n{i}", dst=f"n{i + 1}", type=EdgeType.DEPENDENCY) for i in range(5)]
+    g.add_edges_bulk(edges)
+
+    assert g.is_acyclic()
+    assert g.parents("n3") == ["n2"]
+    assert g.parents("n0") == []
+    # parent_ids stays derived, exactly as the per-edge path maintains it.
+    assert g.get_node("n5").parent_ids == ["n4"]
+
+
+@pytest.mark.unit
+def test_bulk_edge_load_rejects_a_cyclic_set_and_rolls_back() -> None:
+    """A rejected bulk load must leave the graph exactly as it found it."""
+    g = HypoTreeGraph()
+    for i in range(3):
+        g.add_node(Node(id=f"n{i}", statement=f"h{i}"))
+    g.add_edge(Edge(src="n0", dst="n1", type=EdgeType.DEPENDENCY))
+
+    cyclic = [
+        Edge(src="n1", dst="n2", type=EdgeType.DEPENDENCY),
+        Edge(src="n2", dst="n0", type=EdgeType.DEPENDENCY),
+    ]
+    with pytest.raises(CycleError, match="bulk edge load"):
+        g.add_edges_bulk(cyclic)
+
+    assert g.is_acyclic()
+    assert g.parents("n2") == []
+    assert g.parents("n0") == []
+    assert g.parents("n1") == ["n0"]
+
+
+@pytest.mark.unit
+def test_parents_are_indexed_not_scanned() -> None:
+    """The frontier calls parents() per node, so a full edge scan is quadratic."""
+    g = HypoTreeGraph()
+    for name in ("a", "b", "c", "child"):
+        g.add_node(Node(id=name, statement=name))
+    g.add_edge(Edge(src="a", dst="child", type=EdgeType.DEPENDENCY))
+    g.add_edge(Edge(src="b", dst="child", type=EdgeType.ALTERNATIVE))
+    g.add_edge(Edge(src="c", dst="child", type=EdgeType.DEPENDENCY))
+
+    assert sorted(g.parents("child")) == ["a", "b", "c"]
+    assert sorted(g.parents("child", EdgeType.DEPENDENCY)) == ["a", "c"]
+    assert g.parents("child", EdgeType.REFINEMENT) == []
+    # Re-adding the same edge must not duplicate the index entry.
+    g.add_edge(Edge(src="a", dst="child", type=EdgeType.DEPENDENCY))
+    assert sorted(g.parents("child")) == ["a", "b", "c"]
+
+
+@pytest.mark.unit
+def test_a_rejected_bulk_load_keeps_edges_that_already_existed() -> None:
+    """A bad set must not delete good edges it merely mentions."""
+    g = HypoTreeGraph()
+    for i in range(3):
+        g.add_node(Node(id=f"n{i}", statement=f"h{i}"))
+    g.add_edge(Edge(src="n0", dst="n1", type=EdgeType.DEPENDENCY))
+
+    with pytest.raises(CycleError):
+        g.add_edges_bulk(
+            [
+                # Already present — must survive the rollback.
+                Edge(src="n0", dst="n1", type=EdgeType.DEPENDENCY),
+                Edge(src="n1", dst="n2", type=EdgeType.DEPENDENCY),
+                Edge(src="n2", dst="n0", type=EdgeType.DEPENDENCY),
+            ]
+        )
+
+    assert g.parents("n1") == ["n0"]
+    assert g.get_node("n1").parent_ids == ["n0"]
+    assert g.parents("n2") == []
+    assert g.is_acyclic()
+
+
+@pytest.mark.unit
+def test_a_cyclic_store_degrades_to_per_edge_loading_not_to_no_edges(tmp_path: Path) -> None:
+    """Dropping every edge would make every node look like a root.
+
+    A frontier computed from an edgeless graph is not a degraded answer, it is a
+    wrong one: every gated hypothesis becomes dispatchable at once.
+    """
+    engine = HypoTreeEngine(tmp_path / "cyc.db", rng_seed=1)
+    try:
+        engine.create_hypotheses(
+            [
+                {"statement": "a", "node_id": "a"},
+                {"statement": "b", "node_id": "b", "parent_ids": ["a"]},
+            ]
+        )
+        # Forge a cycle straight into the store, bypassing the engine's guard.
+        engine._store.add_edge(Edge(src="b", dst="a", type=EdgeType.DEPENDENCY))
+        engine._sync_graph_from_store()
+
+        assert engine._graph.is_acyclic()
+        # The good edge survived; only the one closing the cycle was dropped.
+        assert engine._graph.parents("b") == ["a"]
+    finally:
+        engine.close()

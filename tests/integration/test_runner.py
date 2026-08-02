@@ -2382,3 +2382,61 @@ def test_a_batch_of_results_is_reported_in_one_call(tmp_path: Path) -> None:
     # Both results are instrumented individually, so a batch is analysed exactly
     # as a sequence of single calls would be.
     assert [e["node_id"] for e in recorded] == ["n1", "n2"]
+
+
+@pytest.mark.integration
+def test_one_bad_result_does_not_discard_the_rest_of_the_batch(tmp_path: Path) -> None:
+    """The harness must honour the engine's own per-item isolation contract.
+
+    Looping the single-result call let one bad node id abort the batch: results
+    already applied stayed in the belief state while the whole call was reported
+    as an error, and every result after the bad one was never attempted. Each of
+    those is an experiment that has already been paid for.
+    """
+    eval_dir = _setup_eval_env(tmp_path, seed=1001)
+    config = make_run_config(ARM_B, 1001, eval_dir, "test-run", llm_backend="mock")
+
+    import os
+
+    os.environ["XDG_DATA_HOME"] = str(tmp_path / "xdg")
+
+    engine = HypoTreeEngine(tmp_path / "iso.db", rng_seed=1)
+    logger = RunLogger(tmp_path / "iso.jsonl", seed=1001, arm=ARM_B)
+    try:
+        engine.create_hypotheses(
+            [
+                {"statement": "a=1", "node_id": "n1"},
+                {"statement": "goal", "node_id": "g1", "is_goal": True, "target_metric": 0.8},
+                {"statement": "b=1", "node_id": "n2"},
+            ]
+        )
+        out = _execute_tool(
+            "record_evidence",
+            {
+                "results": [
+                    {"node_id": "n1", "success": 1.0, "depth": 1},
+                    {"node_id": "ghost", "success": 1.0, "depth": 1},
+                    {"node_id": "g1", "success": 1.0, "depth": 1},
+                    {"node_id": "n2", "success": 0.0, "depth": 1},
+                ],
+                "count_next_targets": 0,
+            },
+            engine,
+            [],
+            config,
+            logger,
+            [],
+        )
+        payload = json.loads(out)
+        assert [p["id"] for p in payload["recorded"]] == ["n1", "n2"]
+        assert [f["node_id"] for f in payload["failed"]] == ["ghost", "g1"]
+        # Both good results landed, including the one *after* the bad entries.
+        assert engine._store.get_node("n1").status.value == "VERIFIED"
+        assert engine._store.get_node("n2").status.value == "INVALIDATED"
+    finally:
+        engine.close()
+
+    events = [json.loads(x) for x in (tmp_path / "iso.jsonl").read_text().strip().split("\n")]
+    # A goal refusal inside a batch is still counted as a paid-for probe with
+    # nowhere to go, exactly as it is for a single call.
+    assert any(e["event_type"] == "goal_evidence_refused" for e in events)

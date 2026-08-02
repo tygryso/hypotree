@@ -31,6 +31,11 @@ class HypoTreeGraph:
         # node_id -> Node; edge_key (src, dst, type) -> Edge
         self._nodes: dict[str, Node] = {}
         self._edges: dict[tuple[str, str, EdgeType], Edge] = {}
+        # dst -> [(src, type)]. A derived index, maintained on every edge write.
+        # Without it `parents()` scans every edge in the graph, and the frontier
+        # calls it once per node — quadratic in the edge count on a workspace
+        # large enough for anyone to notice.
+        self._parents_by_dst: dict[str, list[tuple[str, EdgeType]]] = {}
         self._nx: DiGraph = DiGraph()
 
     # ------------------------------------------------------------------
@@ -54,11 +59,65 @@ class HypoTreeGraph:
             # Roll back the edge that broke acyclicity.
             self._nx.remove_edge(edge.src, edge.dst)
             raise CycleError(f"edge {edge.src} → {edge.dst} would create a cycle")
-        self._edges[(edge.src, edge.dst, edge.type)] = edge
+        self._record_edge(edge)
+
+    def add_edges_bulk(self, edges: list[Edge]) -> None:
+        """Insert many edges, checking acyclicity **once** for the whole set.
+
+        Rebuilding a graph edge by edge runs a full ``is_directed_acyclic_graph``
+        pass per edge, so loading *E* edges costs *O(E·(V+E))* — the quadratic
+        term that made a 1200-node dispatch take four and a half seconds. One
+        check over the finished graph answers the same question.
+
+        The trade is which edge gets named when the set is bad: the per-edge path
+        can say *this* edge closed the cycle, and this one can only say the batch
+        did. That is the right trade for a trusted reload of an already-acyclic
+        store, and the wrong one for interactive creation — which is why
+        ``add_edge`` keeps its per-edge check rather than being reimplemented on
+        top of this.
+        """
+        added: list[Edge] = []
+        recorded: list[Edge] = []
+        for edge in edges:
+            if not self._nx.has_edge(edge.src, edge.dst):
+                self._nx.add_edge(edge.src, edge.dst)
+                added.append(edge)
+            # Only edges this call actually introduced may be rolled back. An
+            # edge already in the graph must survive a rejected batch, or a bad
+            # set would silently delete good edges it merely mentioned.
+            if (edge.src, edge.dst, edge.type) not in self._edges:
+                recorded.append(edge)
+            self._record_edge(edge)
+        if not is_directed_acyclic_graph(self._nx):
+            for edge in added:
+                self._nx.remove_edge(edge.src, edge.dst)
+            for edge in recorded:
+                self._forget_edge(edge)
+            raise CycleError(f"bulk edge load of {len(edges)} edge(s) would create a cycle")
+
+    def _record_edge(self, edge: Edge) -> None:
+        """Store a typed edge and keep the derived indexes in step with it."""
+        key = (edge.src, edge.dst, edge.type)
+        if key not in self._edges:
+            self._parents_by_dst.setdefault(edge.dst, []).append((edge.src, edge.type))
+        self._edges[key] = edge
         # Keep the child's derived parent_ids in sync.
         child = self._nodes.get(edge.dst)
         if child is not None and edge.src not in child.parent_ids:
             child.parent_ids.append(edge.src)
+
+    def _forget_edge(self, edge: Edge) -> None:
+        """Undo ``_record_edge``. Only used to roll a rejected bulk load back."""
+        if self._edges.pop((edge.src, edge.dst, edge.type), None) is None:
+            return
+        entries = self._parents_by_dst.get(edge.dst)
+        if entries and (edge.src, edge.type) in entries:
+            entries.remove((edge.src, edge.type))
+            if not entries:
+                del self._parents_by_dst[edge.dst]
+        child = self._nodes.get(edge.dst)
+        if child is not None and edge.src in child.parent_ids:
+            child.parent_ids.remove(edge.src)
 
     def get_node(self, node_id: str) -> Node | None:
         return self._nodes.get(node_id)
@@ -72,11 +131,10 @@ class HypoTreeGraph:
 
     def parents(self, node_id: str, edge_type: EdgeType | None = None) -> list[str]:
         """Direct parent ids, optionally filtered by edge type."""
-        result: list[str] = []
-        for src, dst, etype in self._edges:
-            if dst == node_id and (edge_type is None or etype == edge_type):
-                result.append(src)
-        return result
+        entries = self._parents_by_dst.get(node_id)
+        if not entries:
+            return []
+        return [src for src, etype in entries if edge_type is None or etype == edge_type]
 
     # ------------------------------------------------------------------
     # Topology

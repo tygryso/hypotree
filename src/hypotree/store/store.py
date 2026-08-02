@@ -337,8 +337,23 @@ class HypoTreeStore:
         return self._row_to_node(row)
 
     def get_all_nodes(self) -> list[Node]:
+        """Every node, with parents resolved in one query rather than one each.
+
+        `_row_to_node` derives `parent_ids` from the edges table, so building N
+        nodes issued N+1 queries. This is the hottest read in the engine — the
+        navigator calls it several times per dispatch — and at a thousand nodes
+        the per-row lookups were the single largest cost in selecting a target.
+        """
         rows = self._conn.execute("SELECT * FROM nodes").fetchall()
-        return [self._row_to_node(r) for r in rows]
+        parents = self._parent_ids_by_child()
+        return [self._row_to_node(r, parents.get(r["id"], [])) for r in rows]
+
+    def _parent_ids_by_child(self) -> dict[str, list[str]]:
+        """Every child's parent ids, in one pass over the edges table."""
+        out: dict[str, list[str]] = {}
+        for row in self._conn.execute("SELECT DISTINCT dst, src FROM edges").fetchall():
+            out.setdefault(row["dst"], []).append(row["src"])
+        return out
 
     def get_nodes_in_exclusion_group(self, group: str, exclude_id: str | None = None) -> list[Node]:
         """Every node sharing a mutual-exclusion group, optionally excluding one.
@@ -352,8 +367,11 @@ class HypoTreeStore:
         ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
-    def _row_to_node(self, row: sqlite3.Row) -> Node:
-        parent_ids = self.get_parent_ids(row["id"])
+    def _row_to_node(self, row: sqlite3.Row, parent_ids: list[str] | None = None) -> Node:
+        # Resolved per row only when the caller has not already fetched them in
+        # bulk; `get_all_nodes` passes them in to avoid a query per node.
+        if parent_ids is None:
+            parent_ids = self.get_parent_ids(row["id"])
         # created_at and updated_at are NOT NULL in the schema
         created_at = _str_to_dt(row["created_at"])
         updated_at = _str_to_dt(row["updated_at"])
@@ -746,9 +764,10 @@ class HypoTreeStore:
         confirmed by some test, and what the failure shows is that those tests
         were not jointly sufficient *at this depth*. Returns the conflict id.
 
-        The given order is preserved verbatim, because it is the order in which
-        diagnosis will interrogate the members and ``probe_index`` counts into
-        it. Re-sorting here would silently override the caller's ranking.
+        The given order is preserved verbatim: it is the engine's weakest-claim-
+        first ranking and the order diagnosis walks. Re-sorting here would
+        silently override it. (The old integer cursor also counted into this
+        list; it no longer does, but the order is still the ranking.)
         """
         txn = self._txn_id()
         payload = json.dumps(list(member_ids))

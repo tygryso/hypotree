@@ -1,7 +1,7 @@
 [project]
 name = "hypotree"
 version = "0.4.0"
-description = "MCP server: persistent, self-revising hypothesis-DAG for agentic R&D"
+description = "Memory that forgets: a persistent, self-revising belief-state MCP server for agentic R&D. Uses a hypothesis DAG to auto-prune dead ends and deduce truth without extra probes."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -19,6 +19,9 @@ keywords = [
     "dag",
     "thompson-sampling",
     "research",
+    "rag-alternative",
+    "ai-agents",
+    "agentic-memory",
 ]
 classifiers = [
     # Beta, not Production/Stable: the API is pre-1.0. The schema now migrates

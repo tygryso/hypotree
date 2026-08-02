@@ -39,7 +39,13 @@ from eval.runner.config import (
     reset_eval_db,
     resolve_eval_db_path,
 )
-from hypotree.engine import GoalEvidenceError, HypoTreeEngine, TargetResponse
+from hypotree.engine import (
+    ClaimError,
+    GoalEvidenceError,
+    HypoTreeEngine,
+    NodeNotFoundError,
+    TargetResponse,
+)
 from hypotree.models.evidence import LogicalEvidence
 from hypotree.models.status import Status, posterior_mean
 
@@ -1066,19 +1072,39 @@ def _execute_tool_inner(
         # result in the batch has landed.
         count_next = int(args.get("count_next_targets", 2) or 0)
         payloads: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        # Per-item isolation, matching `engine.record_results`. Looping the
+        # single-result call without this let one bad node id abort the batch —
+        # the results already applied stayed in the belief state while the whole
+        # call was reported as an error, and every result after the bad one was
+        # never attempted. Each of those is an experiment that has already been
+        # paid for, which is exactly what the engine's batch contract exists to
+        # protect and what the harness was quietly overriding.
         for index, item in enumerate(items):
             last = index == len(items) - 1
-            payloads.append(
-                _record_one_result(
-                    item,
-                    engine,
-                    logger,
-                    transcript,
-                    count_next=count_next if last else 0,
+            try:
+                payloads.append(
+                    _record_one_result(
+                        item,
+                        engine,
+                        logger,
+                        transcript,
+                        count_next=count_next if last else 0,
+                    )
                 )
-            )
+            except GoalEvidenceError as exc:
+                logger.log_goal_evidence_refused(str(item.get("node_id", "")))
+                logger.log_record_rejected(str(item.get("node_id", "")), str(exc))
+                failures.append({"node_id": item.get("node_id"), "error": str(exc)})
+            except (NodeNotFoundError, ClaimError, KeyError) as exc:
+                logger.log_record_rejected(str(item.get("node_id", "")), str(exc))
+                failures.append({"node_id": item.get("node_id"), "error": str(exc)})
         if args.get("results"):
-            return json.dumps({"recorded": payloads}, default=str)
+            return json.dumps({"recorded": payloads, "failed": failures}, default=str)
+        if failures and not payloads:
+            # A single result that was refused keeps raising, so the agent sees
+            # the error in full rather than an empty success.
+            raise ValueError(failures[0]["error"])
         return json.dumps(payloads[0], default=str)
 
     elif tool_name == "get_goal_status":
@@ -1259,6 +1285,17 @@ class RunLogger:
         hypothesis actually under test is still sitting untested.
         """
         self._write("goal_evidence_refused", node_id=node_id)
+
+    def log_record_rejected(self, node_id: str, error: str) -> None:
+        """One result of a batch the engine refused, with the rest still applied.
+
+        Per-item isolation is what stops a bad node id destroying results that
+        were already paid for, but it also means the containing call succeeds —
+        so without this the refusal appears nowhere: not in the tool census,
+        which sees an ok call, and not in the evidence count, which never saw the
+        result. A rejection that costs a probe has to be visible somewhere.
+        """
+        self._write("record_rejected", node_id=node_id, error=error[:200])
 
     def log_llm_call(
         self,

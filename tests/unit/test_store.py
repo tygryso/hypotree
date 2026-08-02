@@ -725,3 +725,23 @@ def test_a_failed_migration_leaves_the_old_version_intact(
     stamped = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
     conn.close()
     assert stamped == "8"
+
+
+@pytest.mark.unit
+def test_get_all_nodes_resolves_parents_without_a_query_per_node(tmp_path: Path) -> None:
+    """The navigator's hottest read was issuing N+1 queries to derive parent_ids."""
+    store = HypoTreeStore(tmp_path / "n1.db")
+    try:
+        for name in ("a", "b", "c"):
+            store.add_node(Node(id=name, statement=name))
+        store.add_edge(Edge(src="a", dst="c", type=EdgeType.DEPENDENCY))
+        store.add_edge(Edge(src="b", dst="c", type=EdgeType.DEPENDENCY))
+
+        by_id = {n.id: n for n in store.get_all_nodes()}
+        assert sorted(by_id["c"].parent_ids) == ["a", "b"]
+        assert by_id["a"].parent_ids == []
+        # The single-node read still resolves its own parents.
+        single = store.get_node("c")
+        assert sorted(single.parent_ids) == ["a", "b"]
+    finally:
+        store.close()
