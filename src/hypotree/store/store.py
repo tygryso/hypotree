@@ -13,7 +13,7 @@ import uuid
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,7 @@ from hypotree.models.edge import Edge, EdgeType
 from hypotree.models.evidence import Evidence, InfraError, LogicalEvidence
 from hypotree.models.node import Node
 from hypotree.models.status import Status, utcnow
-from hypotree.store.schema import MIGRATIONS, SCHEMA_DDL, SCHEMA_VERSION
+from hypotree.store.schema import BASE_DDL, BASELINE_VERSION, MIGRATIONS, SCHEMA_VERSION
 
 
 class SchemaVersionError(RuntimeError):
@@ -44,6 +44,13 @@ def _is_newer_version(version: str, current: str) -> bool:
         return int(version) > int(current)
     except ValueError:
         return False
+
+
+def _app_version() -> str:
+    """The hypotree release doing the writing. Imported lazily to stay import-safe."""
+    from hypotree import __version__
+
+    return str(__version__)
 
 
 def _dt_to_str(dt: datetime | None) -> str | None:
@@ -98,8 +105,19 @@ def _evidence_to_row(node_id: str, ev: Evidence) -> dict:
 class HypoTreeStore:
     """Persistent store backed by SQLite in WAL mode."""
 
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: Path | str, read_only: bool = False) -> None:
         self._db_path = str(db_path)
+        self._read_only = read_only
+        if read_only:
+            # A reader that physically cannot write. WAL already allows a second
+            # connection to read while the agent writes, so an observer needs no
+            # lock and no cooperation — and enforcing it at the driver means a
+            # read path that is wrong fails loudly instead of quietly mutating
+            # the belief state someone is watching.
+            self._conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
+            self._conn.row_factory = sqlite3.Row
+            self._check_schema_version()
+            return
         self._conn = sqlite3.connect(str(db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -142,79 +160,124 @@ class HypoTreeStore:
     # -- schema setup ----------------------------------------------------------
 
     def _init_schema(self) -> None:
-        # executescript issues an implicit COMMIT before running, so it must
-        # run outside the explicit transaction() context manager.
-        self._conn.executescript(SCHEMA_DDL)
+        # The *original* schema, not the current one, and every statement is
+        # `IF NOT EXISTS`. Runs on every open: a no-op for a database that has it
+        # and a repair for one missing a table. executescript issues an implicit
+        # COMMIT, so it must run outside the transaction() context manager.
+        self._conn.executescript(BASE_DDL)
 
-    def _check_schema_version(self) -> None:
-        """Stamp a fresh database, or bring an existing one up to date.
+    def _recorded_version(self) -> str | None:
+        """The schema version this file claims, or None if it has never been stamped.
 
-        A published tool cannot answer "your schema is old" with "delete it".
-        The belief state *is* the product — a month of recorded experiments, the
-        thing every claim about surviving across sessions rests on — so an
-        upgrade migrates it or refuses to touch it, and never quietly discards
-        it.
+        `schema_state` is authoritative; `schema_meta` is the pre-0.4.0 spelling
+        and is read only when the newer table has no row yet. A database opened
+        by an older hypotree and then by this one therefore migrates once and
+        never looks at the legacy key again.
         """
-        row = self._conn.execute(
+        row = self._conn.execute("SELECT schema_version FROM schema_state WHERE id=1").fetchone()
+        if row is not None:
+            return str(row["schema_version"])
+        legacy = self._conn.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()
-        if row is None:
-            # Fresh DB — stamp it. No migrations run: `_init_schema` already
-            # created every table at the current version.
-            self._conn.execute(
-                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
-                (SCHEMA_VERSION,),
-            )
-            self._conn.commit()
-        elif row["value"] != SCHEMA_VERSION:
-            self._migrate(str(row["value"]))
+        return str(legacy["value"]) if legacy is not None else None
 
-    def _migrate(self, from_version: str) -> None:
-        """Walk the migration chain from ``from_version`` to ``SCHEMA_VERSION``.
+    def _check_schema_version(self) -> None:
+        """Bring the database up to the current version, or refuse to touch it.
 
-        Each step runs its statements and stamps the new version inside one
-        transaction. SQLite makes DDL transactional, so an interrupted upgrade
-        rolls back to the version it started from and the next open retries it —
-        there is no state in which the tables and the stamp disagree.
+        A published tool cannot answer "your schema is old" with "delete it". The
+        belief state *is* the product — a month of recorded experiments, the
+        thing every claim about surviving across sessions rests on — so an
+        upgrade migrates it or stops, and never quietly discards it.
 
-        Refuses rather than guesses in the two cases where it cannot know what to
-        do: a database written by a newer hypotree (downgrading could silently
-        drop data this version cannot represent) and a version with no route
-        forward (a hand-edited stamp, or a development build that never shipped).
+        A fresh file is not a special case: `_init_schema` has just produced the
+        *baseline* shape, so it starts at ``BASELINE_VERSION`` and walks the same
+        steps an old database walks. One path, exercised on every install.
         """
-        version = from_version
-        while version != SCHEMA_VERSION:
-            step = MIGRATIONS.get(version)
-            if step is None:
-                raise SchemaVersionError(
-                    f"No migration path from schema_version='{version}' to "
-                    f"'{SCHEMA_VERSION}' at {self._db_path}. "
-                    + (
-                        "This database was written by a newer hypotree; upgrade the "
-                        "package rather than downgrading the data."
-                        if _is_newer_version(version, SCHEMA_VERSION)
-                        else "Back the file up and open an issue — do not delete it."
-                    )
-                )
-            target, statements = step
+        current = self._recorded_version() or BASELINE_VERSION
+        # A file that has never been stamped is being *created*, not upgraded. It
+        # walks the same steps, but calling that a migration in the audit log
+        # would put "migrated from 8 to 9" in the history of every new workspace,
+        # which is false and would bury the first real one.
+        fresh = self._recorded_version() is None
+
+        if _is_newer_version(current, SCHEMA_VERSION):
+            raise SchemaVersionError(
+                f"schema_version='{current}' at {self._db_path} is newer than this "
+                f"hypotree understands ('{SCHEMA_VERSION}'). Upgrade the package rather "
+                f"than downgrading the data — the newer version may have stored things "
+                f"this one cannot represent."
+            )
+        if _is_newer_version(BASELINE_VERSION, current):
+            raise SchemaVersionError(
+                f"schema_version='{current}' at {self._db_path} predates the migration "
+                f"chain, which starts at '{BASELINE_VERSION}'. Back the file up and open "
+                f"an issue — do not delete it."
+            )
+
+        if self._read_only:
+            # A reader migrates nothing. Being behind is only a problem if the
+            # reader would misread the file, and every step so far is additive.
+            return
+
+        pending = [(v, sql) for v, sql in MIGRATIONS if _is_newer_version(v, current)]
+        for target, statements in pending:
+            # DDL is transactional in SQLite, so an interrupted upgrade rolls
+            # back to the version it started from and the next open retries it.
+            # There is no state in which the tables and the stamp disagree.
             with self.transaction() as conn:
                 for sql in statements:
                     conn.execute(sql)
-                conn.execute(
-                    "UPDATE schema_meta SET value=? WHERE key='schema_version'",
-                    (target,),
-                )
+                self._stamp(conn, target)
                 # The events table is the workspace's audit log, so an upgrade
                 # belongs in it: "why does this database look different from the
                 # one I backed up?" is answerable from the same place as every
                 # other question about how it got into its current state.
-                self._write_event(
-                    conn,
-                    "SchemaMigrated",
-                    json.dumps({"from": version, "to": target}),
-                    self._txn_id(),
-                )
-            version = target
+                if not fresh:
+                    self._write_event(
+                        conn,
+                        "SchemaMigrated",
+                        json.dumps({"from": current, "to": target}),
+                        self._txn_id(),
+                    )
+            current = target
+
+        if not pending and self._recorded_version() != SCHEMA_VERSION:
+            # Never stamped, or stamped only in the legacy table.
+            with self.transaction() as conn:
+                self._stamp(conn, SCHEMA_VERSION)
+        elif not pending:
+            self._record_app_version()
+
+    def _stamp(self, conn: sqlite3.Connection, version: str) -> None:
+        """Record the schema version, the release that wrote it, and when."""
+        conn.execute(
+            "INSERT INTO schema_state (id, schema_version, app_version, migrated_at) "
+            "VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+            "schema_version=excluded.schema_version, app_version=excluded.app_version, "
+            "migrated_at=excluded.migrated_at",
+            (version, _app_version(), _dt_to_str(utcnow())),
+        )
+        # Kept in step for one more minor version so a reader written against the
+        # pre-0.4.0 key still sees the truth.
+        conn.execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (version,),
+        )
+
+    def _record_app_version(self) -> None:
+        """Note which release last opened an already-current database.
+
+        Cheap, and it is the difference between "which build wrote this?" being
+        answerable and being guesswork when a bug report arrives with a database
+        attached.
+        """
+        row = self._conn.execute("SELECT app_version FROM schema_state WHERE id=1").fetchone()
+        if row is not None and str(row["app_version"]) == _app_version():
+            return
+        with self.transaction() as conn:
+            self._stamp(conn, SCHEMA_VERSION)
 
     # -- node CRUD -------------------------------------------------------------
 
@@ -410,8 +473,8 @@ class HypoTreeStore:
         txn = self._txn_id()
         with self.transaction() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO edges (src, dst, type) VALUES (?,?,?)",
-                (edge.src, edge.dst, edge.type.value),
+                "INSERT OR IGNORE INTO edges (src, dst, type, created_at) VALUES (?,?,?,?)",
+                (edge.src, edge.dst, edge.type.value, _dt_to_str(utcnow())),
             )
             self._write_event(
                 conn,
@@ -423,6 +486,58 @@ class HypoTreeStore:
     def get_all_edges(self) -> list[Edge]:
         rows = self._conn.execute("SELECT * FROM edges").fetchall()
         return [Edge(src=r["src"], dst=r["dst"], type=EdgeType(r["type"])) for r in rows]
+
+    def get_edge_rows(self) -> list[sqlite3.Row]:
+        """Edges with their creation time, for replaying topology over time."""
+        return self._conn.execute("SELECT * FROM edges").fetchall()
+
+    # -- scheduling directives -------------------------------------------------
+
+    def set_directive(self, node_id: str, mode: str, reason: str, actor: str) -> None:
+        """Pin or suspend a node. One directive per node; setting replaces."""
+        txn = self._txn_id()
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO node_directives (node_id, mode, reason, actor, set_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET "
+                "mode=excluded.mode, reason=excluded.reason, actor=excluded.actor, "
+                "set_at=excluded.set_at",
+                (node_id, mode, reason, actor, _dt_to_str(utcnow())),
+            )
+            self._write_event(
+                conn,
+                "DirectiveSet",
+                json.dumps({"node_id": node_id, "mode": mode, "reason": reason, "actor": actor}),
+                txn,
+            )
+
+    def clear_directive(self, node_id: str) -> bool:
+        """Drop a node's directive. True if one was there."""
+        txn = self._txn_id()
+        with self.transaction() as conn:
+            cur = conn.execute("DELETE FROM node_directives WHERE node_id=?", (node_id,))
+            removed = cur.rowcount > 0
+            if removed:
+                self._write_event(conn, "DirectiveCleared", json.dumps({"node_id": node_id}), txn)
+        return removed
+
+    def get_directives(self) -> dict[str, sqlite3.Row]:
+        """Every live directive, keyed by node id."""
+        return {
+            str(r["node_id"]): r
+            for r in self._conn.execute("SELECT * FROM node_directives").fetchall()
+        }
+
+    def latest_event_seq(self) -> int:
+        """The belief state's revision number.
+
+        `events.seq` autoincrements inside the same transaction as every
+        mutation, so it advances exactly when something changed and never when
+        nothing did. That makes it a correct change signal by construction rather
+        than by a hook someone has to remember to fire.
+        """
+        row = self._conn.execute("SELECT MAX(seq) AS s FROM events").fetchone()
+        return int(row["s"] or 0)
 
     def get_parent_ids(self, node_id: str) -> list[str]:
         rows = self._conn.execute(
@@ -610,6 +725,28 @@ class HypoTreeStore:
             "SELECT * FROM evidence WHERE node_id=? ORDER BY id DESC LIMIT ? OFFSET ?",
             (node_id, limit, offset),
         ).fetchall()
+
+    def count_evidence_by_node(self, before: datetime | None = None) -> dict[str, int]:
+        """Observation tallies per node, optionally as they stood at an instant.
+
+        One aggregate beats reading a cached count off every node, and passing
+        ``before`` is what lets a historical view say what an experiment had
+        cost *by then* rather than what it has cost since.
+        """
+        if before is None:
+            rows = self._conn.execute(
+                "SELECT node_id, COUNT(*) AS n FROM evidence GROUP BY node_id"
+            ).fetchall()
+        else:
+            # Timestamps are compared as text, so the cutoff has to be rendered
+            # in the same UTC form the rows were written in.
+            cutoff = before if before.tzinfo else before.replace(tzinfo=timezone.utc)
+            rows = self._conn.execute(
+                "SELECT node_id, COUNT(*) AS n FROM evidence "
+                "WHERE recorded_at <= ? GROUP BY node_id",
+                (_dt_to_str(cutoff.astimezone(timezone.utc)),),
+            ).fetchall()
+        return {row["node_id"]: int(row["n"]) for row in rows}
 
     # -- claims ----------------------------------------------------------------
 

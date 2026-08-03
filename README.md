@@ -4,7 +4,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg)](CHANGELOG.md)
-[![Tests: 669](https://img.shields.io/badge/tests-669-brightgreen.svg)](tests/)
+[![Tests: 723](https://img.shields.io/badge/tests-723-brightgreen.svg)](tests/)
 [![Version: 0.4.0](https://img.shields.io/badge/version-0.4.0-blue.svg)](pyproject.toml)
 [![PyPI](https://img.shields.io/pypi/v/hypotree.svg)](https://pypi.org/project/hypotree/)
 
@@ -121,14 +121,14 @@ generate_learning_path()
 | Tool | What it does |
 |------|-------------|
 | `create_hypotheses` | Create one or many nodes with `parent_ids`, `exclusion_group`, `is_goal` |
-| `get_next_targets` | Thompson Sampling — returns the next hypothesis to test, under a lease |
+| `get_next_targets` | Thompson Sampling — returns the next hypothesis to test, under a lease. `goal_id` narrows the search to one objective |
 | `record_evidence` | Record one result — or every result from a turn at once with `results=[…]` — and trigger write-back propagation |
-| `generate_learning_path` | What we learned, in order, and what it cost — separates conclusions an experiment paid for from ones the engine inferred free |
+| `generate_learning_path` | What we learned, in order, and what it cost — separates conclusions an experiment paid for from ones the engine inferred free. `goal_id` narrates one objective |
 | `get_workspace_info` | Which belief state you are connected to and which layer chose it — start here when the graph is unexpectedly empty |
 | `update_status` | Manually set node status (rarely needed — the engine does it) |
 | `get_dag_context` | Get a subgraph view for the agent's context window |
 | `render_dag_map` | Mermaid.js diagram of the current belief state |
-| `get_goal_status` | Check whether the goal node is met |
+| `get_goal_status` | Check whether the goal node is met. `goal_id` scopes the counts to one objective's subgraph |
 | `get_conflicts` | List unresolved conflicts (integration failures) |
 | `suggest_discriminating_experiment` | For a conflict, suggest the swap that separates the culprits |
 | `list_nodes` | List/filter nodes by status, depth, or exclusion group |
@@ -260,6 +260,45 @@ uv run python -m eval.runner.engine_selfplay
 The eval harness lives in [`eval/`](eval/) and includes the frozen landscape generators, the agent runner, and the gate scorer. Run artifacts are gitignored (`eval/runs/`).
 
 `eval.sh` is bash — on Windows, run it under WSL or Git Bash. The Python parts of the harness (`engine_selfplay`, `runner`, `analyse_gate`, `seed_reader`) are cross-platform and can be driven directly.
+
+---
+
+## Watch it think
+
+A belief state that revises itself is hard to appreciate from a status column. Start the dashboard beside the agent and watch the graph grow, dead ends grey out, and the navigator's attention move:
+
+```bash
+hypotree --dashboard          # MCP server + dashboard, default port 7331
+hypotree --dashboard-only     # dashboard alone, against an existing belief state
+```
+
+Both bind `127.0.0.1` and mint a session token at startup; the URL, token included, is printed to stderr (stdout is the JSON-RPC channel). `--dashboard-only` starts no MCP server and opens the database read-only, so it is safe to point at a workspace an agent is actively writing — and it needs no client configured to try.
+
+What you get:
+
+- **A live graph.** Nodes are laid out server-side with `networkx` and rendered as SVG with `d3-zoom` for hardware-accelerated pan and zoom. Untested nodes glow at their real chance of being dispatched next; in-progress nodes pulse; **pruned branches desaturate instead of disappearing**, because the point being shown is that they were considered and cut.
+- **New nodes fade in.** When the agent creates a hypothesis, it arrives as a ghost and resolves — you watch the search grow without touching the page.
+- **A timeline scrubber.** `status_history` is bi-temporal, so any past instant is a `WHERE` clause. Drag back and see what was believed then, or press play and watch the whole investigation replay.
+- **Proof mode.** Overlays what each belief cost: the score, the depth, the commit, the `source_ref`. The graph is a ledger, not a drawing.
+- **The learning path as typeset markdown**, ready to paste into a report.
+- **Pin and suspend.** Redirect the search without faking evidence — directives change what is *offered*, never what is believed.
+
+Everything is vendored (Vue 3, d3 micromodules, marked — 276 KB total). No CDN, no npm, no build step: it works on a plane and in an air-gapped network.
+
+The API is read-only JSON, and every `/api/*` call needs the token:
+
+| Route | What it returns |
+|-------|-----------------|
+| `GET /api/meta` | workspace identity and the goal list |
+| `GET /api/graph?goal_id=&at=` | nodes and edges with server-computed layout; `at` reconstructs any past instant |
+| `GET /api/node/<id>` | one node's evidence, provenance and status intervals |
+| `GET /api/frontier?goal_id=&k=` | the top candidates and how likely the navigator is to pick each next |
+| `GET /api/learning-path?goal_id=` | the narrative, same as the MCP tool |
+| `GET /api/timeline?goal_id=` | every status change in order |
+| `GET /api/events` | server-sent revision numbers — the client refetches what it is showing |
+| `POST /api/directive` | pin / suspend / clear (the only write, and only when an engine is attached) |
+
+`p_select` is the real thing, not a proxy: Thompson Sampling picks the argmax of one draw per candidate, so the number is how often each candidate wins that draw.
 
 ---
 

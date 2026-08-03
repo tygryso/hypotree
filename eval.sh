@@ -35,6 +35,7 @@ RUN_ITERATION=""
 BRANCH_OVERRIDE=""
 SKIP_CHECKS=0
 RESUME=0
+SKIP_ARM_A=0
 
 print_usage() {
     echo "Usage: $0 --run-id ID | --run-iteration LETTER [options]"
@@ -50,6 +51,11 @@ print_usage() {
     echo "  --llm-model VAL        (Default: ${LLM_MODEL})"
     echo "  --branch VAL           Override git branch detection (useful in Docker)"
     echo "  --resume               Continue an interrupted run-id, skipping completed arms"
+    echo "  --skip-arm-a           Run only arms B and F. Arm A is the ergonomic"
+    echo "                         baseline and is not on the gating comparison, so"
+    echo "                         dropping it cuts roughly half the wall-clock while"
+    echo "                         iterating. Criterion 1a cannot be scored without it,"
+    echo "                         so the final run must include it."
     echo "  --skip-checks          Skip ruff+pytest (not recommended)"
     echo "  -h|--help"
 }
@@ -63,6 +69,7 @@ while [[ $# -gt 0 ]]; do
         --llm-base-url)  LLM_BASE_URL="$2"; shift 2 ;;
         --llm-model)     LLM_MODEL="$2"; shift 2 ;;
         --resume)        RESUME=1; shift ;;
+        --skip-arm-a)    SKIP_ARM_A=1; shift ;;
         --skip-checks)   SKIP_CHECKS=1; shift ;;
         -h|--help)       print_usage; exit 0 ;;
         *)               echo "Unknown argument: $1" >&2; print_usage; exit 1 ;;
@@ -181,6 +188,15 @@ fi
 # The frozen protocol is the single source of truth for seeds and arms.
 SEEDS=$(uv run python -c "from eval.runner.config import TASK_SEEDS; print(' '.join(map(str, TASK_SEEDS)))")
 ARMS=$(uv run python -c "from eval.runner.config import ALL_ARMS; print(' '.join(ALL_ARMS))")
+if [[ "${SKIP_ARM_A}" -eq 1 ]]; then
+  # Arm A is the ergonomic baseline. Criterion 1b — the gating comparison — is
+  # B against F, and A is the most expensive arm to run because it is the one
+  # that duplicates probes. Dropping it while iterating buys back most of the
+  # wall clock; the run that decides anything has to put it back.
+  ARMS=$(echo "${ARMS}" | tr ' ' '\n' | grep -v '^A$' | tr '\n' ' ')
+  echo "!!! --skip-arm-a: running ${ARMS}only. Criterion 1a and the arm-A columns"
+  echo "    will be absent, and this run cannot be used for a gate decision."
+fi
 N_SEEDS=$(echo "${SEEDS}" | wc -w)
 N_ARMS=$(echo "${ARMS}" | wc -w)
 echo "=== run-id=${RUN_ID}  workspace=${WORKSPACE_ID}  logs=${RUNS_DIR} ==="

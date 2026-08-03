@@ -1,0 +1,237 @@
+/* hypotree dashboard — hand-written, ~10 KB, no build step.
+ *
+ * Deliberately not Tailwind. Utility CSS is small only when a build step purges
+ * it; the browser build is a ~350 KB runtime compiler that scans the DOM on
+ * every load, and a precompiled "everything" bundle is megabytes of utilities
+ * this page will never name. One fixed layout, one palette, one set of
+ * components — that is a stylesheet, not a framework. */
+
+:root {
+  --burgundy: #5b1a2e;
+  --burgundy-lift: #6d2239;
+  --graphite: #2d3142;
+  --graphite-deep: #23262f;
+  --graphite-line: #3b4054;
+  --gold: #c9a227;
+  --gold-soft: #e0bf55;
+  --ink: #e8e6e3;
+  --ink-dim: #a7a5a3;
+
+  --verified: #2fbf9b;
+  --invalidated: #e5484d;
+  --exhausted: #e08c3c;
+  --pruned: #6b6f7d;
+  --inprogress: #4c9be8;
+  --untested: #8b90a3;
+
+  --radius: 12px;
+  --shadow: 0 14px 40px rgba(0, 0, 0, 0.42);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background:
+    radial-gradient(1100px 620px at 12% -8%, rgba(91, 26, 46, 0.55), transparent 60%),
+    radial-gradient(900px 520px at 92% 108%, rgba(201, 162, 39, 0.14), transparent 62%),
+    var(--graphite-deep);
+  color: var(--ink);
+  font: 14px/1.6 ui-sans-serif, system-ui, "Segoe UI", Inter, Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+/* ---- chrome ---- */
+
+header {
+  display: flex; align-items: center; gap: 1rem;
+  padding: 0.7rem 1.1rem;
+  background: linear-gradient(180deg, rgba(91, 26, 46, 0.92), rgba(91, 26, 46, 0.72));
+  border-bottom: 1px solid var(--graphite-line);
+  flex: 0 0 auto;
+}
+header h1 {
+  margin: 0; font-size: 1.02rem; font-weight: 620; letter-spacing: 0.015em;
+}
+header h1 span { color: var(--gold); }
+.spacer { flex: 1; }
+
+select, button {
+  font: inherit;
+  color: var(--ink);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--graphite-line);
+  border-radius: 8px;
+  padding: 0.32rem 0.62rem;
+  cursor: pointer;
+  transition: border-color 0.18s, background 0.18s, color 0.18s;
+}
+select:hover, button:hover { border-color: var(--gold); }
+button.on { background: var(--gold); color: #241a02; border-color: var(--gold); font-weight: 600; }
+
+/* Live indicator: a dot that is green when the stream is up, and a ring that
+ * spins only while the agent is actually working. A dashboard that always looks
+ * busy tells you nothing. */
+.live { display: flex; align-items: center; gap: 0.45rem; font-size: 0.82rem; color: var(--ink-dim); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--pruned); transition: background 0.3s; }
+.dot.up { background: var(--verified); box-shadow: 0 0 0 0 rgba(47, 191, 155, 0.7); animation: pulse 2.2s infinite; }
+@keyframes pulse {
+  70% { box-shadow: 0 0 0 7px rgba(47, 191, 155, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(47, 191, 155, 0); }
+}
+.working { display: flex; align-items: center; gap: 0.4rem; color: var(--gold-soft); font-size: 0.82rem; }
+.spin {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid rgba(201, 162, 39, 0.28); border-top-color: var(--gold);
+  animation: spin 0.85s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- layout ---- */
+
+main { flex: 1; display: flex; min-height: 0; }
+
+aside {
+  width: 24.5rem; flex: 0 0 auto; display: flex; flex-direction: column;
+  background: rgba(35, 38, 47, 0.86);
+  border-right: 1px solid var(--graphite-line);
+  min-height: 0; position: relative;
+}
+/* The handle sits astride the border so it is grabbable without stealing
+   clicks from the panel's own scrollbar. */
+.resizer {
+  position: absolute; top: 0; right: -3px; width: 7px; height: 100%;
+  cursor: col-resize; z-index: 5; touch-action: none;
+}
+.resizer:hover, aside.resizing .resizer { background: rgba(201, 162, 39, 0.45); }
+/* A drag that crosses the graph must not select text on the way. */
+aside.resizing, aside.resizing * { user-select: none; }
+.tabs { display: flex; border-bottom: 1px solid var(--graphite-line); }
+.tabs button {
+  flex: 1; border: 0; border-radius: 0; background: transparent;
+  padding: 0.6rem 0.4rem; color: var(--ink-dim); border-bottom: 2px solid transparent;
+}
+.tabs button.on { background: transparent; color: var(--gold); border-bottom-color: var(--gold); }
+.panel { flex: 1; overflow: auto; padding: 0.9rem 1rem; min-height: 0; }
+
+.graph-wrap { flex: 1; position: relative; min-width: 0; }
+svg.graph { width: 100%; height: 100%; display: block; cursor: grab; }
+svg.graph:active { cursor: grabbing; }
+
+.zoom-controls {
+  position: absolute; right: 0.9rem; bottom: 0.9rem;
+  display: flex; flex-direction: column; gap: 0.35rem; z-index: 4;
+}
+.zoom-controls button {
+  background: transparent; border: 1px solid var(--graphite-line);
+  color: var(--ink-dim); min-width: 2rem; padding: 0.3rem 0.45rem;
+  font-size: 0.85rem; line-height: 1; backdrop-filter: blur(2px);
+}
+.zoom-controls button:hover { color: var(--gold); border-color: var(--gold); }
+
+footer {
+  flex: 0 0 auto; padding: 0.6rem 1.1rem;
+  background: rgba(35, 38, 47, 0.9);
+  border-top: 1px solid var(--graphite-line);
+  display: flex; align-items: center; gap: 0.9rem;
+}
+footer input[type=range] { flex: 1; accent-color: var(--gold); }
+.tick-label { font-variant-numeric: tabular-nums; color: var(--ink-dim); font-size: 0.8rem; min-width: 12rem; }
+
+/* ---- graph ---- */
+
+.edge { stroke: var(--graphite-line); stroke-width: 1.4; fill: none; pointer-events: none; transition: stroke 0.6s ease, opacity 0.6s ease; }
+.edge.dead { stroke: var(--invalidated); opacity: 0.5; }
+
+/* Nodes are drawn after edges so they sit on top: clicking a node never has to
+ * compete with a line crossing it. */
+.node { cursor: pointer; }
+.node circle { transition: fill 0.6s ease, opacity 0.6s ease, r 0.35s ease, stroke 0.25s ease; }
+.node text { font-size: 9.5px; fill: var(--ink-dim); pointer-events: none; }
+.node.sel circle { stroke: var(--gold); stroke-width: 2.4; }
+
+.s-UNTESTED { fill: var(--untested); }
+.s-IN_PROGRESS { fill: var(--inprogress); }
+.s-VERIFIED { fill: var(--verified); }
+.s-EXHAUSTED { fill: var(--exhausted); }
+.s-INVALIDATED { fill: var(--invalidated); }
+.s-NEEDS_REVISION { fill: var(--gold); }
+.s-BLOCKED { fill: var(--pruned); }
+/* Pruned does not vanish. The whole point being demonstrated is that the branch
+ * was considered and cut, so it desaturates and stays on the canvas. */
+.s-PRUNED { fill: var(--pruned); opacity: 0.32; }
+
+.node.goal circle { stroke: var(--gold); stroke-width: 2; }
+.node.working circle { animation: throb 1.5s ease-in-out infinite; }
+@keyframes throb { 50% { opacity: 0.45; r: 11; } }
+
+/* A node the agent has just created fades in rather than appearing. Seeing the
+ * graph grow is the entire pitch. */
+.ghost-enter-from { opacity: 0; }
+.ghost-enter-active { transition: opacity 0.55s ease; }
+.ghost-leave-active { transition: opacity 0.4s ease; }
+.ghost-leave-to { opacity: 0; }
+
+.tip {
+  position: absolute; pointer-events: none; z-index: 20;
+  max-width: 21rem; padding: 0.5rem 0.65rem;
+  background: rgba(20, 22, 28, 0.96); border: 1px solid var(--graphite-line);
+  border-radius: 9px; box-shadow: var(--shadow); font-size: 0.82rem;
+}
+.tip b { color: var(--gold); }
+
+/* ---- panel bits ---- */
+
+h2 { margin: 0 0 0.55rem; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-dim); }
+
+table.metrics { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+table.metrics td { padding: 0.28rem 0.2rem; border-bottom: 1px solid rgba(255, 255, 255, 0.055); }
+table.metrics td:last-child { text-align: right; font-variant-numeric: tabular-nums; color: var(--gold-soft); }
+
+.cand { padding: 0.55rem 0.6rem; border: 1px solid var(--graphite-line); border-radius: 9px; margin-bottom: 0.5rem; background: rgba(0, 0, 0, 0.2); }
+.cand .row { display: flex; align-items: baseline; gap: 0.5rem; }
+.cand .p { color: var(--gold); font-variant-numeric: tabular-nums; font-weight: 620; }
+.cand .st { font-size: 0.74rem; color: var(--ink-dim); }
+.bar { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.09); margin-top: 0.4rem; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--gold), var(--gold-soft)); transition: width 0.5s ease; }
+
+.pill { display: inline-block; padding: 0.06rem 0.4rem; border-radius: 999px; font-size: 0.7rem; font-weight: 600; }
+.pill.VERIFIED { background: rgba(47, 191, 155, 0.18); color: var(--verified); }
+.pill.INVALIDATED { background: rgba(229, 72, 77, 0.18); color: var(--invalidated); }
+.pill.EXHAUSTED { background: rgba(224, 140, 60, 0.18); color: var(--exhausted); }
+.pill.PRUNED { background: rgba(107, 111, 125, 0.2); color: var(--pruned); }
+.pill.UNTESTED, .pill.IN_PROGRESS { background: rgba(139, 144, 163, 0.18); color: var(--untested); }
+
+.warn { background: rgba(229, 72, 77, 0.12); border: 1px solid rgba(229, 72, 77, 0.4); border-radius: 9px; padding: 0.6rem 0.7rem; margin-bottom: 0.8rem; font-size: 0.82rem; }
+.empty { text-align: center; color: var(--ink-dim); padding: 2.4rem 1rem; }
+.empty code { background: rgba(0, 0, 0, 0.35); padding: 0.15rem 0.4rem; border-radius: 5px; color: var(--gold); }
+
+/* ---- markdown ----
+ * The learning path is meant to be pasted into a report, so it is typeset
+ * rather than dumped. Reused wherever the dashboard renders model output. */
+
+.md { font-size: 0.88rem; line-height: 1.68; }
+.md h1, .md h2, .md h3 { color: var(--ink); text-transform: none; letter-spacing: 0; margin: 1.1rem 0 0.45rem; }
+.md h1 { font-size: 1.06rem; } .md h2 { font-size: 0.98rem; } .md h3 { font-size: 0.9rem; }
+.md h1:first-child, .md h2:first-child { margin-top: 0; }
+.md p { margin: 0.5rem 0; }
+.md ul, .md ol { padding-left: 1.15rem; margin: 0.45rem 0; }
+.md li { margin: 0.2rem 0; }
+.md code { background: rgba(0, 0, 0, 0.38); padding: 0.1rem 0.34rem; border-radius: 5px; font-size: 0.85em; color: var(--gold-soft); }
+.md pre { background: rgba(0, 0, 0, 0.42); border: 1px solid var(--graphite-line); border-radius: 9px; padding: 0.7rem 0.8rem; overflow-x: auto; }
+.md pre code { background: none; padding: 0; color: var(--ink); }
+.md blockquote { margin: 0.6rem 0; padding: 0.35rem 0.8rem; border-left: 3px solid var(--burgundy-lift); color: var(--ink-dim); }
+.md table { border-collapse: collapse; width: 100%; margin: 0.6rem 0; font-size: 0.83rem; }
+.md th, .md td { border: 1px solid var(--graphite-line); padding: 0.32rem 0.5rem; text-align: left; }
+.md th { background: rgba(0, 0, 0, 0.3); color: var(--gold-soft); }
+.md a { color: var(--gold); }
+.md hr { border: 0; border-top: 1px solid var(--graphite-line); margin: 1rem 0; }
+.md strong { color: var(--ink); }
+
+@media (max-width: 900px) {
+  main { flex-direction: column; }
+  aside { width: 100%; max-height: 44vh; border-right: 0; border-bottom: 1px solid var(--graphite-line); }
+}

@@ -13,7 +13,7 @@ import inspect
 import json
 import uuid
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 from itertools import product
 from pathlib import Path
@@ -398,8 +398,9 @@ class HypoTreeEngine:
         rng_seed: int | None = None,
         lease_ttl_s: int = DEFAULT_LEASE_TTL_S,
         project_path: Path | str | None = None,
+        read_only: bool = False,
     ) -> None:
-        self._store = HypoTreeStore(db_path)
+        self._store = HypoTreeStore(db_path, read_only=read_only)
         self._graph = HypoTreeGraph()
         self._sampler = ThompsonSampler(
             np.random.default_rng(rng_seed),
@@ -946,6 +947,7 @@ class HypoTreeEngine:
         count: int = 1,
         lease_ttl_s: int | None = None,
         dry_run: bool = False,
+        goal_id: str | None = None,
     ) -> list[TargetResponse]:
         """Reclaim stale leases, select up to ``count`` targets, issue claims.
 
@@ -978,6 +980,13 @@ class HypoTreeEngine:
         When ``dry_run=True``, runs selection but issues **no** claim and starts
         no TTL — a peek. A dry run returns at most one target because without a
         lease every pick would see an unchanged frontier and repeat itself.
+
+        ``goal_id`` restricts the search to the case for one objective: that
+        goal, everything it depends on, and the competing answers to those
+        questions. The default of None is the whole workspace and selects exactly
+        what it always did. A filter that empties the frontier while untested
+        work sits outside it reports ``goal_scope_empty`` rather than pretending
+        the search is over.
         """
         if count < 1:
             raise ValueError(f"count must be >= 1, got {count}")
@@ -991,11 +1000,13 @@ class HypoTreeEngine:
         # `_select_one` refreshes the single node it claims. Rebuilding the whole
         # graph per pick made a `count=2` call pay for two full reloads.
         self._sync_graph_from_store()
+        # Resolved after the sync so the scope is drawn over current topology.
+        scope = self._resolve_goal_scope(goal_id)
 
         responses: list[TargetResponse] = []
         claimed_groups: set[str] = set()
         for _ in range(count):
-            response = self._select_one(now, lease_ttl_s, dry_run, claimed_groups)
+            response = self._select_one(now, lease_ttl_s, dry_run, claimed_groups, scope=scope)
             if response.status == "DONE":
                 # Nothing left to hand out. Report it only if the batch is
                 # otherwise empty — a partial batch is a success, not an end.
@@ -1009,6 +1020,58 @@ class HypoTreeEngine:
                     claimed_groups.add(node.exclusion_group)
         return responses
 
+    def _goal_scope(self, goal_id: str) -> set[str]:
+        """The nodes that form the case for one goal.
+
+        A goal is reached when everything it DEPENDS on is verified, so its
+        support is its DEPENDENCY ancestry — but that alone cannot answer its own
+        questions. ``comp_v2`` is not a dependency-ancestor of the goal; testing
+        it is nevertheless how the engine learns whether ``comp_v1``, which is,
+        holds. So the scope is the dependency ancestry *plus every exclusion-group
+        sibling of it*.
+
+        Deliberately not ``HypoTreeGraph.ancestors()``: that walks every edge
+        type, which both over-collects (a REFINEMENT branch hanging off an
+        ancestor is not part of the goal's support) and under-collects (it never
+        reaches the competing answers, which are siblings rather than ancestors).
+
+        One definition, two callers: the navigator narrows its frontier with it
+        and the read model draws its subgraph with it, so a scoped search and a
+        scoped view can never disagree about what belongs to a goal.
+        """
+        scope: set[str] = {goal_id}
+        # Walk DEPENDENCY edges upward from the goal.
+        stack = [goal_id]
+        while stack:
+            for parent in self._graph.parents(stack.pop(), EdgeType.DEPENDENCY):
+                if parent not in scope:
+                    scope.add(parent)
+                    stack.append(parent)
+
+        groups = {
+            node.exclusion_group
+            for node in (self._store.get_node(nid) for nid in scope)
+            if node is not None and node.exclusion_group
+        }
+        for group in groups:
+            scope.update(n.id for n in self._store.get_nodes_in_exclusion_group(group))
+        return scope
+
+    def _resolve_goal_scope(self, goal_id: str | None) -> set[str] | None:
+        """Validate a goal filter and expand it, or return None for no filter."""
+        if goal_id is None:
+            return None
+        node = self._store.get_node(goal_id)
+        if node is None:
+            raise NodeNotFoundError(f"goal_id {goal_id!r} does not exist")
+        if not node.is_goal:
+            known = [n.id for n in self._store.get_all_nodes() if n.is_goal]
+            raise ClaimError(
+                f"{goal_id!r} is not a goal, so scoping to it would filter the search by "
+                f"something that nothing is trying to reach. Goals here: {known or 'none'}."
+            )
+        return self._goal_scope(goal_id)
+
     def _select_one(
         self,
         now: datetime,
@@ -1016,6 +1079,7 @@ class HypoTreeEngine:
         dry_run: bool,
         claimed_groups: set[str] | None = None,
         _retry: bool = True,
+        scope: set[str] | None = None,
     ) -> TargetResponse:
         """Select and claim a single target. See get_next_targets.
 
@@ -1024,6 +1088,13 @@ class HypoTreeEngine:
         correct for the rest of the batch.
         """
         frontier = self._frontier_nodes()
+        # A goal filter narrows *which* work is offered, never what counts as
+        # work. Applied before the exclusion-lease guard so the two compose.
+        out_of_scope = 0
+        if scope is not None:
+            in_scope = [n for n in frontier if n.id in scope]
+            out_of_scope = len(frontier) - len(in_scope)
+            frontier = in_scope
         # Never offer a second answer to a question that already has one in
         # flight — whether it was claimed a moment ago in this same batch or in
         # an earlier call whose result has not come back yet. The two are the
@@ -1043,6 +1114,19 @@ class HypoTreeEngine:
                 blocked_groups.add(leased.exclusion_group)
         if blocked_groups:
             frontier = [n for n in frontier if n.exclusion_group not in blocked_groups]
+        # Human scheduling directives. They change what is *offered*, never what
+        # is believed: a suspended node is withheld without anything being
+        # asserted about it, and a pinned one is moved to the front of the queue
+        # rather than made to look more probable than the evidence says. With no
+        # directives set — the default — both lines are identities.
+        directives = self._store.get_directives()
+        if directives:
+            frontier = [
+                n for n in frontier if (d := directives.get(n.id)) is None or d["mode"] != "suspend"
+            ]
+            pinned = [n for n in frontier if n.id in directives]
+            if pinned:
+                frontier = pinned
         all_nodes = self._store.get_all_nodes()
         goals = [n for n in all_nodes if n.is_goal]
         suspects = self._conflict_suspects()
@@ -1064,6 +1148,28 @@ class HypoTreeEngine:
             # been answered and the answers had still to be put together, or
             # reporting a graph nothing could reach as a finished investigation.
             if result.reason == "empty_frontier":
+                # A goal filter can empty the frontier while real work is sitting
+                # just outside it. Agents routinely create premises before wiring
+                # them to anything — `awaiting_composition` exists because they
+                # do — and those unwired nodes are out of every goal's scope by
+                # construction. Reporting the generic empty frontier here would
+                # tell the caller the search is over at the exact moment it has
+                # a dozen untested hypotheses and only a missing edge between
+                # them and the objective.
+                if out_of_scope:
+                    return TargetResponse(
+                        status="DONE",
+                        reason="goal_scope_empty",
+                        rationale=(
+                            f"nothing reachable toward this goal is testable, but {out_of_scope} "
+                            f"untested hypothes(es) are outside its scope — they are not wired "
+                            f"to it. A goal is reached when everything it DEPENDS on is "
+                            f"verified, so give them a DEPENDENCY path to the goal (directly, "
+                            f"or through the combination that assumes them), or drop the "
+                            f"goal_id filter to work on them where they are. Nothing is "
+                            f"settled here."
+                        ),
+                    )
                 if self._store.get_active_claims(now):
                     return TargetResponse(
                         status="DONE",
@@ -1123,7 +1229,9 @@ class HypoTreeEngine:
                 # parents, so are always eligible) back on the frontier, and one
                 # pass is therefore enough by construction.
                 if _retry and not dry_run and self._recover_from_underperformance(now):
-                    return self._select_one(now, lease_ttl_s, dry_run, claimed_groups, _retry=False)
+                    return self._select_one(
+                        now, lease_ttl_s, dry_run, claimed_groups, _retry=False, scope=scope
+                    )
                 # Reported only once there is genuinely nothing else to do:
                 # unwired goals are worth fixing, but handing the caller real
                 # work is worth more, and a caller that cannot fix the wiring
@@ -1148,7 +1256,9 @@ class HypoTreeEngine:
                 # of the search at the exact moment new work appeared — and the
                 # caller, quite reasonably, would stop.
                 if _retry and self._frontier_nodes():
-                    return self._select_one(now, lease_ttl_s, dry_run, claimed_groups, _retry=False)
+                    return self._select_one(
+                        now, lease_ttl_s, dry_run, claimed_groups, _retry=False, scope=scope
+                    )
             return TargetResponse(status="DONE", reason=result.reason)
 
         assert result.node_id is not None
@@ -1672,18 +1782,27 @@ class HypoTreeEngine:
             ),
         }
 
-    def get_goal_status(self) -> GoalStatusResponse:
+    def get_goal_status(self, goal_id: str | None = None) -> GoalStatusResponse:
         """Report all goal nodes, their bars, and whether the global stop holds.
 
         Enriched with counts (goals_met / total), frontier_size, total_nodes,
         and a status_breakdown for at-a-glance progress.
+
+        ``goal_id`` reports on one objective and counts only the nodes forming
+        its case, so a workspace pursuing several does not read every goal's
+        progress against every other goal's node count.
         """
         # Sync first: goal achievement is read off the DEPENDENCY edges, so a
         # stale graph would report on a structure the store has already moved on
         # from — including, on a freshly reloaded engine, no edges at all.
         self._sync_graph_from_store()
+        scope = self._resolve_goal_scope(goal_id)
 
-        goals = [n for n in self._store.get_all_nodes() if n.is_goal]
+        goals = [
+            n
+            for n in self._store.get_all_nodes()
+            if n.is_goal and (scope is None or n.id == goal_id)
+        ]
         entries: list[GoalStatusEntry] = []
         for g in goals:
             mean = posterior_mean(g.alpha, g.beta)
@@ -1701,9 +1820,15 @@ class HypoTreeEngine:
         all_met = bool(entries) and all(e.met for e in entries)
 
         # Enrich: counts, frontier size, total nodes, status breakdown
-        frontier_size = len(self._frontier_nodes())
-        total_nodes = self._store.count_all_nodes()
-        status_breakdown = self._store.count_nodes_by_status()
+        if scope is None:
+            frontier_size = len(self._frontier_nodes())
+            total_nodes = self._store.count_all_nodes()
+            status_breakdown = self._store.count_nodes_by_status()
+        else:
+            frontier_size = sum(1 for n in self._frontier_nodes() if n.id in scope)
+            scoped = [n for n in self._store.get_all_nodes() if n.id in scope]
+            total_nodes = len(scoped)
+            status_breakdown = Counter(n.status.value for n in scoped)
 
         return GoalStatusResponse(
             goals=entries,
@@ -2030,7 +2155,12 @@ class HypoTreeEngine:
             )
         return summaries
 
-    def generate_learning_path(self, limit: int = 200) -> LearningPathResponse:
+    def generate_learning_path(
+        self,
+        limit: int = 200,
+        goal_id: str | None = None,
+        as_of: datetime | None = None,
+    ) -> LearningPathResponse:
         """Narrate what has been settled so far, in order, and how each was settled.
 
         The other read tools answer *what the belief state currently holds*:
@@ -2057,19 +2187,43 @@ class HypoTreeEngine:
         ``limit`` bounds the narrative to the most recent transitions so a
         long-running workspace still returns something an agent can read; the
         counters are computed over the whole history regardless.
+
+        ``goal_id`` narrows the narrative to the case for one objective. A
+        workspace pursuing several goals otherwise interleaves their dead ends
+        into one story, which is the wrong artefact to paste into a report about
+        any single one of them.
+
+        ``as_of`` reconstructs the report as it stood at an instant, which is
+        what lets a rewound graph be read beside a narrative that stops in the
+        same place. Goal achievement is derived from the live graph and the
+        rendered report says so.
         """
         self._sync_graph_from_store()
+        scope = self._resolve_goal_scope(goal_id)
+        # Stored instants are UTC-aware, so a naive one handed in by a library
+        # caller would raise on the first comparison rather than mean anything
+        # different by it.
+        if as_of is not None and as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
 
-        nodes = {n.id: n for n in self._store.get_all_nodes()}
+        nodes = {n.id: n for n in self._store.get_all_nodes() if scope is None or n.id in scope}
         # Evidence counts are the authoritative "did this cost an experiment"
         # signal: a node can be VERIFIED with zero observations of its own, which
-        # is exactly the case worth reporting.
-        probed = {nid for nid, n in nodes.items() if n.evidence_count > 0}
+        # is exactly the case worth reporting. Counted at ``as_of`` so a rewound
+        # report bills only the experiments that had been run by then.
+        counts = self._store.count_evidence_by_node(as_of)
+        probed = {nid for nid in nodes if counts.get(nid, 0) > 0}
 
         steps: list[LearningStep] = []
         for row in self._store.get_all_status_history():
             node = nodes.get(row["node_id"])
             if node is None:
+                continue
+            settled_at = datetime.fromisoformat(row["valid_from"])
+            # A narrative read alongside a rewound graph has to stop where the
+            # graph stopped, or the story describes conclusions the picture has
+            # not reached yet.
+            if as_of is not None and settled_at > as_of:
                 continue
             status = Status(row["status"])
             # UNTESTED is the state every node starts in, not a conclusion. It is
@@ -2095,7 +2249,7 @@ class HypoTreeEngine:
                     node_id=node.id,
                     statement=node.statement,
                     status=status,
-                    at=datetime.fromisoformat(row["valid_from"]),
+                    at=settled_at,
                     origin=origin,
                     how=how,
                     cost_a_probe=node.id in probed,
@@ -2112,11 +2266,11 @@ class HypoTreeEngine:
         # like two discoveries.
         settled = {s.node_id for s in steps if s.status not in _OPEN_STATUSES}
         free = {nid for nid in settled if nid not in probed}
-        probes = sum(n.evidence_count for n in nodes.values())
+        probes = sum(counts.get(nid, 0) for nid in nodes)
 
         return LearningPathResponse(
             markdown=self._render_learning_path(
-                steps[-limit:], goal_status, conflicts, open_questions, probes, settled, free
+                steps[-limit:], goal_status, conflicts, open_questions, probes, settled, free, as_of
             ),
             steps=steps[-limit:],
             probes_spent=probes,
@@ -2137,9 +2291,18 @@ class HypoTreeEngine:
         probes: int,
         settled: set[str],
         free: set[str],
+        as_of: datetime | None = None,
     ) -> str:
         """Render the learning path as a self-contained markdown briefing."""
         out: list[str] = ["# What we have learned so far", ""]
+        if as_of is not None:
+            # Goal achievement is read off the live graph, so say so rather than
+            # letting a rewound report imply the objective stood there too.
+            out += [
+                f"> Reconstructed as of **{as_of.isoformat(timespec='seconds')}** — findings and "
+                f"costs below stop there. The objective line reflects the present.",
+                "",
+            ]
 
         if goal_status.goals_total_count:
             out.append(

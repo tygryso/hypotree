@@ -2558,3 +2558,35 @@ def test_exhausted_retries_end_the_episode_not_the_sweep(tmp_path: Path) -> None
     assert run_end[-1]["infra_failed"] is True
     # And the retries themselves are on the record.
     assert sum(1 for e in events if e["event_type"] == "llm_retry") == LLM_MAX_ATTEMPTS - 1
+
+
+@pytest.mark.integration
+def test_a_batch_item_missing_node_id_gets_an_actionable_error(tmp_path: Path) -> None:
+    """`str(KeyError('node_id'))` is "'node_id'" — a word, not a contract.
+
+    Run J lost a paid-for probe to that message: the agent was told the string
+    'node_id' and had no way to work out what to send instead. The refusal must
+    state the shape of a result.
+    """
+    engine = HypoTreeEngine(tmp_path / "keyerr.db", rng_seed=1)
+    logger = RunLogger(tmp_path / "keyerr.jsonl", seed=1, arm=ARM_B)
+    config = make_run_config(ARM_B, 1001, _setup_eval_env(tmp_path, seed=1001), "r")
+    try:
+        engine.create_hypothesis("h", node_id="n1")
+        out = _execute_tool(
+            "record_evidence",
+            {"results": [{"success": 1.0, "depth": 1}, {"node_id": "n1", "success": 1.0}]},
+            engine,
+            [],
+            config,
+            logger,
+            [],
+        )
+        payload = json.loads(out)
+        assert [p["id"] for p in payload["recorded"]] == ["n1"], "the good result must land"
+        assert len(payload["failed"]) == 1
+        message = payload["failed"][0]["error"]
+        assert "node_id" in message and "success" in message
+        assert message != "'node_id'", "must not echo the bare KeyError"
+    finally:
+        engine.close()

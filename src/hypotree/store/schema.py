@@ -1,20 +1,46 @@
-"""SQL DDL for the SQLite-WAL source-of-truth store.
+"""Schema definition and the ordered migration chain.
 
-Nine tables: schema_meta, nodes, edges, evidence, status_history,
-posterior_history, claims, events, nogoods. The nodes table is a denormalized
-current cache; authoritative history lives in the *_history tables. The events
-table is an audit/replay log written in the same transaction as state mutations.
+The chain is the only description of the schema. `BASE_DDL` is the *original*
+shape — not the current one — and every change since is a numbered step applied
+in order. A fresh database is therefore built the same way an old one is
+upgraded: baseline, then every step. There is no second path, so there is no
+second thing to keep in sync.
 
-``MIGRATIONS`` at the foot of this module carries the forward upgrade path; see
-its comment for the rules a new entry has to satisfy.
+That ordering is what makes it safe. The previous arrangement had the DDL
+describing the *current* shape and running before the migrations, so a table the
+file happened to be missing was created already-modern and the migration that
+added its column then failed on `duplicate column name`. Every future migration
+would have met that.
+
+Two rules follow, and both are load-bearing:
+
+* **The baseline is `CREATE TABLE IF NOT EXISTS` only.** It runs on every open,
+  including databases that are already current, so it has to be a no-op for
+  anything that exists and a repair for anything that does not.
+* **The baseline is frozen.** A new column goes in a new step, never here.
+  Editing the baseline rewrites history for every database that already passed
+  through it.
 """
 
-SCHEMA_VERSION = "10"
+from __future__ import annotations
 
-SCHEMA_DDL = """
+# The schema as it stood at version 8, the oldest release this code upgrades
+# from. Frozen: additions go in MIGRATIONS.
+BASE_DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+-- schema_state: exactly one row, and the first thing to look at when a database
+-- behaves unexpectedly. Which schema version it is on, which release of hypotree
+-- last opened it, and when. `CHECK (id = 1)` on the primary key makes "exactly
+-- one row" a property of the table rather than a convention someone remembers.
+CREATE TABLE IF NOT EXISTS schema_state (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    schema_version TEXT NOT NULL,
+    app_version    TEXT NOT NULL,
+    migrated_at    TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS nodes (
@@ -67,10 +93,6 @@ CREATE TABLE IF NOT EXISTS evidence (
     artifacts     TEXT NOT NULL DEFAULT '[]',
     context_hash  TEXT,
     git_branch    TEXT,
-    -- What was actually run to produce this number: a path, a URL, a CI run id.
-    -- An audit trail that says "0.85" and one that says "0.85, from run #4412"
-    -- are different artifacts, and only the caller knows which one exists.
-    source_ref    TEXT,
     claim_id      TEXT,
     notes         TEXT NOT NULL DEFAULT '',
     delta_success REAL,
@@ -137,27 +159,12 @@ CREATE TABLE IF NOT EXISTS nogoods (
     -- depth are exonerated: their evidence already covers the context in which
     -- the failure occurred, so they cannot be what the failure revealed.
     conflict_depth      INTEGER NOT NULL DEFAULT 0,
-    -- Which members the substitution diagnosis has actually cleared: a JSON
-    -- array of node ids, each swapped out of the composition with the failure
-    -- persisting anyway. Persisted because the diagnosis spans many turns and
-    -- must survive a context reset; restarting it would re-run experiments whose
-    -- answers are already in.
-    --
-    -- A *set* rather than the integer cursor it replaces. A cursor can only say
-    -- "the first k were dealt with", which conflates cleared with skipped: a
-    -- member the plan had to pass over because no substitute was available was
-    -- left behind the cursor and reported as cleared when it had never been
-    -- tested, and could never be revisited once a substitute freed up. A set
-    -- records exactly what was established and nothing more.
-    cleared_ids         TEXT,
-    -- Deprecated in 0.4.0, removed in 0.5.0: kept in step with `cleared_ids` so
-    -- a reader written against the old shape still sees a truthful count.
     probe_index         INTEGER NOT NULL DEFAULT 0,
     resolved_culprit_id TEXT,            -- set once narrowing identifies the culprit
     -- Set when the conflict has been shown to be a genuine interaction effect —
     -- every member individually survived a test as demanding as the failure, so
     -- no one of them is at fault and the alternatives they retired have been
-    -- reopened. Recorded so that recovery happens once rather than every time
+    -- reopened. Recorded so recovery happens once rather than every time
     -- evidence arrives while the conflict is still open.
     reopened_at         TEXT,
     recorded_at         TEXT NOT NULL,
@@ -166,32 +173,69 @@ CREATE TABLE IF NOT EXISTS nogoods (
 CREATE INDEX IF NOT EXISTS idx_nogoods_open ON nogoods(resolved_at);
 """
 
+# The version BASE_DDL produces. Anything older predates the published chain and
+# is refused rather than guessed at.
+BASELINE_VERSION = "8"
 
-# Forward migrations, keyed by the version they upgrade *from*. Each entry is
-# (target_version, statements) and is applied together with the version stamp in
-# a single transaction, so a crash mid-upgrade leaves the database on the old
-# version rather than half-way between two.
-#
-# These exist because hypotree is published. "Delete the DB to reset" is a fair
-# answer while nothing is deployed and an unacceptable one once someone's belief
-# state is the accumulated record of a month of experiments — the whole product
-# claim is that the state survives. A release that silently required starting
-# over would refute it.
+# Ordered steps applied after the baseline, oldest first: (version_it_produces,
+# statements). Each runs in one transaction with its own stamp, so a crash leaves
+# the database on the previous version rather than between two.
 #
 # Rules for adding one:
-#   * Forward only. A database written by a newer hypotree is not downgraded;
-#     it is refused, because the newer code may have stored things this version
-#     cannot represent and dropping them silently is worse than stopping.
+#   * Append, never edit. A shipped step has already run somewhere, and changing
+#     it means two databases claiming the same version with different shapes. A
+#     step may be edited while its version is *unreleased* — that is the only
+#     exception, and it expires the moment the version ships.
+#   * Forward only. A database written by a newer hypotree is refused, not
+#     downgraded: the newer code may have stored things this version cannot
+#     represent, and dropping them silently is worse than stopping.
 #   * Additive where possible. `ALTER TABLE ... ADD COLUMN` with a nullable
-#     column is instant and cannot lose data. A migration that rewrites rows
-#     needs a far stronger justification than a new field.
-#   * Chained, not jumped. 7→9 runs 7→8 then 8→9, so every step is exercised by
-#     every longer path instead of accumulating untested direct routes.
-#   * Back-fill lazily where the old column is still readable. 9→10 adds
+#     column is instant and cannot lose data.
+#   * Back-fill lazily where the old column is still readable. Step 10 adds
 #     `nogoods.cleared_ids` and leaves it NULL; the store derives the set from
 #     `probe_index` on read, so an in-flight diagnosis keeps its progress without
 #     the migration having to interpret JSON in SQL.
-MIGRATIONS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "8": ("9", ("ALTER TABLE evidence ADD COLUMN source_ref TEXT",)),
-    "9": ("10", ("ALTER TABLE nogoods ADD COLUMN cleared_ids TEXT",)),
-}
+MIGRATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "9",
+        (
+            # What was actually run to produce a number: a path, a URL, a CI run
+            # id. "0.85" and "0.85, from run #4412" are different artifacts.
+            "ALTER TABLE evidence ADD COLUMN source_ref TEXT",
+        ),
+    ),
+    (
+        "10",
+        (
+            # Which members the substitution diagnosis has cleared, as JSON. A
+            # set rather than the integer cursor it replaces: a cursor can only
+            # say "the first k were dealt with", conflating cleared with skipped.
+            "ALTER TABLE nogoods ADD COLUMN cleared_ids TEXT",
+            # When an edge appeared. Without it a timeline replay draws the final
+            # topology at every tick.
+            "ALTER TABLE edges ADD COLUMN created_at TEXT",
+            # Human scheduling instructions, deliberately not beliefs. Writing a
+            # click into alpha/beta would make it forever indistinguishable from
+            # an experiment and inject unlogged nondeterminism into a seeded
+            # sampler. A directive changes what is offered, never what is
+            # believed, and it is revocable and attributed.
+            """CREATE TABLE IF NOT EXISTS node_directives (
+                node_id TEXT PRIMARY KEY,
+                mode    TEXT NOT NULL,
+                reason  TEXT NOT NULL DEFAULT '',
+                actor   TEXT NOT NULL DEFAULT 'human',
+                set_at  TEXT NOT NULL
+            )""",
+        ),
+    ),
+)
+
+# Derived from the chain, so the two cannot drift.
+SCHEMA_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else BASELINE_VERSION
+
+__all__ = [
+    "BASELINE_VERSION",
+    "BASE_DDL",
+    "MIGRATIONS",
+    "SCHEMA_VERSION",
+]

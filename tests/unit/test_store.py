@@ -47,13 +47,7 @@ def test_schema_version_fail_fast_on_mismatch(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     s = HypoTreeStore(db)
     s.close()
-    # Tamper with the schema_version
-    import sqlite3
-
-    conn = sqlite3.connect(str(db))
-    conn.execute("UPDATE schema_meta SET value='999' WHERE key='schema_version'")
-    conn.commit()
-    conn.close()
+    _stamp_version(db, "999")
     with pytest.raises(SchemaVersionError):
         HypoTreeStore(db)
 
@@ -341,6 +335,27 @@ def test_evidence_writes_event_same_txn(store: HypoTreeStore, node: Node) -> Non
     assert len(ev_events) == 1
 
 
+@pytest.mark.unit
+def test_evidence_can_be_tallied_as_it_stood_at_an_instant(
+    store: HypoTreeStore, node: Node
+) -> None:
+    """A rewound report must bill only the experiments that had been run by then."""
+    store.add_node(node)
+    early = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    late = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    store.append_evidence("n1", LogicalEvidence(success=0.5), recorded_at=early)
+    store.append_evidence("n1", LogicalEvidence(success=0.6), recorded_at=late)
+
+    assert store.count_evidence_by_node() == {"n1": 2}
+    assert store.count_evidence_by_node(datetime(2026, 3, 1, tzinfo=timezone.utc)) == {"n1": 1}
+    assert store.count_evidence_by_node(datetime(2025, 1, 1, tzinfo=timezone.utc)) == {}
+    # The boundary is inclusive: an observation made at the instant counts.
+    assert store.count_evidence_by_node(early) == {"n1": 1}
+    # A naive cutoff is read as UTC rather than compared against a differently
+    # shaped string.
+    assert store.count_evidence_by_node(datetime(2026, 3, 1)) == {"n1": 1}
+
+
 # ---------------------------------------------------------------------------
 # events.jsonl dump
 # ---------------------------------------------------------------------------
@@ -519,30 +534,32 @@ def test_exclusion_group_round_trips(store: HypoTreeStore) -> None:
 # -- schema migration ------------------------------------------------------
 
 
-# Columns each schema version added, so an "old database" fixture can be built by
-# removing everything introduced after the version being simulated. Derived from
-# the real DDL rather than hand-written, so a fixture cannot drift away from what
-# that release actually shipped.
-_COLUMNS_ADDED_AFTER = {
-    "8": ("    source_ref    TEXT,\n", "    cleared_ids         TEXT,\n"),
-    "9": ("    cleared_ids         TEXT,\n",),
-}
+def _stamp_version(db_path: Path, version: str) -> None:
+    """Force a database to claim ``version``, in the table the store believes."""
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE schema_state SET schema_version=? WHERE id=1", (version,))
+    conn.execute("UPDATE schema_meta SET value=? WHERE key='schema_version'", (version,))
+    conn.commit()
+    conn.close()
 
 
 def _write_old_database(db_path: Path, version: str) -> None:
-    """A genuine database at ``version``: the current DDL minus later columns.
+    """A genuine database at ``version``, built by replaying the chain to it.
 
-    Stamped with the old version so the store takes the migration path rather
-    than the fresh-stamp path.
+    The baseline plus every step up to ``version`` is exactly how that release
+    produced the file, so the fixture cannot drift from what actually shipped —
+    and it exercises the same statements the upgrade path will run against it.
     """
-    from hypotree.store.schema import SCHEMA_DDL
+    from hypotree.store.schema import BASE_DDL, MIGRATIONS
 
-    ddl = SCHEMA_DDL
-    for fragment in _COLUMNS_ADDED_AFTER[version]:
-        assert fragment in ddl, f"DDL no longer contains {fragment!r}; update the fixture"
-        ddl = ddl.replace(fragment, "")
     conn = sqlite3.connect(str(db_path))
-    conn.executescript(ddl)
+    conn.executescript(BASE_DDL)
+    for step_version, statements in MIGRATIONS:
+        if int(step_version) > int(version):
+            break
+        for sql in statements:
+            conn.execute(sql)
+    # Stamped the pre-0.4.0 way, which is what a database of this age would have.
     conn.execute("INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)", (version,))
     conn.commit()
     conn.close()
@@ -664,12 +681,9 @@ def test_a_database_from_a_newer_hypotree_is_refused(tmp_path: Path) -> None:
     """Downgrading could silently drop data this version cannot represent."""
     db = tmp_path / "future.db"
     HypoTreeStore(db).close()
-    conn = sqlite3.connect(str(db))
-    conn.execute("UPDATE schema_meta SET value='999' WHERE key='schema_version'")
-    conn.commit()
-    conn.close()
+    _stamp_version(db, "999")
 
-    with pytest.raises(SchemaVersionError, match="newer hypotree"):
+    with pytest.raises(SchemaVersionError, match="newer than this"):
         HypoTreeStore(db)
 
 
@@ -678,10 +692,7 @@ def test_an_unroutable_version_says_keep_the_file(tmp_path: Path) -> None:
     """The one instruction that must never appear again is 'delete the DB'."""
     db = tmp_path / "odd.db"
     HypoTreeStore(db).close()
-    conn = sqlite3.connect(str(db))
-    conn.execute("UPDATE schema_meta SET value='3' WHERE key='schema_version'")
-    conn.commit()
-    conn.close()
+    _stamp_version(db, "3")
 
     with pytest.raises(SchemaVersionError, match="do not delete it"):
         HypoTreeStore(db)
@@ -715,7 +726,7 @@ def test_a_failed_migration_leaves_the_old_version_intact(
     db = tmp_path / "old.db"
     _write_v8_database(db)
     monkeypatch.setattr(
-        store_mod, "MIGRATIONS", {"8": (SCHEMA_VERSION, ("ALTER TABLE nope ADD COLUMN x",))}
+        store_mod, "MIGRATIONS", ((SCHEMA_VERSION, ("ALTER TABLE nope ADD COLUMN x",)),)
     )
 
     with pytest.raises(sqlite3.OperationalError):
@@ -743,5 +754,70 @@ def test_get_all_nodes_resolves_parents_without_a_query_per_node(tmp_path: Path)
         # The single-node read still resolves its own parents.
         single = store.get_node("c")
         assert sorted(single.parent_ids) == ["a", "b"]
+    finally:
+        store.close()
+
+
+@pytest.mark.unit
+def test_the_migration_chain_adds_every_column_the_version_introduced(tmp_path: Path) -> None:
+    """One mechanism carries the whole upgrade, including a column added mid-version.
+
+    While a version is unreleased its migration is edited in place rather than
+    chained to a successor. A second reconciliation pass alongside it would be a
+    fork, not a shortcut: two places that can disagree about what a version
+    means. So the 9-to-10 step has to carry everything v10 introduced, and the
+    data already in the file has to survive it.
+    """
+    db = tmp_path / "v9.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO schema_meta VALUES ('schema_version','9');
+        CREATE TABLE edges (src TEXT, dst TEXT, type TEXT, PRIMARY KEY (src,dst,type));
+        INSERT INTO edges VALUES ('a','b','DEPENDENCY');
+        CREATE TABLE nogoods (id INTEGER PRIMARY KEY AUTOINCREMENT, source_node_id TEXT,
+            member_ids TEXT, conflict_depth INTEGER DEFAULT 0, probe_index INTEGER DEFAULT 0,
+            resolved_culprit_id TEXT, reopened_at TEXT, recorded_at TEXT, resolved_at TEXT);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = HypoTreeStore(db)
+    try:
+        stamped = store._conn.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()["value"]
+        assert stamped == SCHEMA_VERSION
+        edge_columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(edges)")}
+        assert "created_at" in edge_columns
+        nogood_columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(nogoods)")}
+        assert "cleared_ids" in nogood_columns
+        # A genuinely new table needs no migration entry — the DDL creates it.
+        tables = {
+            r[0] for r in store._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert "node_directives" in tables
+        rows = store.get_edge_rows()
+        assert len(rows) == 1, "the existing edge must survive the upgrade"
+        # No timestamp means "was already there", which is what a replay should show.
+        assert rows[0]["created_at"] is None
+    finally:
+        store.close()
+
+
+@pytest.mark.unit
+def test_a_read_only_store_refuses_every_write(tmp_path: Path) -> None:
+    """The dashboard's safety guarantee belongs to the driver, not to discipline."""
+    db = tmp_path / "ro.db"
+    HypoTreeStore(db).close()
+
+    store = HypoTreeStore(db, read_only=True)
+    try:
+        assert store.get_all_nodes() == []
+        assert store.latest_event_seq() >= 0
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            store.set_directive("n", "pin", "", "test")
     finally:
         store.close()

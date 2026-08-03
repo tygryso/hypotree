@@ -172,6 +172,11 @@ class RunLog:
     # conflict had been narrowed to a culprit.
     shortfall_reopens: int = 0
     same_question_dispatches: int = 0
+    # Members declared per exclusion group. Needed to say what the exclusion
+    # yield *should* be: probing a group of k in ignorance costs (k+1)/2 probes
+    # and retires the rest, so a run beating that is ordering better than chance
+    # and a run matching it is not ordering at all.
+    group_sizes: Counter[str] = field(default_factory=Counter)
     done_reasons: Counter[str] = field(default_factory=Counter)
     deduced: int = 0
     pruned_reexecutions: int = 0
@@ -348,6 +353,7 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
                 if ev.get("exclusion_group"):
                     log.nodes_with_group += 1
                     log.exclusion_declared = True
+                    log.group_sizes[str(ev["exclusion_group"])] += 1
 
         elif kind == "target_selected":
             if not ev.get("node_id"):
@@ -412,10 +418,14 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
             if new in _REVISION_STATUSES:
                 log.revision_transitions += 1
                 log.revision_fired = True
-            # A re-attribution leaves the node EXHAUSTED and only rewrites which
-            # confirmation is responsible. Requiring a real status change keeps
-            # that from being counted as a second exclusion.
-            if new == "EXHAUSTED" and old != new and reason.startswith(_EXCLUDE_REASON):
+            # The snapshot only emits when (status, reason) actually changed, so
+            # every event here is a real one. An exclusion recorded at unchanged
+            # status is a *re-*exclusion: `_apply_exclusion` skips any sibling
+            # that is not open, so the only way to arrive back at EXHAUSTED is to
+            # have passed through UNTESTED when the first confirmation was
+            # retracted. Requiring old != new dropped those and undercounted the
+            # mechanism.
+            if new == "EXHAUSTED" and reason.startswith(_EXCLUDE_REASON):
                 log.exclusions_applied += 1
             if new == "EXHAUSTED" and reason.startswith(_SUBSTITUTE_OUT_REASON):
                 log.substitutes_ruled_out += 1
@@ -854,6 +864,51 @@ def _section_probe_economy(logs: list[RunLog]) -> list[str]:
             ],
             rows,
         ),
+        "",
+        *_exclusion_yield_lines(logs),
+    ]
+
+
+def _exclusion_yield_lines(logs: list[RunLog]) -> list[str]:
+    """How much of the premise search the exclusion inference paid for.
+
+    Every question is settled exactly once, either by a probe or by the
+    exclusion inference retiring it for free, so premise probes and exclusions
+    are two halves of one fixed total. That makes the split the single lever on
+    premise cost, and it has a known baseline: probing a group of k answers in
+    ignorance costs (k+1)/2 probes and retires the remaining (k-1)/2, a yield of
+    (k-1)/2k. Matching that baseline means the ordering carries no signal;
+    beating it means something is steering. Reported because two runs differing
+    by a probe an episode differed here and nowhere else, and without the
+    baseline there was no way to tell an ordering win from a lucky draw.
+    """
+    b_logs = [log for log in logs if log.arm == "B" and log.complete]
+    if not b_logs:
+        return []
+    exclusions = sum(log.exclusions_applied for log in b_logs)
+    premise = sum(log.premise_probes for log in b_logs)
+    settled = exclusions + premise
+    if not settled:
+        return []
+    sizes = [n for log in b_logs for n in log.group_sizes.values() if n > 1]
+    if not sizes:
+        return []
+    k = statistics.mean(sizes)
+    baseline = (k - 1) / (2 * k)
+    yield_ = exclusions / settled
+    verdict = (
+        "ordering better than chance"
+        if yield_ > baseline + 0.02
+        else "no better than probing the answers in a random order"
+        if yield_ < baseline + 0.02
+        else "at the baseline"
+    )
+    return [
+        f"**Exclusion yield (arm B): {_pct(yield_)}** of premise questions were settled "
+        f"without a probe ({exclusions} retired free, {premise} probed). With a mean group "
+        f"of {k:.1f} answers, blind ordering yields {_pct(baseline)} — so this run is "
+        f"**{verdict}**. This is the only lever on premise cost: every question is settled "
+        f"exactly once, so a probe saved here is a probe saved outright.",
     ]
 
 

@@ -1102,7 +1102,18 @@ def _execute_tool_inner(
                 logger.log_goal_evidence_refused(str(item.get("node_id", "")))
                 logger.log_record_rejected(str(item.get("node_id", "")), str(exc))
                 failures.append({"node_id": item.get("node_id"), "error": str(exc)})
-            except (NodeNotFoundError, ClaimError, KeyError) as exc:
+            except KeyError as exc:
+                # str(KeyError('node_id')) is just "'node_id'" — the agent is
+                # told a word, not a contract, and has no way to work out what to
+                # send instead. Run J lost a paid-for probe to exactly that.
+                detail = (
+                    f"missing required field {exc.args[0]!r}. Each result needs `node_id` "
+                    f"(the hypothesis you actually tested) and `success` (0.0-1.0); "
+                    f"`depth` and `claim_id` are optional."
+                )
+                logger.log_record_rejected(str(item.get("node_id", "")), detail)
+                failures.append({"node_id": item.get("node_id"), "error": detail})
+            except (NodeNotFoundError, ClaimError) as exc:
                 logger.log_record_rejected(str(item.get("node_id", "")), str(exc))
                 failures.append({"node_id": item.get("node_id"), "error": str(exc)})
         if args.get("results"):

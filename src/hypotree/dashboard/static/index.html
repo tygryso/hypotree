@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The session token, so a bookmark without ?t= still works. A meta tag rather
+     than an inline script element, which a script-src without 'unsafe-inline'
+     blocks - and keeping that restriction is what stops markup injected through
+     v-html from running an event handler. -->
+<meta name="hypotree-token" content="__TOKEN__">
+<title>hypotree</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <h1>hypo<span>tree</span></h1>
+
+    <select v-model="goalId" v-if="meta && meta.goals.length">
+      <option value="">all goals</option>
+      <option v-for="g in meta.goals" :key="g.id" :value="g.id">
+        {{ g.met ? '\u2713' : '\u00b7' }} {{ g.statement || g.id }}
+      </option>
+    </select>
+
+    <div class="spacer"></div>
+
+    <div class="working" v-if="working">
+      <div class="spin"></div><span>agent working</span>
+    </div>
+    <div class="live">
+      <div class="dot" :class="{up: live}"></div>
+      <span>{{ live ? 'live' : 'reconnecting' }}</span>
+    </div>
+  </header>
+
+  <main>
+    <aside :style="panelWidth ? {width: panelWidth + 'px'} : null" :class="{resizing: resizing}">
+      <div class="tabs">
+        <button :class="{on: tab === 'path'}" @click="tab = 'path'">Learning path</button>
+        <button :class="{on: tab === 'frontier'}" @click="tab = 'frontier'">Frontier</button>
+      </div>
+
+      <div class="panel">
+        <div class="warn" v-if="error">{{ error }}</div>
+        <div class="warn" v-if="missing.length">
+          Missing vendored asset(s): {{ missing.join(', ') }}. The page still works, with
+          reduced zoom or plain-text narrative.
+        </div>
+
+        <!-- Tab A — the narrative, typeset rather than dumped -->
+        <template v-if="tab === 'path'">
+          <template v-if="detail">
+            <h2>{{ detail.node.id }}</h2>
+            <p>
+              <span class="pill" :class="detail.node.status">{{ detail.node.status }}</span>
+              {{ detail.node.statement }}
+            </p>
+            <table class="metrics">
+              <tr><td>posterior mean</td><td>{{ detail.node.posterior_mean.toFixed(3) }}</td></tr>
+              <tr><td>observations</td><td>{{ detail.node.evidence_count }}</td></tr>
+              <tr v-if="detail.node.exclusion_group">
+                <td>question</td><td>{{ detail.node.exclusion_group }}</td>
+              </tr>
+              <tr v-if="detail.directive">
+                <td>directive</td><td>{{ detail.directive.mode }}</td>
+              </tr>
+            </table>
+
+            <h2 style="margin-top:1rem">what paid for this</h2>
+            <div v-if="!detail.evidence.length" class="empty" style="padding:1rem">
+              Nothing was observed here &mdash; this belief was inferred.
+            </div>
+            <table class="metrics" v-else>
+              <tr v-for="(e, i) in detail.evidence" :key="i">
+                <td>
+                  {{ e.success === null ? 'infra' : e.success.toFixed(2) }}
+                  at depth {{ e.depth }}
+                  <div class="st" v-if="e.source_ref || e.git_branch">
+                    {{ e.source_ref || '' }}
+                    <template v-if="e.git_branch">
+                      &middot; {{ e.git_branch }}@{{ (e.context_hash || '').slice(0, 7) }}
+                    </template>
+                  </div>
+                </td>
+                <td>{{ (e.recorded_at || '').slice(0, 19).replace('T', ' ') }}</td>
+              </tr>
+            </table>
+
+            <div style="display:flex;gap:.4rem;margin-top:.9rem">
+              <button @click="directive('pin')">pin</button>
+              <button @click="directive('suspend')">suspend</button>
+              <button @click="directive('clear')">clear</button>
+              <button @click="detail = null; selected = null">back</button>
+            </div>
+          </template>
+
+          <template v-else>
+            <h2>What has been settled</h2>
+            <div class="md" v-html="renderMd(narrative)"></div>
+          </template>
+        </template>
+
+        <!-- Tab B — what the navigator is about to do -->
+        <template v-else>
+          <h2>Most likely next</h2>
+          <div class="empty" v-if="!frontier.length">
+            Nothing is waiting &mdash; every question in scope is answered.
+          </div>
+          <div class="cand" v-for="c in frontier" :key="c.node_id" @click="pick({id: c.node_id})">
+            <div class="row">
+              <span class="p">{{ (c.p_select * 100).toFixed(0) }}%</span>
+              <span>{{ c.statement || c.node_id }}</span>
+            </div>
+            <div class="st">
+              {{ c.node_id }}
+              <template v-if="c.exclusion_group"> &middot; {{ c.exclusion_group }}</template>
+              <template v-if="c.directive"> &middot; {{ c.directive }}</template>
+            </div>
+            <div class="bar"><i :style="{width: (c.p_select * 100) + '%'}"></i></div>
+          </div>
+
+          <h2 style="margin-top:1.2rem">Belief state</h2>
+          <table class="metrics">
+            <tr v-for="(v, k) in graph.stats" :key="k"><td>{{ k }}</td><td>{{ v }}</td></tr>
+          </table>
+        </template>
+      </div>
+      <div class="resizer" @pointerdown="startResize" title="Drag to widen the panel"></div>
+    </aside>
+
+    <div class="graph-wrap">
+      <div class="empty" v-if="!graph.nodes.length" style="padding-top:6rem">
+        <h2 style="font-size:1rem;letter-spacing:0">Nothing here yet</h2>
+        <p>This workspace has no hypotheses. Point an agent at it and the graph draws itself.</p>
+        <p><code>{"mcpServers":{"hypotree":{"command":"uvx","args":["hypotree"]}}}</code></p>
+      </div>
+
+      <svg class="graph" v-else @click="tip.show = false">
+        <g id="viewport">
+          <!-- edges first, nodes second: a click on a node never competes with a
+               line crossing it, which is the whole hit-testing problem in SVG -->
+          <g>
+            <line v-for="e in edgeLines" :key="e.key" class="edge" :class="{dead: e.dead}"
+                  :x1="e.x1" :y1="e.y1" :x2="e.x2" :y2="e.y2"/>
+          </g>
+          <transition-group tag="g" name="ghost">
+            <g v-for="n in graph.nodes" :key="n.id" class="node"
+               :class="{sel: selected === n.id, goal: n.is_goal, working: n.status === 'IN_PROGRESS'}"
+               :transform="`translate(${px(n)},${py(n)})`"
+               @click.stop="pick(n, $event)"
+               @mouseenter="hover(n, $event)" @mouseleave="tip.show = false">
+              <circle :r="radius(n)" :class="'s-' + n.status" :opacity="nodeOpacity(n)"/>
+              <text :y="radius(n) + 12" text-anchor="middle">{{ n.id }}</text>
+            </g>
+          </transition-group>
+        </g>
+      </svg>
+
+      <div class="tip" v-if="tip.show && tip.node" :style="{left: tip.x + 'px', top: tip.y + 'px'}">
+        <div><b>{{ tip.node.id }}</b> <span class="pill" :class="tip.node.status">{{ tip.node.status }}</span></div>
+        <div>{{ tip.node.statement }}</div>
+        <div class="st" v-if="tip.node.status === 'UNTESTED'">
+          {{ (tip.node.p_select * 100).toFixed(1) }}% chance of being picked next
+        </div>
+        <div class="st" v-else>posterior {{ tip.node.posterior_mean.toFixed(3) }}
+          &middot; {{ tip.node.evidence_count }} observation(s)</div>
+      </div>
+
+      <div class="zoom-controls">
+        <button @click="zoomBy(1.4)" title="Zoom in">+</button>
+        <button @click="zoomBy(1 / 1.4)" title="Zoom out">−</button>
+        <button @click="fit()" title="Fit the graph to the viewport">fit</button>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <button @click="playing = !playing" :disabled="!timeline.ticks.length">
+      {{ playing ? '\u23f8' : '\u25b6' }}
+    </button>
+    <input type="range" min="0" :max="lastTick" v-model.number="scrub"
+           :disabled="!timeline.ticks.length">
+    <span class="tick-label">{{ scrubLabel }}</span>
+    <button @click="goLive()" v-if="!atLive">live</button>
+  </footer>
+
+</div>
+
+<script src="/static/vue.global.prod.js"></script>
+<script src="/static/d3-dispatch.min.js"></script>
+<script src="/static/d3-selection.min.js"></script>
+<script src="/static/d3-timer.min.js"></script>
+<script src="/static/d3-color.min.js"></script>
+<script src="/static/d3-interpolate.min.js"></script>
+<script src="/static/d3-ease.min.js"></script>
+<script src="/static/d3-transition.min.js"></script>
+<script src="/static/d3-drag.min.js"></script>
+<script src="/static/d3-zoom.min.js"></script>
+<script src="/static/marked.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

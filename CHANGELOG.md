@@ -4,7 +4,7 @@ All notable changes to hypotree are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.4.0] - 2026-08-02
+## [0.4.0] - 2026-08-03
 
 ### Performance
 - **Selecting a target is 41× faster on a large belief state**: 1200 nodes went from
@@ -43,8 +43,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     The refusals come back under `failed`, named and explained.
   - The fused dispatch runs **once**, after the whole batch, and is still a top-up.
 - `get_conflicts` now reports `skipped_no_substitute` per member.
+- **A read-only web dashboard: `hypotree --dashboard [PORT]` and `hypotree --dashboard-only [PORT]`.**
+  A belief state that revises itself is hard to appreciate from a status column. The
+  dashboard runs on the MCP server's own event loop and serves the graph, the narrative and
+  a timeline over localhost HTTP. `--dashboard-only` starts no MCP server at all — the
+  try-before-you-wire path for someone who has not configured a client yet.
+  - **The interface.** Vue 3 over server-computed coordinates, with `d3-zoom` for
+    hardware-accelerated pan and zoom. Untested nodes glow at their real chance of being
+    dispatched next; in-progress nodes pulse; **new nodes fade in** as the agent creates
+    them and **pruned branches desaturate rather than disappear**, because the claim being
+    demonstrated is that they were considered and cut. Edges into a dead branch turn red.
+  - **A timeline scrubber** over the bi-temporal history: drag back to any instant, or press
+    play and watch the investigation replay.
+  - **Proof mode** overlays what each belief cost — score, depth, commit, `source_ref`.
+  - **The learning path is typeset markdown**, ready to paste into a report.
+  - **Everything is vendored** (Vue 3, nine d3 micromodules, `marked` — 276 KB). No CDN, no
+    npm, no build step: it works on a plane and in an air-gapped network. d3 micromodules
+    rather than the full build (63 KB against 273 KB) because the layout is computed
+    server-side and nothing else in d3 is wanted.
+  - **The observer physically cannot write.** Its store is opened `mode=ro`, so a read path
+    that is wrong fails loudly instead of quietly mutating the belief state being watched.
+    WAL already permits a second reader, so it never contends for the engine's write lock.
+  - **Layout is computed server-side** with `networkx` and shipped as coordinates. No
+    JavaScript graph library, so nothing large is downloaded and the layout is deterministic
+    and testable in Python rather than eyeballed in a browser.
+  - **`p_select` is the real selection probability**, estimated by repeating the Thompson
+    draw and counting argmax wins — not a monotone stand-in like the posterior mean.
+  - **Time travel is a `WHERE` clause.** `?at=<iso8601>` reconstructs any past instant from
+    the SCD2 status and posterior intervals, so a replay shows what was believed then.
+  - **SSE carries a revision number, never a payload.** `events.seq` advances inside every
+    mutation's transaction, so it is a correct change signal by construction; clients refetch.
+    A subscriber that cannot keep up is dropped rather than allowed to apply backpressure.
+  - **Everything is cached on the revision**, which is also the SSE payload — without it a
+    scrubber would rebuild the whole graph per frame.
+  - **Security.** Binds `127.0.0.1` explicitly, mints a session token at startup and requires
+    it on every `/api/*` call, validates the `Host` header (the DNS-rebinding defence behind
+    CVEs in Jupyter, Ray and TensorBoard), refuses cross-origin requests outright, and serves
+    the page from a string so path traversal is unrepresentable rather than filtered. The URL
+    is printed to **stderr** — stdout is the JSON-RPC channel.
+- **Pin and suspend: human scheduling directives that are not beliefs.** A new
+  `node_directives` table records "look at this first" or "leave that alone" with an actor and
+  a reason. Directives change what the navigator *offers*, never what is believed — writing a
+  click into `alpha`/`beta` would make it forever indistinguishable from an experiment and
+  inject unlogged nondeterminism into a seeded sampler. With none set, selection is unchanged.
+- `edges.created_at` records when an edge appeared, so a timeline replay no longer draws the
+  final topology at every tick. Additive; edges written before it are treated as original.
+- **A migration adding a column to a table the DDL had just created failed.** The DDL
+  described the *current* schema and ran before the migration chain, so a table the file was
+  missing got created already-modern and the step adding its column then hit `duplicate
+  column name` — a collision every future migration would have met, not just this one. The
+  schema is now defined the way Doctrine and Rails define one: `BASE_DDL` is the **original**
+  shape, frozen, `CREATE TABLE IF NOT EXISTS` throughout, and every change since is a
+  numbered step applied in order. A fresh database is built exactly as an old one is
+  upgraded, so the upgrade path is exercised on every install rather than only on other
+  people's machines. `SCHEMA_VERSION` is derived from the last step and cannot drift from it.
+- **New `schema_state` table: exactly one row, enforced by `CHECK (id = 1)`.** Carries the
+  schema version, the hypotree release that last opened the file, and when. It is the first
+  thing to look at when a database behaves unexpectedly or a bug report arrives with one
+  attached. The pre-0.4.0 `schema_meta` key is still read as a fallback and kept in step for
+  one minor version. A freshly created database logs no migration events — it was created,
+  not upgraded.
+- **The dashboard did not run in a browser.** `default-src 'self'` blocked Vue's global build
+  compiling its in-DOM template with `new Function`, blocked the inline script carrying the
+  session token, and blocked `data:` fonts injected by browser extensions. Every directive is
+  now named explicitly rather than leaning on the fallback, and the token travels in a
+  `<meta>` tag so `script-src` can keep refusing `'unsafe-inline'` — the directive that stops
+  an injected event handler from ever running.
+- **The learning path rendered untrusted text through `v-html`.** Node statements are written
+  by an agent, and `marked` has had no sanitiser since v5, so markup in a statement reached
+  the document verbatim. An allowlist sanitiser now runs over the parsed output; the strict
+  `script-src` covers what a sanitiser bug would miss, and vice versa.
+- **Work on one objective at a time: `goal_id` on `get_next_targets`,
+  `generate_learning_path` and `get_goal_status`.** A workspace pursuing several goals
+  interleaves them — the frontier offers whatever is most uncertain anywhere, and the
+  learning path narrates every goal's dead ends into one story. A `goal_id` restricts all
+  three to the case for one objective: that goal, everything it depends on, and the
+  competing answers to those questions. Omitting it is the previous behaviour exactly,
+  down to selecting the identical node on an identically-seeded engine.
+  - Scope is DEPENDENCY-ancestry **plus the exclusion-group siblings of that ancestry**,
+    not graph reachability. A competing answer is not an ancestor of the goal, but testing
+    it is how the engine learns whether the answer that *is* an ancestor holds — a scope
+    without it hands the navigator questions it is forbidden from answering.
+  - New DONE reason **`goal_scope_empty`**. Agents create premises before wiring them
+    (`awaiting_composition` exists because they do), and unwired nodes are outside every
+    goal's scope by construction. Rather than reporting a bare empty frontier — which reads
+    as "the search is over" — it names how many untested hypotheses are outside the filter
+    and says the fix is usually a missing DEPENDENCY edge.
 
 ### Fixed
+- **The dashboard's own buttons were refused as cross-origin.** The write path rejected any
+  request carrying an `Origin` header. Browsers attach `Origin` to *same-origin* JSON POSTs
+  too, so pin, suspend, back and clear each came back `403 cross-origin requests are refused`
+  — the CSRF defence was locking the page out of itself. The header is now validated against
+  the bound address instead of being treated as evidence of an attack: a foreign origin, or
+  the right host on a different port, is still refused, and an absent header still falls
+  through to the token and `Host` checks.
+- **The narrative ignored the time-travel scrubber.** Rewinding the graph left the learning
+  path describing conclusions the picture had not reached, which is worse than showing
+  nothing. `generate_learning_path` takes `as_of` and `/api/learning-path` takes `at`, so the
+  briefing stops where the graph stops. Observation tallies are counted at that instant too,
+  via the new `HypoTreeStore.count_evidence_by_node(before=...)` — one aggregate that also
+  replaces the per-node cached counts on the live path. The rewound render says which line
+  still reflects the present, because goal achievement is read off the live graph.
+- **The timeline handle sat at the far left while showing the present.** The scrubber ran from
+  `-1`, and `-1` meant live — so watching the current state pinned the handle to the start of
+  history and playback had nowhere to run. The present is now the right-hand end: the handle
+  rides it as new history arrives, `live` returns to it, and `play` pressed at the present
+  rewinds to the beginning first.
+
 - **A member the diagnosis could not test was reported as cleared.** Substitution progress was
   an integer cursor, which can only say "the first k were dealt with". A member the plan had
   to pass over — because its question had no live alternative left to swap in — sat *behind*
@@ -93,6 +199,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - `/hypotree-next` and the server-level instructions now teach the batch shape.
+- **Proof mode is no longer a toggle.** What an experiment cost is the reason the panel is
+  worth reading; hiding it behind a button meant the default view was the less useful one.
+  Provenance is always shown, and the button is gone.
+- **The left panel can be dragged wider**, from its default out to 400 px more, and never
+  past half the window — a reading panel that eats the graph defeats putting them side by
+  side.
+- **Zoom lives on the canvas.** `+`, `−` and `fit` sit at the bottom-right of the graph
+  rather than in the header, next to the thing they act on.
 
 ### Eval harness
 - **One bad result no longer discards the rest of a batch.** The harness looped the
@@ -142,6 +256,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `seed_reader` reports **alternatives reopened after a shortfall** separately from those
   reopened by an interaction effect, and lists infrastructure failures apart from episodes
   with no terminal record: one needs the server looked at, the other needs a re-run.
+- **A batch result missing `node_id` was refused with the word `'node_id'`.** That is
+  `str(KeyError('node_id'))` — the agent was told a key name, not a contract, and had no way
+  to work out what to send instead; one run lost a paid-for probe to it. The refusal now
+  names the missing field and states the shape of a result.
+- **`exclusions_applied` undercounted re-exclusions.** The counter required a status change,
+  which dropped any sibling retired, released when its justification was withdrawn, and
+  retired again by a later confirmation. `_apply_exclusion` skips any sibling that is not
+  open, so arriving back at EXHAUSTED *requires* having passed through UNTESTED — the guard's
+  stated rationale (avoiding double-counted re-attribution) had stopped being reachable.
+- **`seed_reader` reports exclusion yield against its blind baseline.** Every question is
+  settled exactly once, by a probe or by the exclusion inference retiring it for free, so the
+  two are halves of one fixed total and the split is the only lever on premise cost. Probing
+  a group of k answers in ignorance costs (k+1)/2 and retires the rest, a yield of (k-1)/2k —
+  40% for k=5. Two runs differing by a probe an episode differed *here and nowhere else*, and
+  without the baseline there was no way to tell an ordering win from a lucky draw.
+- **`eval.sh --skip-arm-a`** runs B and F only. Arm A is the ergonomic baseline and the most
+  expensive arm to run — it is the one that duplicates probes — so dropping it roughly halves
+  the wall clock while iterating. The flag says loudly that criterion 1a is unscorable and the
+  run cannot decide a gate.
 
 ## [0.3.2] - 2026-08-01
 

@@ -46,7 +46,7 @@ dependencies = [
     "sqlalchemy>=2.0",
     "numpy>=1.26",
     "scipy>=1.11",
-    "mcp==1.28.1",
+    "mcp>=1.28.1",
     "pyyaml>=6.0",
 ]
 
@@ -54,6 +54,8 @@ dependencies = [
 Homepage = "https://github.com/tygryso/hypotree"
 Repository = "https://github.com/tygryso/hypotree"
 Issues = "https://github.com/tygryso/hypotree/issues"
+Changelog = "https://github.com/tygryso/hypotree/blob/master/CHANGELOG.md"
+Documentation = "https://github.com/tygryso/hypotree/blob/master/src/hypotree/AGENT_GUIDE.md"
 
 [project.scripts]
 hypotree = "hypotree.mcp_server:main"

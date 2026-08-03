@@ -19,7 +19,9 @@ from hypotree.engine import (
     INTERACTION_REOPEN_PREFIX,
     MAX_REVIEW_DISPATCHES,
     UNDERPERFORMANCE_REOPEN_PREFIX,
+    ClaimError,
     HypoTreeEngine,
+    NodeNotFoundError,
 )
 from hypotree.models.edge import EdgeType
 from hypotree.models.evidence import LogicalEvidence
@@ -1349,3 +1351,132 @@ def test_the_stored_diagnosis_order_is_stable_across_reads(
     second = engine._store.get_nogoods(open_only=True)[0]["member_ids"]
 
     assert first == second
+
+
+# --------------------------------------------------------------------------
+# Goal scoping. The frontier filter and the read model share one definition of
+# "what belongs to this goal", so a scoped search and a scoped view cannot
+# disagree about it.
+# --------------------------------------------------------------------------
+
+
+def _two_goal_landscape(engine: HypoTreeEngine) -> None:
+    """Two independent objectives, each resting on its own question."""
+    for group in ("a", "b"):
+        for i in range(3):
+            engine.create_hypothesis(f"{group}={i}", node_id=f"{group}{i}", exclusion_group=group)
+    engine.create_hypothesis(
+        "combo_a", node_id="combo_a", parent_ids=["a0"], edge_type=EdgeType.DEPENDENCY
+    )
+    engine.create_hypothesis(
+        "combo_b", node_id="combo_b", parent_ids=["b0"], edge_type=EdgeType.DEPENDENCY
+    )
+    engine.create_hypothesis(
+        "goal_a", node_id="goal_a", is_goal=True, target_metric=0.75, parent_ids=["combo_a"]
+    )
+    engine.create_hypothesis(
+        "goal_b", node_id="goal_b", is_goal=True, target_metric=0.75, parent_ids=["combo_b"]
+    )
+
+
+@pytest.mark.unit
+def test_goal_scope_includes_the_alternatives_that_answer_its_questions(
+    engine: HypoTreeEngine,
+) -> None:
+    """Dependency ancestry alone cannot answer the questions the goal rests on.
+
+    ``a1`` is not a dependency-ancestor of ``goal_a`` — it is a sibling of one.
+    Testing it is nevertheless how the engine learns whether ``a0`` holds, so a
+    scope built from ancestry alone would hand the navigator a question it is
+    forbidden from answering.
+    """
+    _two_goal_landscape(engine)
+    engine._sync_graph_from_store()
+    scope = engine._goal_scope("goal_a")
+
+    assert {"goal_a", "combo_a", "a0", "a1", "a2"} <= scope
+    assert not scope & {"goal_b", "combo_b", "b0", "b1", "b2"}
+
+
+@pytest.mark.unit
+def test_a_goal_filter_only_hands_out_work_inside_that_goal(engine: HypoTreeEngine) -> None:
+    """The whole point: two objectives, one at a time."""
+    _two_goal_landscape(engine)
+    for _ in range(6):
+        targets = engine.get_next_targets(goal_id="goal_a")
+        if targets[0].node_id is None:
+            break
+        assert targets[0].node_id.startswith("a"), targets[0].node_id
+        engine.record_evidence(targets[0].node_id, LogicalEvidence(success=0.0, depth=1))
+
+
+@pytest.mark.unit
+def test_no_goal_id_selects_exactly_what_it_always_did(tmp_path: Path) -> None:
+    """The default path must not move: same seed, same state, same pick.
+
+    Two engines rather than two calls on one — the sampler draws from a seeded
+    RNG that every call advances, so consecutive dry runs differ by design and
+    comparing them would test the RNG rather than the filter.
+    """
+    picks = []
+    for pass_explicit_none in (False, True):
+        e = HypoTreeEngine(tmp_path / f"scope-{pass_explicit_none}.db", rng_seed=7)
+        try:
+            _two_goal_landscape(e)
+            targets = (
+                e.get_next_targets(goal_id=None, dry_run=True)
+                if pass_explicit_none
+                else e.get_next_targets(dry_run=True)
+            )
+            picks.append(targets[0].node_id)
+        finally:
+            e.close()
+    assert picks[0] == picks[1]
+
+
+@pytest.mark.unit
+def test_a_goal_filter_that_hides_the_work_says_so(engine: HypoTreeEngine) -> None:
+    """The step that stops goal scoping from being a bug.
+
+    Agents create premises before wiring them — ``awaiting_composition`` exists
+    because they do — and those unwired nodes are outside every goal's scope by
+    construction. Reporting a bare empty frontier here would announce the search
+    was over while a dozen untested hypotheses sat one missing edge away.
+    """
+    engine.create_hypothesis("goal", node_id="goal", is_goal=True, target_metric=0.75)
+    engine.create_hypothesis("wired", node_id="wired", parent_ids=["goal"])
+    for i in range(3):
+        engine.create_hypothesis(f"loose={i}", node_id=f"loose{i}", exclusion_group="loose")
+
+    done = engine.get_next_targets(goal_id="goal")[0]
+    assert done.status == "DONE"
+    assert done.reason == "goal_scope_empty"
+    assert "3 untested" in done.rationale
+    assert "DEPENDENCY" in done.rationale
+
+
+@pytest.mark.unit
+def test_scoping_to_something_that_is_not_a_goal_is_refused(engine: HypoTreeEngine) -> None:
+    """Silently scoping to an ordinary node yields a plausible, meaningless filter."""
+    _two_goal_landscape(engine)
+    with pytest.raises(ClaimError, match="is not a goal"):
+        engine.get_next_targets(goal_id="a0")
+    with pytest.raises(NodeNotFoundError):
+        engine.get_next_targets(goal_id="ghost")
+
+
+@pytest.mark.unit
+def test_the_learning_path_and_goal_status_scope_to_the_same_set(
+    engine: HypoTreeEngine,
+) -> None:
+    """One primitive, three callers — they must not drift apart."""
+    _two_goal_landscape(engine)
+    _confirm(engine, "a0", depth=1)
+    _confirm(engine, "b0", depth=1)
+
+    path = engine.generate_learning_path(goal_id="goal_a")
+    assert all(not s.node_id.startswith("b") for s in path.steps)
+
+    status = engine.get_goal_status(goal_id="goal_a")
+    assert [g.node_id for g in status.goals] == ["goal_a"]
+    assert status.total_nodes == len(engine._goal_scope("goal_a"))

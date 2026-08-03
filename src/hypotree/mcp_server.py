@@ -23,6 +23,7 @@ each fails differently:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 from importlib import resources
@@ -273,6 +274,15 @@ def _tool_definitions() -> list[types.Tool]:
                         "default": False,
                         "description": "Peek at the selection without issuing a claim or TTL.",
                     },
+                    "goal_id": {
+                        "type": "string",
+                        "description": "Work on one objective only: that goal, everything it "
+                        "depends on, and the competing answers to those questions. Omit to "
+                        "draw from the whole workspace. If the filter leaves nothing testable "
+                        "while untested work sits outside it, the reason is goal_scope_empty "
+                        "and the fix is usually a missing DEPENDENCY edge, not a finished "
+                        "search.",
+                    },
                 },
             },
         ),
@@ -458,7 +468,16 @@ def _tool_definitions() -> list[types.Tool]:
             name="get_goal_status",
             description="Report all goal nodes, target metrics, progress counts, "
             "and whether the global stop holds.",
-            inputSchema={"type": "object", "properties": {}},
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal_id": {
+                        "type": "string",
+                        "description": "Report on one objective and count only the nodes "
+                        "forming its case. Omit for every goal in the workspace.",
+                    }
+                },
+            },
         ),
         types.Tool(
             name="get_conflicts",
@@ -613,7 +632,12 @@ def _tool_definitions() -> list[types.Tool]:
                         "default": 200,
                         "description": "Cap on narrated transitions (most recent first). "
                         "Counters always cover the whole history.",
-                    }
+                    },
+                    "goal_id": {
+                        "type": "string",
+                        "description": "Narrate one objective only. A workspace pursuing "
+                        "several otherwise interleaves their dead ends into one story.",
+                    },
                 },
             },
         ),
@@ -629,7 +653,7 @@ def _tool_definitions() -> list[types.Tool]:
     ]
 
 
-async def _run_main() -> None:
+async def _run_main(dashboard_port: int | None = None) -> None:
     """Wire the engine into an MCP stdio server and run it."""
     project_path = resolve_project_path()
     db_path = store_root(project_path) / "state.db"
@@ -662,12 +686,68 @@ async def _run_main() -> None:
     async def read_resource(uri: types.AnyUrl) -> str:
         return await _read_resource(engine, write_lock, str(uri))
 
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            app.create_initialization_options(),
+    dashboard = None
+    if dashboard_port is not None:
+        from hypotree.dashboard import DashboardServer, choose_port
+
+        async def apply_directive(node_id: str, mode: str, reason: str) -> dict[str, object]:
+            # The one path from the viewer back into the belief state, and it
+            # goes through the same lock every tool call does. A directive is
+            # scheduling, never evidence: it never touches alpha/beta.
+            async with write_lock:
+                if mode == "clear":
+                    return {"ok": engine._store.clear_directive(node_id), "node_id": node_id}
+                if engine._store.get_node(node_id) is None:
+                    return {"ok": False, "error": f"no such node {node_id!r}"}
+                engine._store.set_directive(node_id, mode, reason, "human")
+                return {"ok": True, "node_id": node_id, "mode": mode}
+
+        dashboard = DashboardServer(
+            db_path, port=choose_port(dashboard_port), writer=apply_directive
         )
+        await dashboard.start()
+        # stdout is the JSON-RPC channel. One line written there corrupts the
+        # session, so the URL goes to stderr.
+        print(f"hypotree dashboard: {dashboard.url}", file=sys.stderr, flush=True)
+
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await app.run(
+                read_stream,
+                write_stream,
+                app.create_initialization_options(),
+            )
+    finally:
+        if dashboard is not None:
+            await dashboard.stop()
+
+
+async def _run_viewer(port: int) -> None:
+    """Serve the dashboard against an existing belief state, with no MCP server.
+
+    The try-before-you-wire path: someone who has never configured an MCP client
+    can point this at a workspace and watch it. Read-only throughout, so it is
+    safe to run against a database an agent is actively writing.
+    """
+    from hypotree.dashboard import DashboardServer, choose_port
+
+    db_path = store_root(resolve_project_path()) / "state.db"
+    if not db_path.exists():
+        print(
+            f"no belief state at {db_path}. Run `hypotree --info` to see which "
+            f"workspace resolved, and start an agent against it first.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    server = DashboardServer(db_path, port=choose_port(port))
+    await server.start()
+    print(f"hypotree dashboard: {server.url}", file=sys.stderr, flush=True)
+    print("Ctrl-C to stop.", file=sys.stderr, flush=True)
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await server.stop()
 
 
 def _build_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPromptResult:
@@ -772,7 +852,12 @@ def _dispatch(engine: HypoTreeEngine, name: str, arguments: dict) -> object:
         count = arguments.pop("count", 1)
         ttl = arguments.pop("lease_ttl_s", None)
         dry_run = arguments.pop("dry_run", False)
-        targets = engine.get_next_targets(count=count, lease_ttl_s=ttl, dry_run=dry_run)
+        targets = engine.get_next_targets(
+            count=count,
+            lease_ttl_s=ttl,
+            dry_run=dry_run,
+            goal_id=arguments.get("goal_id"),
+        )
         return [t.model_dump(mode="json") for t in targets]
 
     if name == "record_evidence":
@@ -817,7 +902,7 @@ def _dispatch(engine: HypoTreeEngine, name: str, arguments: dict) -> object:
         return {"affected_ids": engine.verify_upstream(arguments["child_id"])}
 
     if name == "get_goal_status":
-        resp = engine.get_goal_status()
+        resp = engine.get_goal_status(goal_id=arguments.get("goal_id"))
         return resp.model_dump(mode="json")
 
     if name == "get_conflicts":
@@ -871,9 +956,9 @@ def _dispatch(engine: HypoTreeEngine, name: str, arguments: dict) -> object:
         return [c.model_dump(mode="json") for c in claims]
 
     if name == "generate_learning_path":
-        return engine.generate_learning_path(limit=arguments.get("limit", 200)).model_dump(
-            mode="json"
-        )
+        return engine.generate_learning_path(
+            limit=arguments.get("limit", 200), goal_id=arguments.get("goal_id")
+        ).model_dump(mode="json")
 
     if name == "get_workspace_info":
         from hypotree.store.identity import workspace_diagnostics
@@ -904,6 +989,20 @@ def main() -> None:
 
         print(json.dumps(workspace_diagnostics(resolve_project_path()), indent=2, default=str))
         return
+    if args and args[0] in ("--dashboard", "--dashboard-only"):
+        from hypotree.dashboard.server import DEFAULT_PORT
+
+        try:
+            port = int(args[1]) if len(args) > 1 else DEFAULT_PORT
+        except ValueError:
+            print(f"hypotree: {args[1]!r} is not a port number\n", file=sys.stderr)
+            raise SystemExit(2) from None
+        if args[0] == "--dashboard-only":
+            with contextlib.suppress(KeyboardInterrupt):
+                asyncio.run(_run_viewer(port))
+            return
+        asyncio.run(_run_main(dashboard_port=port))
+        return
     if args:
         print(f"hypotree: unknown option {args[0]!r}\n", file=sys.stderr)
         print(_cli_help(), file=sys.stderr)
@@ -917,9 +1016,19 @@ hypotree {__version__} — persistent, self-revising hypothesis DAG (MCP server)
 
 Usage:
   hypotree             Run the MCP server on stdio (what an MCP client does).
+  hypotree --dashboard [PORT]
+                       Run the MCP server and a read-only web dashboard beside
+                       it (default port 7331, probing upward if taken).
+  hypotree --dashboard-only [PORT]
+                       Serve the dashboard against the existing belief state
+                       and start no MCP server. Read-only, so it is safe to
+                       point at a workspace an agent is actively writing.
   hypotree --info      Print the resolved workspace, store path and warnings.
   hypotree --version   Print the version.
   hypotree --help      Show this message.
+
+The dashboard binds 127.0.0.1 only and mints a session token at startup; the URL
+it prints (to stderr, because stdout is JSON-RPC) carries that token.
 
 Run with no arguments only from an MCP client: the server speaks JSON-RPC on
 stdin and will appear to hang if you start it in a terminal.

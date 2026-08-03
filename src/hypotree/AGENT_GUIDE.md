@@ -28,14 +28,14 @@ refuted or settled).
 | Tool | Purpose |
 |------|---------|
 | `create_hypotheses` | Add one or many nodes + edges. Takes `hypotheses`, a **list** — pass a list of one to create a single hypothesis; there is no separate singular tool. Each item: `statement` (required), `parent_ids`, `edge_type`, `exclusion_group`, `is_goal`, `target_metric`, `node_id`, `if_exists`, `is_parametric`, `evidence_regime`, `param_config`. Parents may be created by the same call **in any order** — items are applied in dependency order, not list order. The whole list is validated first (shape, unknown fields, duplicate ids, missing parents, collisions), so **a rejected call creates nothing**. `if_exists` collision guard: `"error"` (default, raises), `"overwrite"` (full replace, keeps child edges), `"skip"`. Returns a list of `{node, created, reason}` **in input order**. |
-| `get_next_targets` | Select and claim the next target(s). **Batch-native**: `count` (default 1) targets are returned as a **list**, each with `node_id`, `claim_id`, `statement` and optionally `min_depth`. `lease_ttl_s` overrides the lease length. `dry_run=True` peeks without claiming (always one target). A claimed node is **reserved** until its evidence is recorded — see **Claims & Leases**. Returns a single `{status:"DONE", reason}` entry when nothing can be handed out. |
+| `get_next_targets` | Select and claim the next target(s). **Batch-native**: `count` (default 1) targets are returned as a **list**, each with `node_id`, `claim_id`, `statement` and optionally `min_depth`. `lease_ttl_s` overrides the lease length. `dry_run=True` peeks without claiming (always one target). `goal_id` restricts the search to one objective — that goal, everything it DEPENDS on, and the competing answers to those questions; omit it for the whole workspace. A claimed node is **reserved** until its evidence is recorded — see **Claims & Leases**. Returns a single `{status:"DONE", reason}` entry when nothing can be handed out. |
 | `record_evidence` | Record one result, or many at once, and fire the resulting transitions. **Batch-native**: pass `results`, a **list** of `{node_id, success, depth, claim_id, …}`, to report every experiment from one turn in one call — they are applied **in order**, so a refutation's cascade lands before the next result is read. Pass the single-result fields directly for the `k=1` case. `depth` records the rigour of the test that produced the result (see **Confirmation Depth**). `source_ref` names what was actually run (a path, a URL, a CI run id). Auto-captures git `context_hash` + `git_branch` when unset. Pass `evidence_kind:"infra"` for infrastructure errors (retriable, never invalidates). `count_next_targets` (default **0**) hands back targets under `next_targets`, saving a `get_next_targets` round-trip; it runs **once** after the whole batch. It is a **top-up, not an addition** — the number is how many you want to be *holding* when the call returns, so recording a batch of two leaves you with two, not four. A single result returns `{node, next_targets}`; a batch returns `{recorded, failed, next_targets}`, where `failed` names any report the engine refused rather than discarding the rest. |
 | `renew_claim` | Restart a live lease's clock because the experiment is still running. `claim_id`, optional `lease_ttl_s`. Raises `ClaimError` for a lease that is consumed, expired or unknown — it may already belong to someone else. |
 | `release_claims` | Hand leased nodes back **without** recording a result: for work you have decided not to run, or after a context reset you cannot report on. `claim_ids` releases exactly those; omit it to release every live lease. Returns `{released_node_ids}`. |
 | `update_status` | Manual status override for one or many nodes. Takes `node_ids` (a **list**), `new_status`, `reason`. **Validated up front** — if any id is missing it raises `NodeNotFoundError` before mutating anything (no partial application). Returns a list of `{node, old_status, transition}`. |
 | `invalidate_upstream` | Walk DEPENDENCY ancestors, `VERIFIED → NEEDS_REVISION` (auto-triggered on failure). |
 | `verify_upstream` | Walk REFINEMENT ancestors, `IN_PROGRESS → VERIFIED` (auto-triggered on success, depth-capped). |
-| `get_goal_status` | Goal nodes + `goals_met_count`, `goals_total_count`, `frontier_size`, `total_nodes`, `status_breakdown`. |
+| `get_goal_status` | Goal nodes + `goals_met_count`, `goals_total_count`, `frontier_size`, `total_nodes`, `status_breakdown`. `goal_id` reports on one objective and counts only the nodes forming its case. |
 | `get_conflicts` | Recorded conflict sets — groups of assumptions that cannot all hold. Each entry carries member statements, which members have been `cleared_by_substitution` (swapped out with the failure persisting), which were `skipped_no_substitute` (no competing answer left to swap in, so they have never been interrogated), and a `resolve_by` naming the swap that would clear the next one. `open_only=True` (default) hides conflicts already pinned on a culprit. |
 | `suggest_discriminating_experiment` | Propose the single most informative next experiment. While a conflict is still being narrowed it names the one **swap** that clears an assumption (`action:"substitute"`, with `node_id`, `replace_with`, `parent_ids`, `min_depth`); once every assumption has been swapped out and it still failed, it proposes a different **combination** (`action:"recombine"`). `{status: "SUGGESTED"\|"NO_CONFLICTS"\|"EXHAUSTED", …}`. |
 | `get_dag_context` | Bounded subgraph with credible intervals. `node_id`, `max_depth=2`, `max_children=10`. |
@@ -43,7 +43,7 @@ refuted or settled).
 | `list_nodes` | Filter + search + sort nodes → Markdown table. `status_filter`, `query_filter`, `order_by`, `limit`, `offset`, plus two shortcuts worth preferring: **`view`** (`frontier` \| `settled` \| `verified` \| `revision` \| `stale`) names the question instead of making you assemble a status filter that returns an empty table when you get it subtly wrong; **`stale_only`** keeps only VERIFIED nodes whose newest evidence names a commit that is no longer checked out. A stale node is **not refuted** — nothing has re-established it since the code moved, which is a different and weaker claim. The `Stale` column carries the same signal. See **Search & Ordering** below for wildcard/escape semantics. |
 | `get_evidence_history` | Evidence trail for a node (newest-first). `{id, kind, success, delta_success, monotonicity, context_hash, git_branch, source_ref, notes, recorded_at}`. |
 | `get_active_claims` | Live (unconsumed, unexpired) claims with `expires_in_s`. Use to resume interrupted work. |
-| `generate_learning_path` | What has been settled so far, **in order, and how**. Returns a markdown briefing plus structured `steps`, each marked `observed` (an experiment paid for it), `inferred` (the engine derived it for free) or `reversed` (a belief withdrawn or handed back). Carries `probes_spent`, `conclusions` and `conclusions_without_a_probe`. `limit` (default 200) bounds the narrative; the counters always cover the whole history. Call it **first** in a new session — something may already be settled — and to brief a human. |
+| `generate_learning_path` | What has been settled so far, **in order, and how**. Returns a markdown briefing plus structured `steps`, each marked `observed` (an experiment paid for it), `inferred` (the engine derived it for free) or `reversed` (a belief withdrawn or handed back). Carries `probes_spent`, `conclusions` and `conclusions_without_a_probe`. `limit` (default 200) bounds the narrative; the counters always cover the whole history. `goal_id` narrates one objective only — a workspace pursuing several otherwise interleaves their dead ends into one story. Call it **first** in a new session — something may already be settled — and to brief a human. |
 | `get_workspace_info` | **Which** belief state you are connected to, and how it was chosen. No arguments. Returns `workspace_id`, `source` (`env` \| `config` \| `remote` \| `path` — which of the four layers below produced it), `detail`, `project_path`, `store_root`, `db_path`, `db_exists`, and `warnings`. Call it when the graph is unexpectedly empty, or when two clients disagree about what has been established: that is almost always one project resolving to two workspaces. A pure read — it never creates the store, so asking cannot itself be what brings a workspace into being. |
 
 ---
@@ -197,10 +197,11 @@ three DONE reasons are distinct and mean different things:
 | `awaiting_substitution` | a conflict is being narrowed; rebuild the failed combination with the one premise the `rationale` names swapped out, and probe it |
 | `awaiting_composition` | every question is answered; build the hypothesis that combines the confirmed answers (the `rationale` names them) and test that |
 | `blocked_frontier` | untested hypotheses exist but none is reachable — your DEPENDENCY edges run the wrong way. A premise must be the **parent** of the combination that assumes it, never its child. The `rationale` names the nodes and what gates them |
+| `goal_scope_empty` | you passed `goal_id` and nothing reachable toward that goal is testable — but untested hypotheses exist *outside* its scope, because they are not wired to it. Give them a DEPENDENCY path to the goal, or drop the filter. Nothing is settled here |
 | `empty_frontier` | nothing is testable: everything is settled, or nothing exists yet |
 
-Only `all_goals_met` and `empty_frontier` are endings. The other two are
-instructions: you are mid-task and the belief state is telling you which move is
+Only `all_goals_met` and `empty_frontier` are endings. Every other reason is an
+instruction: you are mid-task and the belief state is telling you which move is
 left.
 
 A batch also never contains two members of the same exclusion group. They are
@@ -343,6 +344,24 @@ record_evidence("node-id", success=0.5)  # claim_id is optional
     Names from layers 1–2 must match `[a-z0-9][a-z0-9._~-]{0,127}` and must not be a Windows reserved device name (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`), at any extension. Rejected on **every** platform, so a name that works on one machine works on all of them. An invalid name falls through to the next layer rather than failing.
 
     **For global MCP configs** (Cline, GitHub Copilot): set `HYPOTREE_WORKSPACE_ID=my-project` in the env, or commit a `hypotree.yaml` to the repo root. Both bypass cwd issues entirely. To see what actually resolved, call `get_workspace_info` or run `hypotree --info` from a shell; `<data home>/mcp_hypotree/logs.txt` carries the traces.
+
+---
+
+#### The dashboard (for the human, not for you)
+
+`hypotree --dashboard` runs a read-only web view beside this server on
+`127.0.0.1:7331`; `hypotree --dashboard-only` serves it with no MCP server at
+all. It shows the graph as it grows, replays any past instant from the bi-temporal
+history, and renders `generate_learning_path` as typeset markdown.
+
+Two things there affect *you*:
+
+- A human can **pin** or **suspend** a node. A pinned node is offered first; a
+  suspended one is withheld. These are scheduling instructions, not evidence —
+  they never move a posterior — so a node you were expecting may not arrive, and
+  that is someone redirecting the search rather than the belief state changing.
+- Nothing on the dashboard writes evidence. If a belief changed, an experiment
+  changed it.
 
 #### Don't Use hypotree For
 
