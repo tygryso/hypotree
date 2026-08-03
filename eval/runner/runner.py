@@ -21,8 +21,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import random
 import time
+import urllib.error
 import urllib.request
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +36,9 @@ from eval.runner.config import (
     ARM_A,
     ARM_B,
     ARM_F,
+    LLM_MAX_ATTEMPTS,
+    LLM_RETRY_BASE_S,
+    LLM_RETRY_MAX_S,
     LLM_TIMEOUT_S,
     EvalConfig,
     make_run_config,
@@ -1170,8 +1176,25 @@ class RunLogger:
             llm_model=config.llm_model,
         )
 
-    def log_run_end(self, reason: str, goals_met: bool) -> None:
-        self._write("run_end", reason=reason, goals_met=goals_met)
+    def log_run_end(self, reason: str, goals_met: bool, infra_failed: bool = False) -> None:
+        """Close out an episode.
+
+        ``infra_failed`` marks an episode that ended because the harness could
+        not reach the inference server, not because the agent ran out of budget.
+        Downstream scoring excludes those rather than censoring them at budget:
+        counting a dropped HTTP connection as a failure to solve the task would
+        charge one arm for the server's bad minute.
+        """
+        self._write("run_end", reason=reason, goals_met=goals_met, infra_failed=infra_failed)
+
+    def log_llm_retry(self, attempt: int, error: str, delay_s: float) -> None:
+        """Record a transient inference-server fault that is about to be retried.
+
+        Logged even though the request usually succeeds on the next attempt, so
+        a run whose numbers look strange can be checked against how much trouble
+        the transport was having at the time.
+        """
+        self._write("llm_retry", attempt=attempt, error=error, delay_s=round(delay_s, 2))
 
     def log_session_reset(
         self,
@@ -1584,6 +1607,32 @@ class MockAgent:
 # -- OpenAI-compatible LLM agent ---------------------------------------------
 
 
+class LLMUnavailableError(RuntimeError):
+    """The inference server could not be reached after exhausting every retry.
+
+    Raised instead of letting a transport error escape as-is, so the episode can
+    end itself cleanly and the sweep can carry on to the next one. This is an
+    infrastructure fault, never a result: an episode that ends here is excluded
+    from the comparison rather than scored as a failure to solve the task.
+    """
+
+
+def _is_retryable(err: Exception) -> bool:
+    """Decide whether a failed request is worth sending again.
+
+    Server-side faults (5xx) and rate limits (429) are transient by nature and
+    usually clear on their own, as is anything that never got a reply at all. A
+    4xx other than 429 is the request itself being wrong, and repeating it
+    verbatim would only waste the backoff.
+    """
+    if isinstance(err, urllib.error.HTTPError):
+        return err.code == 429 or err.code >= 500
+    # Everything else reaching here is a request that got no usable answer:
+    # connection refused/reset, DNS, a socket that opened and went quiet, or a
+    # truncated body. All mean "no answer", not "no".
+    return True
+
+
 def _call_openai_api(
     base_url: str,
     model: str,
@@ -1591,11 +1640,18 @@ def _call_openai_api(
     tools: list[dict[str, Any]],
     temperature: float,
     max_tokens: int,
+    on_retry: Callable[[int, str, float], None] | None = None,
 ) -> dict[str, Any]:
-    """Call an OpenAI-compatible chat completions endpoint.
+    """Call an OpenAI-compatible chat completions endpoint, retrying transient faults.
 
     Works with Ollama (/v1/chat/completions), GLM, and other compatible APIs.
     Uses stdlib urllib to keep eval/ dependency-free.
+
+    A sweep is 90 sequential episodes against one local inference server, so the
+    probability that every single request succeeds is not the thing to design
+    for. Transient faults are retried with exponential backoff and jitter;
+    everything else is reported immediately, because a malformed request does not
+    become well-formed by being sent again.
     """
     url = f"{base_url.rstrip('/')}/chat/completions"
     payload: dict[str, Any] = {
@@ -1608,13 +1664,37 @@ def _call_openai_api(
         payload["tools"] = tools
 
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_S) as resp:
-        return json.loads(resp.read())
+    last: Exception | None = None
+    for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT_S) as resp:
+                return json.loads(resp.read())
+        # Deliberately only the transport failures. Anything else — a bad URL, a
+        # payload that will not serialise — is the harness being wrong, and
+        # dressing that up as "the server did not answer" would mark every
+        # episode infra-failed and silently shrink the seed set instead of
+        # failing where someone would notice.
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as err:
+            last = err
+            if not _is_retryable(err) or attempt == LLM_MAX_ATTEMPTS:
+                break
+            # Exponential backoff, capped, with jitter so repeated failures do
+            # not settle into a fixed rhythm against a recovering server.
+            delay = min(LLM_RETRY_BASE_S * 2 ** (attempt - 1), LLM_RETRY_MAX_S)
+            delay += random.uniform(0, delay / 2)
+            if on_retry is not None:
+                on_retry(attempt, f"{type(err).__name__}: {err}", delay)
+            time.sleep(delay)
+
+    raise LLMUnavailableError(
+        f"{model} at {base_url} did not answer after {LLM_MAX_ATTEMPTS} attempt(s): "
+        f"{type(last).__name__}: {last}"
+    ) from last
 
 
 def _parse_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1690,6 +1770,9 @@ def run(config: EvalConfig) -> dict[str, Any]:
     # Set when the run stops for a reason other than a win or a spent budget,
     # so the log records *why* rather than defaulting to "agent_stopped".
     stop_reason: str | None = None
+    # Set when the episode ends because the inference server became unreachable.
+    # Distinct from every other stop reason: it says nothing about the agent.
+    infra_failed = False
     # Consecutive turns that dispatched no experiment. See MAX_IDLE_TURNS.
     idle_turns = 0
     # Sorted list of not-yet-fired breakpoints. Draining it as ``step`` crosses
@@ -1818,14 +1901,24 @@ def run(config: EvalConfig) -> dict[str, Any]:
         else:
             tools = get_tools_for_arm(config.arm)
             _llm_started = time.monotonic()
-            response = _call_openai_api(
-                config.llm_base_url,
-                config.llm_model,
-                messages,
-                tools,
-                config.llm_temperature,
-                config.llm_max_tokens,
-            )
+            try:
+                response = _call_openai_api(
+                    config.llm_base_url,
+                    config.llm_model,
+                    messages,
+                    tools,
+                    config.llm_temperature,
+                    config.llm_max_tokens,
+                    on_retry=logger.log_llm_retry,
+                )
+            except LLMUnavailableError as err:
+                # The server is gone, not the agent. End this episode where it
+                # stands and let the sweep move on: an exception escaping here is
+                # what cost run I its last 61 episodes.
+                infra_failed = True
+                stop_reason = "llm_unavailable"
+                _progress(f"stopping: {err}")
+                break
             _llm_elapsed = time.monotonic() - _llm_started
             tool_calls = _parse_tool_calls(response)
 
@@ -2006,7 +2099,7 @@ def run(config: EvalConfig) -> dict[str, Any]:
     else:
         reason = "agent_stopped"
     _progress(f"done: {reason} (steps={step}, goals_met={goals_met})")
-    logger.log_run_end(reason, goals_met)
+    logger.log_run_end(reason, goals_met, infra_failed=infra_failed)
 
     summary = {
         "seed": config.seed,

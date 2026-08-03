@@ -107,6 +107,12 @@ def _load_runner_logs(runs_dir: Path) -> dict[str, dict[str, list[dict[str, Any]
     landscape designs. Filtering here keeps the gate defined by the
     pre-registration rather than by whatever files happen to be on disk.
 
+    Episodes the inference server killed are dropped here too. They are excluded
+    rather than censored at budget because censoring assumes the agent had its
+    full budget and did not solve the task, and an episode that died on a
+    dropped HTTP connection had neither. Dropping it costs one paired seed;
+    censoring it would charge that arm for the server's bad minute.
+
     Returns ``{arm: {seed: [events]}}``.
     """
     result: dict[str, dict[str, list[dict[str, Any]]]] = {"A": {}, "B": {}, "F": {}}
@@ -115,7 +121,11 @@ def _load_runner_logs(runs_dir: Path) -> dict[str, dict[str, list[dict[str, Any]
         seed = int(parts[1])
         arm = parts[3]
         if arm in result and seed in TASK_SEEDS:
-            result[arm][seed] = _load_jsonl(log_path)
+            events = _load_jsonl(log_path)
+            run_end = _extract_run_end(events)
+            if run_end is not None and run_end.get("infra_failed"):
+                continue
+            result[arm][seed] = events
     return result
 
 

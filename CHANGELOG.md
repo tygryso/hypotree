@@ -73,6 +73,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `record_evidence` tool schema, and never read it in the dispatch — so every value sent over
   MCP was silently discarded. The single and batch paths now build evidence through one
   helper, so they cannot drift apart again.
+- **The shortfall recovery fired on a search that had already won.** When every question is
+  answered and the assembled answer falls short, the engine hands back the alternatives those
+  answers had retired — the reading being that one of the confirmations must be wrong. It did
+  not check whether a *different* assembly had since cleared the bar, and a composition that
+  succeeded withdraws exactly that reading: the answers were right, the earlier assembly was
+  simply the wrong combination of them. One real episode reopened six settled questions on the
+  turn it found its answer, because its goal node had never been wired to the winning
+  composition and an empty frontier looks the same from the inside either way. The recovery
+  now stands down once any composition is `VERIFIED`.
+- **Two different recoveries wrote the same reason marker.** `_recover_from_underperformance`
+  reused `INTERACTION_REOPEN_PREFIX`, so a history could not distinguish "a conflict turned
+  out to be an interaction effect" from "every answer was in and the assembly still missed" —
+  and a run report claimed every conflict had been narrowed to a culprit *and* that six
+  alternatives had been reopened because a conflict was an interaction effect, which are
+  mutually exclusive endings. New `UNDERPERFORMANCE_REOPEN_PREFIX`. Additive: histories written
+  before 0.4.0 keep the old prefix and still read as interaction reopens, which is the only
+  label that ever existed for them.
 
 ### Changed
 - `/hypotree-next` and the server-level instructions now teach the batch shape.
@@ -104,6 +121,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   belief-revision side effect to the result that caused it rather than to the last in the
   batch. `seed_reader` reports **results per record call** — 1.00 means the batch shape is not
   being used and turns/step cannot fall.
+- **One HTTP error no longer kills a 90-episode sweep.** `_call_openai_api` wrapped `urlopen`
+  in nothing at all, so a single 5xx from the inference server propagated out of `run()` and,
+  under `eval.sh`'s `set -e`, aborted everything that had not run yet. Run `I` died at seed
+  1210 of 30 and took 61 episodes with it. Transient faults (5xx, 429, connection failures,
+  read timeouts) are now retried with capped exponential backoff plus jitter — five attempts,
+  2 s to 60 s — and every retry is logged so a run with odd numbers can be checked against how
+  much trouble the transport was having. A 4xx other than 429 still fails immediately: a
+  malformed request does not become well-formed by being sent again.
+- **An episode that dies is excluded from scoring, not censored at budget.** Exhausted retries
+  raise `LLMUnavailableError`, which becomes a clean `run_end` carrying `infra_failed`. The
+  gate drops those episodes from the paired set and the reader names them as transport faults.
+  Censoring assumes the agent had its full budget and did not solve the task; an episode killed
+  by a dropped connection had neither, and scoring it at budget charges one arm for the
+  server's bad minute.
+- **`eval.sh` survives a failed episode.** The runner call no longer aborts the sweep, failed
+  episodes are collected and reported at the end with the `--resume` command that recovers
+  them, and the resume check now requires a terminal record *and* the absence of an infra
+  marker — otherwise `--resume` would skip precisely the episodes that need re-running.
+- `seed_reader` reports **alternatives reopened after a shortfall** separately from those
+  reopened by an interaction effect, and lists infrastructure failures apart from episodes
+  with no terminal record: one needs the server looked at, the other needs a re-run.
 
 ## [0.3.2] - 2026-08-01
 

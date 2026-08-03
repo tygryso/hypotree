@@ -137,6 +137,26 @@ mkdir -p "${RUNS_DIR}"
 # matching on `event` instead never fired, so --resume treated every completed
 # arm as a crash, deleted its log and re-ran the whole sweep.
 RUN_END_MARKER='"event_type": "run_end"'
+# An episode the inference server killed writes run_end like any other, so the
+# terminal record alone no longer proves an arm is done. It is only finished if
+# it also did not end on an infrastructure fault — otherwise --resume would skip
+# exactly the episodes that most need re-running.
+INFRA_FAIL_MARKER='"infra_failed": true'
+
+# Episodes that died on infrastructure, reported together at the end. A dropped
+# connection at seed 10 of 30 used to abort the remaining 61 episodes; the sweep
+# now carries on and tells you what to re-run with --resume.
+FAILED_EPISODES=()
+
+# True when a log holds a completed, non-infra-failed episode. Written so the
+# function's exit status is the last command's, with no `&&` compound that
+# `set -e` could read as a failure at the call site.
+episode_complete() {
+  local log="$1"
+  grep -qs "${RUN_END_MARKER}" "${log}" || return 1
+  ! grep -qs "${INFRA_FAIL_MARKER}" "${log}"
+}
+
 
 # Always clean up the landscape server, even on error or Ctrl-C. Without this an
 # aborted run leaves a server bound to the port and the next seed scores its
@@ -223,7 +243,7 @@ for SEED in ${SEEDS}; do
   if [[ "${RESUME}" -eq 1 ]]; then
     PENDING=0
     for ARM in ${ARMS}; do
-      grep -qs "${RUN_END_MARKER}" "${RUNS_DIR}/seed-${SEED}-arm-${ARM}.jsonl" || PENDING=1
+      episode_complete "${RUNS_DIR}/seed-${SEED}-arm-${ARM}.jsonl" || PENDING=1
     done
     if [[ "${PENDING}" -eq 0 ]]; then
       echo "=== seed ${SEED}: all arms complete, skipping ==="
@@ -251,7 +271,7 @@ for SEED in ${SEEDS}; do
     # truncate it, because the runner appends and a half-written episode would
     # otherwise be concatenated with its retry into a single impossible history.
     if [[ "${RESUME}" -eq 1 && -f "${LOG}" ]]; then
-      if grep -qs "${RUN_END_MARKER}" "${LOG}"; then
+      if episode_complete "${LOG}"; then
         echo "=== arm ${ARM} seed ${SEED}: complete, skipping ==="
         continue
       fi
@@ -259,17 +279,36 @@ for SEED in ${SEEDS}; do
       rm -f "${LOG}"
     fi
     echo "=== Running arm ${ARM} for seed ${SEED} (run-id=${RUN_ID}) ==="
-    uv run python -m eval.runner.runner eval/ "${SEED}" "${ARM}" \
+    # One episode must never take the sweep with it. `set -e` would abort the
+    # whole run on a non-zero exit, which is how run I lost 61 of its 90
+    # episodes to a single HTTP error; the failure is recorded and the sweep
+    # moves on, to be picked up later with --resume.
+    if ! uv run python -m eval.runner.runner eval/ "${SEED}" "${ARM}" \
         --run-id "${RUN_ID}" \
         --llm-backend openai \
         --llm-model "${LLM_MODEL}" \
         --llm-base-url "${LLM_BASE_URL}" \
-        --landscape-url "${LANDSCAPE_URL}"
+        --landscape-url "${LANDSCAPE_URL}"; then
+      echo "!!! arm ${ARM} seed ${SEED} FAILED — continuing with the next episode" >&2
+      FAILED_EPISODES+=("seed ${SEED} arm ${ARM}")
+    fi
   done
 
   cleanup
   SRV=""
 done
+
+# 4a. Report episodes that died outright, before any of the scoring runs.
+#     They are excluded from the paired statistics rather than scored, so the
+#     honest thing is to say so loudly here rather than let the arm counts
+#     quietly disagree in the report.
+if [[ "${#FAILED_EPISODES[@]}" -gt 0 ]]; then
+  echo
+  echo "!!! ${#FAILED_EPISODES[@]} episode(s) failed and are excluded from scoring:"
+  printf '      %s\n' "${FAILED_EPISODES[@]}"
+  echo "    Re-run just these with: $0 --run-iteration <SAME> --resume"
+  echo
+fi
 
 # 4b. Surface censored episodes before anything is scored.
 #     An episode that never met the goal is right-censored to the full budget and

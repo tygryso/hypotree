@@ -49,6 +49,7 @@ from hypotree.engine import (
     EXCLUSION_REASON_PREFIX,
     INTERACTION_REOPEN_PREFIX,
     SUBSTITUTION_ELIMINATE_PREFIX,
+    UNDERPERFORMANCE_REOPEN_PREFIX,
 )
 
 # Arm labels, expanded once here so the report explains itself to a reader who
@@ -77,6 +78,7 @@ _EXCLUDE_REASON = EXCLUSION_REASON_PREFIX
 _DEDUCE_REASON = DEDUCTION_REASON_PREFIX
 _SUBSTITUTE_OUT_REASON = SUBSTITUTION_ELIMINATE_PREFIX
 _INTERACTION_REASON = INTERACTION_REOPEN_PREFIX
+_SHORTFALL_REASON = UNDERPERFORMANCE_REOPEN_PREFIX
 
 # Statuses a node lands in only because something else went wrong. These, and
 # only these, are the destructive propagation the belief state is supposed to
@@ -112,6 +114,9 @@ class RunLog:
     goals_met: bool = False
     end_reason: str = "no_run_end"
     complete: bool = False
+    # The episode ended because the inference server stopped answering. Kept
+    # separate from ``complete`` so the report can say *why* it was excluded.
+    infra_failed: bool = False
     tool_budget: int | None = None
     declared_run_id: str | None = None
     llm_model: str | None = None
@@ -160,6 +165,12 @@ class RunLog:
     substitutes_ruled_out: int = 0
     reopened: int = 0
     interaction_reopens: int = 0
+    # Reopens triggered by every answer being in and the assembly still falling
+    # short. A different mechanism from the interaction case and reported apart:
+    # counting them together described run I's six shortfall reopens as conflicts
+    # proven to be interaction effects, in the same breath as saying every
+    # conflict had been narrowed to a culprit.
+    shortfall_reopens: int = 0
     same_question_dispatches: int = 0
     done_reasons: Counter[str] = field(default_factory=Counter)
     deduced: int = 0
@@ -302,7 +313,13 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
             log.steps = ev.get("step", 0)
             log.goals_met = bool(ev.get("goals_met"))
             log.end_reason = str(ev.get("reason", "?"))
-            log.complete = True
+            # An episode the inference server killed is not a result. It reached
+            # run_end, so it is structurally complete, but treating it as
+            # complete would score a dropped connection as a failure to solve the
+            # task — so it is excluded from paired comparison exactly like an
+            # episode that never finished at all.
+            log.infra_failed = bool(ev.get("infra_failed"))
+            log.complete = not log.infra_failed
 
         elif kind == "experiment":
             log.experiments += 1
@@ -406,6 +423,8 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
                 log.reopened += 1
                 if reason.startswith(_INTERACTION_REASON):
                     log.interaction_reopens += 1
+                elif reason.startswith(_SHORTFALL_REASON):
+                    log.shortfall_reopens += 1
             if new == "VERIFIED" and reason.startswith(_DEDUCE_REASON):
                 log.deduced += 1
 
@@ -937,6 +956,13 @@ def _section_belief_state(logs: list[RunLog]) -> list[str]:
             "among the alternatives they retired",
         ],
         [
+            "alternatives reopened after a shortfall",
+            str(sum(log.shortfall_reopens for log in b_logs)),
+            "every question was answered and the answers assembled still missed the "
+            "target — so one of those answers is wrong, and the search resumes "
+            "instead of reporting itself finished",
+        ],
+        [
             "destructive revisions (NEEDS_REVISION / PRUNED)",
             str(sum(log.revision_transitions for log in b_logs)),
             "belief withdrawn because something built on it failed",
@@ -1084,6 +1110,7 @@ def _section_stratified(logs: list[RunLog]) -> list[str]:
         resolved = sum(log.conflicts_resolved for log in conflict_logs)
         recorded = sum(log.conflicts_recorded for log in conflict_logs)
         interaction = sum(log.interaction_reopens for log in conflict_logs)
+        shortfall = sum(log.shortfall_reopens for log in conflict_logs)
         swaps = [n for log in conflict_logs for n in log.diagnosis_swaps]
         swap_line = (
             f"{statistics.mean(swaps):.2f} probes to name the culprit "
@@ -1100,6 +1127,8 @@ def _section_stratified(logs: list[RunLog]) -> list[str]:
             f"Recovery health: {resolved}/{recorded} conflicts narrowed to a culprit, "
             f"{interaction} alternative(s) reopened after a conflict was shown to be an "
             f"interaction effect, "
+            f"{shortfall} alternative(s) reopened after every answer was in and the "
+            f"assembly still fell short, "
             f"{statistics.mean([log.reopened for log in conflict_logs]):.1f} alternatives "
             f"reopened per conflict episode, "
             f"{statistics.mean([log.duplicates for log in conflict_logs]):.1f} duplicate "
@@ -1444,7 +1473,19 @@ def _section_warnings(logs: list[RunLog], runs_dir: Path, run_id: str) -> list[s
             f"episodes ran against different models ({sorted(models)}) — not comparable"
         )
 
-    incomplete = [log for log in logs if not log.complete]
+    # Two different reasons an episode does not count, reported apart because
+    # they call for different responses: a missing terminal record means the
+    # harness died and the episode must be re-run, while an infrastructure
+    # failure is already accounted for and just needs the server looked at.
+    infra = [log for log in logs if log.infra_failed]
+    if infra:
+        warnings.append(
+            f"{len(infra)} episode(s) ended because the inference server stopped answering "
+            f"and were excluded from paired comparisons (an infrastructure fault is not a "
+            f"result): " + ", ".join(f"seed {x.seed} arm {x.arm}" for x in infra)
+        )
+
+    incomplete = [log for log in logs if not log.complete and not log.infra_failed]
     if incomplete:
         warnings.append(
             f"{len(incomplete)} episode(s) have no `run_end` and were excluded from paired "

@@ -822,3 +822,40 @@ def test_permutation_p_value_is_reproducible() -> None:
     table = [[18, 9], [7, 14], [2, 3]]
 
     assert _permutation_p_value(table) == _permutation_p_value(table)
+
+
+@pytest.mark.unit
+def test_an_infra_failed_episode_is_excluded_not_censored(tmp_path: Path) -> None:
+    """An episode the inference server killed is not a result and must not score.
+
+    Censoring assumes the agent had its full budget and did not solve the task.
+    An episode that died on a dropped HTTP connection had neither, so scoring it
+    at budget charges that arm for the server's bad minute. Dropping it costs one
+    paired seed; keeping it corrupts the comparison.
+    """
+    from eval.analyse_gate import _load_runner_logs
+    from eval.runner.config import TASK_SEEDS
+
+    healthy, killed = TASK_SEEDS[0], TASK_SEEDS[1]
+    for seed in (healthy, killed):
+        for arm in ("A", "B", "F"):
+            infra = seed == killed and arm == "B"
+            (tmp_path / f"seed-{seed}-arm-{arm}.jsonl").write_text(
+                json.dumps(
+                    {
+                        "event_type": "run_end",
+                        "step": 3,
+                        "reason": "llm_unavailable" if infra else "all_goals_met",
+                        "goals_met": not infra,
+                        "infra_failed": infra,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+    logs = _load_runner_logs(tmp_path)
+    assert set(logs["B"]) == {healthy}, "the killed episode must not be scored"
+    # The other arms on that seed are untouched — only the dead episode drops out.
+    assert set(logs["A"]) == {healthy, killed}
+    assert set(logs["F"]) == {healthy, killed}

@@ -72,6 +72,14 @@ DEDUCTION_REASON_PREFIX = "deduced by elimination: "
 # isolation — the answer may be the alternative rather than the confirmed value.
 INTERACTION_REOPEN_PREFIX = "reopened: "
 
+# Marks an alternative handed back because every question was answered and the
+# answers assembled still fell short of the objective. The mechanism is the same
+# as the interaction case — retired alternatives come back — but the trigger is
+# not, and sharing one marker made the report describe a shortfall as a conflict
+# that had been shown to be an interaction effect. Distinct markers because they
+# answer different questions about a run.
+UNDERPERFORMANCE_REOPEN_PREFIX = "reopened after a shortfall: "
+
 # Marks the answer a diagnostic swap confirmed. The substitute was never probed
 # on its own: the composition built around it succeeded where the same
 # composition with the convicted member failed, and that success is a stronger
@@ -342,6 +350,11 @@ _ORIGIN_BY_MARKER: tuple[tuple[str, Literal["observed", "inferred", "reversed"],
         INTERACTION_REOPEN_PREFIX,
         "reversed",
         "handed back — the confirmation that retired it failed in composition",
+    ),
+    (
+        UNDERPERFORMANCE_REOPEN_PREFIX,
+        "reversed",
+        "handed back — every answer was in and together they still fell short",
     ),
     (
         REVIEW_REASON_PREFIX,
@@ -2065,8 +2078,12 @@ class HypoTreeEngine:
             # entries in the report, because no snapshot of the current state can
             # show that a belief was ever held and then withdrawn.
             reason = str(row["reason"] or "")
-            reopened = reason.startswith(INTERACTION_REOPEN_PREFIX) or reason.startswith(
-                EXCLUSION_RETRACT_PREFIX
+            reopened = reason.startswith(
+                (
+                    INTERACTION_REOPEN_PREFIX,
+                    UNDERPERFORMANCE_REOPEN_PREFIX,
+                    EXCLUSION_RETRACT_PREFIX,
+                )
             )
             if status in (Status.UNTESTED, Status.IN_PROGRESS) and not reopened:
                 continue
@@ -2883,13 +2900,23 @@ class HypoTreeEngine:
             reopened.extend(self._reopen_alternatives(member, now))
         return reopened
 
-    def _reopen_alternatives(self, node_id: str, now: datetime, why: str = "") -> list[str]:
+    def _reopen_alternatives(
+        self,
+        node_id: str,
+        now: datetime,
+        why: str = "",
+        marker: str = INTERACTION_REOPEN_PREFIX,
+    ) -> list[str]:
         """Return a confirmed node's competing alternatives to the frontier.
 
         Unlike ``_retract_exclusion`` this does not require the confirmation to
         have been withdrawn, and it deliberately does not re-attribute the
         siblings to the still-standing member — that member's authority is
         exactly what is in doubt.
+
+        ``marker`` records *which* reading prompted the reopen. Two of them lead
+        here and they mean different things to anyone reading the history back,
+        so the caller names its own rather than inheriting the default.
         """
         node = self._store.get_node(node_id)
         if node is None or not node.exclusion_group:
@@ -2899,18 +2926,23 @@ class HypoTreeEngine:
             f"'{node_id}' holds in isolation but takes part in a composition that "
             f"fails, so the answer may be here instead"
         )
-        marker = f"{EXCLUSION_REASON_PREFIX}{node_id}"
+        # The reason string a sibling must currently carry to be eligible: only
+        # alternatives retired by *this* confirmation's exclusion inference come
+        # back. Named apart from the ``marker`` being written, because one is
+        # read and the other is written and confusing them silently rewrites
+        # every reopen reason with the exclusion prefix.
+        retired_by = f"{EXCLUSION_REASON_PREFIX}{node_id}"
         reopened: list[str] = []
         for sibling in self._store.get_nodes_in_exclusion_group(node.exclusion_group, node_id):
             if sibling.status != Status.EXHAUSTED:
                 continue
             history = self._store.get_status_history(sibling.id)
-            if not history or history[-1]["reason"] != marker:
+            if not history or history[-1]["reason"] != retired_by:
                 continue
             self._store.change_status(
                 sibling.id,
                 Status.UNTESTED,
-                reason=f"{INTERACTION_REOPEN_PREFIX}{why}",
+                reason=f"{marker}{why}",
                 now=now,
             )
             self._refresh_node_in_graph(sibling.id)
@@ -2944,20 +2976,39 @@ class HypoTreeEngine:
         only once the frontier is otherwise empty: reopening a question that
         still has cheaper work in front of it would trade a targeted search for a
         sweep.
+
+        It stands down entirely once *some* assembly has cleared the bar. The
+        whole reading rests on landing short being evidence against the
+        confirmations, and a composition that succeeded is that evidence
+        withdrawn: the answers were right and the earlier assembly was simply not
+        the right combination of them. Without this check the recovery fires on a
+        search that has already succeeded — one real episode reopened six settled
+        questions on the turn it found its answer, because the goal node had
+        never been wired to the winning composition and an empty frontier looks
+        the same from the inside either way.
         """
+        # A composition is any settled non-goal node assembled from two or more
+        # answers. Both the stand-down check and the reopen itself range over
+        # exactly that set, so it is built once.
+        compositions = [
+            (node, parents)
+            for node in self._store.get_all_nodes()
+            if not node.is_goal and node.status in (Status.VERIFIED, Status.EXHAUSTED)
+            if len(parents := self._graph.parents(node.id, EdgeType.DEPENDENCY)) >= 2
+        ]
+        if any(node.status == Status.VERIFIED for node, _ in compositions):
+            return []
+
         why = (
             "every question is answered and the answers assembled still fall short of the "
             "objective, so at least one of them is not the right answer"
         )
         reopened: list[str] = []
-        for node in self._store.get_all_nodes():
-            if node.status != Status.EXHAUSTED or node.is_goal:
-                continue
-            parents = self._graph.parents(node.id, EdgeType.DEPENDENCY)
-            if len(parents) < 2:
-                continue
+        for _node, parents in compositions:
             for parent in parents:
-                reopened.extend(self._reopen_alternatives(parent, now, why))
+                reopened.extend(
+                    self._reopen_alternatives(parent, now, why, UNDERPERFORMANCE_REOPEN_PREFIX)
+                )
         return reopened
 
     def _convict(self, culprit: str, nogood_id: int, now: datetime) -> None:

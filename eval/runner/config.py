@@ -51,6 +51,18 @@ DEFAULT_LANDSCAPE_PORT: int = 8080
 # LLM request timeout (seconds). Generous because local models can be slow.
 LLM_TIMEOUT_S: int = 1200
 
+# How many times a transient LLM transport failure is retried before the episode
+# gives up. A local inference server dropping one request mid-sweep is a fact of
+# life, not a result: run I died on a single HTTP error at seed 1210 of 30 and
+# took the remaining 61 episodes with it. Five attempts spans roughly two minutes
+# of backoff, which covers a model reload or a brief server restart.
+LLM_MAX_ATTEMPTS: int = 5
+
+# Backoff between attempts, in seconds: doubles each time and is capped, with
+# jitter added on top so a retry storm cannot synchronise. 2, 4, 8, 16 ...
+LLM_RETRY_BASE_S: float = 2.0
+LLM_RETRY_MAX_S: float = 60.0
+
 # Arm labels used in logs and filenames.
 #
 # Three arms, because "does a belief state help?" is really two questions and the

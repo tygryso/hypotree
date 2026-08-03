@@ -15,7 +15,12 @@ from typing import Any
 
 import pytest
 
-from hypotree.engine import MAX_REVIEW_DISPATCHES, HypoTreeEngine
+from hypotree.engine import (
+    INTERACTION_REOPEN_PREFIX,
+    MAX_REVIEW_DISPATCHES,
+    UNDERPERFORMANCE_REOPEN_PREFIX,
+    HypoTreeEngine,
+)
 from hypotree.models.edge import EdgeType
 from hypotree.models.evidence import LogicalEvidence
 from hypotree.models.status import Status
@@ -936,6 +941,108 @@ def test_a_single_parent_composition_has_nothing_to_reopen(engine: HypoTreeEngin
     engine.record_evidence("combo", LogicalEvidence(success=0.5, depth=2))
 
     assert engine.get_next_targets()[0].reason == "empty_frontier"
+
+
+@pytest.mark.unit
+def test_an_interaction_reopen_carries_the_interaction_marker(
+    engine: HypoTreeEngine,
+) -> None:
+    """The counterpart to the shortfall test: the interaction path keeps its own marker.
+
+    Nothing pinned the reason this path *writes*, only the reasons it reads, and
+    that gap let a parameter named ``marker`` be silently shadowed by a local of
+    the same name — rewriting every reopen reason with the exclusion prefix while
+    the whole suite stayed green.
+    """
+    _build_two_axis_landscape(engine)
+    engine.record_evidence("combo1", LogicalEvidence(success=0.0, depth=2))
+    _exhaust_substitutions(engine)
+
+    reasons = [
+        str(h["reason"] or "")
+        for node in engine._store.get_all_nodes()
+        for h in engine._store.get_status_history(node.id)
+        if str(h["reason"] or "").startswith(INTERACTION_REOPEN_PREFIX)
+    ]
+    assert reasons, "the interaction ending should have reopened something"
+    assert not any(r.startswith(UNDERPERFORMANCE_REOPEN_PREFIX) for r in reasons)
+
+
+@pytest.mark.unit
+def test_a_shortfall_reopen_is_not_labelled_an_interaction_effect(
+    engine: HypoTreeEngine,
+) -> None:
+    """The two recoveries lead to the same place and must not share a marker.
+
+    Both hand retired alternatives back, but one says "a conflict turned out to
+    be an interaction effect" and the other says "every answer was in and the
+    assembly still missed". Sharing ``INTERACTION_REOPEN_PREFIX`` made a report
+    claim every conflict had been narrowed to a culprit *and* that six
+    alternatives had been reopened because a conflict was an interaction
+    effect — mutually exclusive endings, in the same sentence.
+    """
+    for group in ("a", "b"):
+        for i in range(3):
+            engine.create_hypothesis(f"{group}={i}", node_id=f"{group}{i}", exclusion_group=group)
+    _confirm(engine, "a0", depth=1)
+    _confirm(engine, "b0", depth=1)
+    engine.create_hypothesis(
+        "combo", node_id="combo", parent_ids=["a0", "b0"], edge_type=EdgeType.DEPENDENCY
+    )
+    engine.record_evidence("combo", LogicalEvidence(success=0.6, depth=2))
+
+    engine.get_next_targets()
+
+    reopened = [
+        h
+        for node_id in ("a1", "a2", "b1", "b2")
+        for h in engine._store.get_status_history(node_id)
+        if str(h["reason"] or "").startswith(
+            (INTERACTION_REOPEN_PREFIX, UNDERPERFORMANCE_REOPEN_PREFIX)
+        )
+    ]
+    assert reopened, "the shortfall recovery should have reopened something"
+    assert all(str(h["reason"]).startswith(UNDERPERFORMANCE_REOPEN_PREFIX) for h in reopened), (
+        "a shortfall must carry its own marker, not the interaction one"
+    )
+
+
+@pytest.mark.unit
+def test_a_composition_that_cleared_the_bar_stands_the_recovery_down(
+    engine: HypoTreeEngine,
+) -> None:
+    """Once some assembly succeeds, landing short earlier is no longer evidence.
+
+    The recovery rests on a shortfall meaning one of the confirmations is wrong.
+    A composition that *did* clear the bar withdraws that reading: the answers
+    were right and the earlier assembly was simply the wrong combination of
+    them. Without this the recovery fires on a search that already succeeded —
+    one real episode reopened six settled questions on the turn it found its
+    answer, because its goal node had never been wired to the winning node.
+    """
+    for group in ("a", "b"):
+        for i in range(3):
+            engine.create_hypothesis(f"{group}={i}", node_id=f"{group}{i}", exclusion_group=group)
+    _confirm(engine, "a0", depth=1)
+    _confirm(engine, "b0", depth=1)
+    # The sub-par assembly that would normally trigger the recovery.
+    engine.create_hypothesis(
+        "weak", node_id="weak", parent_ids=["a0", "b0"], edge_type=EdgeType.DEPENDENCY
+    )
+    engine.record_evidence("weak", LogicalEvidence(success=0.6, depth=2))
+    # ...and a second assembly that cleared it.
+    engine.create_hypothesis(
+        "strong", node_id="strong", parent_ids=["a0", "b0"], edge_type=EdgeType.DEPENDENCY
+    )
+    for _ in range(3):
+        engine.record_evidence("strong", LogicalEvidence(success=0.95, depth=2))
+    assert engine._store.get_node("strong").status == Status.VERIFIED
+
+    before = {n.id: n.status for n in engine._store.get_all_nodes()}
+    engine.get_next_targets()
+    assert {n.id: n.status for n in engine._store.get_all_nodes()} == before, (
+        "nothing may be reopened once an assembly has cleared the bar"
+    )
 
 
 @pytest.mark.unit

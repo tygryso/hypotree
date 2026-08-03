@@ -9,6 +9,7 @@ and tool execution.
 from __future__ import annotations
 
 import json
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,7 +17,14 @@ import pytest
 
 from eval.environment.fake_hypothesis_tree import generate_briefing
 from eval.environment.landscape_generator import _generate_dag
-from eval.runner.config import ARM_A, ARM_B, TASK_SEEDS, EvalConfig, make_run_config
+from eval.runner.config import (
+    ARM_A,
+    ARM_B,
+    LLM_MAX_ATTEMPTS,
+    TASK_SEEDS,
+    EvalConfig,
+    make_run_config,
+)
 from eval.runner.runner import (
     MAX_IDLE_TURNS,
     MockAgent,
@@ -2440,3 +2448,113 @@ def test_one_bad_result_does_not_discard_the_rest_of_the_batch(tmp_path: Path) -
     # A goal refusal inside a batch is still counted as a paid-for probe with
     # nowhere to go, exactly as it is for a single call.
     assert any(e["event_type"] == "goal_evidence_refused" for e in events)
+
+
+# --------------------------------------------------------------------------
+# Transport resilience.
+#
+# A sweep is 90 sequential episodes against one local inference server. Run I
+# died at seed 1210 of 30 on a single HTTP error and took the remaining 61
+# episodes with it, so "one bad request" must cost at most one episode, and
+# preferably nothing at all.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_transient_server_faults_are_retried_and_succeed() -> None:
+    """A 5xx followed by a good response must resolve to the good response."""
+    from unittest.mock import patch
+
+    from eval.runner.runner import _call_openai_api
+
+    attempts: list[int] = []
+
+    def flaky(req: object, timeout: float = 0) -> object:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise urllib.error.HTTPError("u", 503, "unavailable", {}, None)  # type: ignore[arg-type]
+
+        class _Resp:
+            def read(self) -> bytes:
+                return json.dumps({"choices": [], "usage": {}}).encode()
+
+            def __enter__(self) -> _Resp:
+                return self
+
+            def __exit__(self, *a: object) -> None:
+                return None
+
+        return _Resp()
+
+    seen: list[int] = []
+    with (
+        patch("eval.runner.runner.urllib.request.urlopen", side_effect=flaky),
+        patch("eval.runner.runner.time.sleep"),
+    ):
+        out = _call_openai_api(
+            "http://x", "m", [], [], 0.0, 10, on_retry=lambda a, e, d: seen.append(a)
+        )
+
+    assert out == {"choices": [], "usage": {}}
+    assert len(attempts) == 3, "should have retried twice before succeeding"
+    assert seen == [1, 2], "each retry must be reported to the logger"
+
+
+@pytest.mark.integration
+def test_a_client_error_is_not_retried() -> None:
+    """A 400 is the request being wrong; sending it again only burns backoff."""
+    from unittest.mock import patch
+
+    from eval.runner.runner import LLMUnavailableError, _call_openai_api
+
+    attempts: list[int] = []
+
+    def bad_request(req: object, timeout: float = 0) -> object:
+        attempts.append(1)
+        raise urllib.error.HTTPError("u", 400, "bad request", {}, None)  # type: ignore[arg-type]
+
+    with (
+        patch("eval.runner.runner.urllib.request.urlopen", side_effect=bad_request),
+        patch("eval.runner.runner.time.sleep"),
+        pytest.raises(LLMUnavailableError),
+    ):
+        _call_openai_api("http://x", "m", [], [], 0.0, 10)
+
+    assert len(attempts) == 1, "a 4xx must fail on the first attempt"
+
+
+@pytest.mark.integration
+def test_exhausted_retries_end_the_episode_not_the_sweep(tmp_path: Path) -> None:
+    """An unreachable server ends the episode cleanly and marks it infra-failed.
+
+    The episode must still reach ``run_end`` so the sweep can carry on and the
+    reader can see *why* it was excluded, rather than the exception escaping
+    ``run()`` and killing every episode that had not run yet.
+    """
+    import os
+    from unittest.mock import patch
+
+    eval_dir = _setup_eval_env(tmp_path, seed=1001)
+    config = make_run_config(ARM_B, 1001, eval_dir, "test-run", llm_backend="openai")
+    config = config.__class__(**{**config.__dict__, "tool_budget": 60, "session_breakpoints": ()})
+    os.environ["XDG_DATA_HOME"] = str(tmp_path / "xdg")
+
+    def dead(req: object, timeout: float = 0) -> object:
+        raise urllib.error.URLError("connection refused")
+
+    with (
+        patch("eval.runner.runner.urllib.request.urlopen", side_effect=dead),
+        patch("eval.runner.runner.time.sleep"),
+    ):
+        result = run(config)
+
+    assert result["goals_met"] is False
+    assert result["reason"] == "llm_unavailable"
+
+    log = eval_dir / "runs" / "test-run" / "seed-1001-arm-B.jsonl"
+    events = [json.loads(x) for x in log.read_text().strip().split("\n")]
+    run_end = [e for e in events if e["event_type"] == "run_end"]
+    assert run_end, "a dead server must still produce a terminal record"
+    assert run_end[-1]["infra_failed"] is True
+    # And the retries themselves are on the record.
+    assert sum(1 for e in events if e["event_type"] == "llm_retry") == LLM_MAX_ATTEMPTS - 1
