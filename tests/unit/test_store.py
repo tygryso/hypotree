@@ -559,7 +559,6 @@ def _write_old_database(db_path: Path, version: str) -> None:
             break
         for sql in statements:
             conn.execute(sql)
-    # Stamped the pre-0.4.0 way, which is what a database of this age would have.
     conn.execute("INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)", (version,))
     conn.commit()
     conn.close()

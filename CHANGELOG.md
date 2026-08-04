@@ -4,6 +4,24 @@ All notable changes to hypotree are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-08-04
+
+### Fixed
+- **`pip install hypotree` was broken by the release of `mcp` 2.0.0.** The
+  dependency was declared as `mcp>=1.28.1` with no upper bound, so a fresh
+  install resolved to 2.0.0, which removed the low-level decorator API
+  (`Server.list_tools`, `call_tool`, `read_resource`) that the server binds its
+  handlers with. Every new install died on startup with
+  `AttributeError: 'Server' object has no attribute 'list_tools'` before the
+  first handshake. The requirement is now `mcp>=1.28.1,<2`.
+
+  Existing environments were unaffected — an already-resolved `mcp` 1.x stays
+  put — so this only ever hit new installs. Users on 0.4.0 or earlier who see
+  the `AttributeError` should upgrade, or pin `mcp<2` themselves.
+
+  Support for `mcp` 2.x is a port to its `add_request_handler` API and will
+  land as its own release rather than a silent resolver upgrade.
+
 ## [0.4.0] - 2026-08-04
 
 ### Performance

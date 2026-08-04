@@ -10,7 +10,7 @@
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg" alt="Changelog"></a>
 <a href="tests/"><img src="https://img.shields.io/badge/tests-773-brightgreen.svg" alt="Tests: 773"></a>
-<a href="pyproject.toml"><img src="https://img.shields.io/badge/version-0.4.0-blue.svg" alt="Version: 0.4.0"></a>
+<a href="pyproject.toml"><img src="https://img.shields.io/badge/version-0.4.1-blue.svg" alt="Version: 0.4.1"></a>
 <a href="https://pypi.org/project/hypotree/"><img src="https://img.shields.io/pypi/v/hypotree.svg" alt="PyPI"></a>
 </p>
 

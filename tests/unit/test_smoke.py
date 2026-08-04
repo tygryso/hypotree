@@ -8,4 +8,4 @@ import hypotree
 @pytest.mark.unit
 def test_package_importable() -> None:
     """The package must import cleanly with its declared dependencies installed."""
-    assert hypotree.__version__ == "0.4.0"
+    assert hypotree.__version__ == "0.4.1"

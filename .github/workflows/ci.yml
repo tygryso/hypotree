@@ -140,7 +140,13 @@ jobs:
                   assert init.instructions, "server sent no instructions block"
                   assert tools.tools, "no tools registered"
                   assert len(prompts.prompts) == 3, prompts
-                  assert len(resources.resources) == 2, resources
+                  # Assert the URI set, not just the count: a renamed resource
+                  # keeps the count and would otherwise slip through.
+                  assert {str(r.uri) for r in resources.resources} == {
+                      "hypotree://guide",
+                      "hypotree://state",
+                      "hypotree://dashboard",
+                  }, resources
                   # Read from inside the installed package: a packaging change
                   # that drops it stays invisible until an agent asks for it.
                   assert "exclusion_group" in guide.contents[0].text
