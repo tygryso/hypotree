@@ -53,7 +53,7 @@ function sanitize(html) {
 createApp({
   setup() {
     const meta = ref(null);
-    const graph = reactive({ nodes: [], edges: [], stats: {} });
+    const graph = reactive({ nodes: [], edges: [], stats: {}, unwired_goal: null, goal_wiring: null });
     const frontier = ref([]);
     const narrative = ref("");
     const timeline = ref({ ticks: [], from: null, to: null });
@@ -70,6 +70,7 @@ createApp({
     const tip = reactive({ show: false, x: 0, y: 0, node: null });
     const error = ref("");
     const missing = ref([]);
+    const bannerDismissed = ref(false);
 
     // ---- left panel width ------------------------------------------------
 
@@ -121,6 +122,39 @@ createApp({
       return `${scrub.value + 1}/${t.length} · ${tick.node_id} → ${tick.status}`;
     });
 
+    // ---- activity histogram ---------------------------------------------
+
+    // The run's shape is information — where the bursts were, where it stalled —
+    // and a featureless slider track threw all of it away. Ticks are binned by
+    // position rather than by wall-clock so an overnight pause does not flatten
+    // the whole run into one column.
+    const BINS = 64;
+    const activity = computed(() => {
+      const n = timeline.value.ticks.length;
+      if (!n) return [];
+      const bins = new Array(Math.min(BINS, Math.max(8, n))).fill(0);
+      for (let i = 0; i < n; i++) bins[Math.floor((i / n) * bins.length)] += 1;
+      const peak = Math.max(...bins, 1);
+      return bins.map((c) => ({ h: Math.round((c / peak) * 100) }));
+    });
+    const binOfScrub = computed(() => {
+      const n = timeline.value.ticks.length;
+      if (!n || !activity.value.length) return -1;
+      return Math.min(activity.value.length - 1, Math.floor((scrub.value / n) * activity.value.length));
+    });
+    const cursorPct = computed(() => {
+      const max = lastTick.value;
+      return max > 0 ? (scrub.value / max) * 100 : 0;
+    });
+
+    // Local time, seconds precision. The belief state stores UTC and the reader
+    // is looking at their own clock.
+    const stamp = (iso) => {
+      if (!iso) return "—";
+      const d = new Date(iso);
+      return isNaN(d) ? String(iso).slice(0, 19).replace("T", " ") : d.toLocaleString();
+    };
+
     const q = () => (goalId.value ? `goal_id=${encodeURIComponent(goalId.value)}` : "");
 
     async function loadMeta() {
@@ -133,6 +167,8 @@ createApp({
       graph.nodes = g.nodes;
       graph.edges = g.edges;
       graph.stats = g.stats;
+      graph.unwired_goal = g.unwired_goal || null;
+      graph.goal_wiring = g.goal_wiring || null;
     }
     async function loadNarrative() {
       // The narrative is pinned to the same instant as the graph, so a rewound
@@ -141,9 +177,13 @@ createApp({
       const r = await api(`/api/learning-path${parts.length ? "?" + parts.join("&") : ""}`);
       narrative.value = r.markdown || "";
     }
-    async function loadPanels() {
+    async function loadFrontier() {
       const query = q();
       frontier.value = (await api(`/api/frontier?k=5${query ? "&" + query : ""}`)).candidates;
+    }
+    async function loadPanels() {
+      const query = q();
+      await loadFrontier();
       await loadNarrative();
       const wasLive = atLive.value;
       timeline.value = await api(`/api/timeline${query ? "?" + query : ""}`);
@@ -174,7 +214,11 @@ createApp({
           if (!a || !b) return null;
           const dead = ["PRUNED", "INVALIDATED"].includes(b.status) ||
                        ["PRUNED", "INVALIDATED"].includes(a.status);
-          return { key: `${e.src}->${e.dst}:${e.type}`, x1: px(a), y1: py(a), x2: px(b), y2: py(b), dead };
+          return {
+            key: `${e.src}->${e.dst}:${e.type}`,
+            type: e.type,
+            x1: px(a), y1: py(a), x2: px(b), y2: py(b), dead,
+          };
         })
         .filter(Boolean)
     );
@@ -219,11 +263,26 @@ createApp({
     }
 
     function pick(node, ev) {
-      selected.value = node.id;
+      // `selected` drives the panel, not `detail`. Clearing `detail` to fetch
+      // the next node used to mount the whole narrative for one frame before
+      // replacing it again, which read as the panel flashing on every click.
+      // The card renders from `selected` immediately and fills in on arrival.
+      const id = node.id;
+      selected.value = id;
       detail.value = null;
-      api(`/api/node/${encodeURIComponent(node.id)}`).then((d) => (detail.value = d));
       tab.value = "path";
+      api(`/api/node/${encodeURIComponent(id)}`)
+        .then((d) => {
+          // A slow response for a node the reader has already moved off must
+          // not overwrite the one they are looking at now.
+          if (selected.value === id) detail.value = d;
+        })
+        .catch((e) => (error.value = String(e.message || e)));
       if (ev) hover(node, ev);
+    }
+    function clearSelection() {
+      selected.value = null;
+      detail.value = null;
     }
     function hover(node, ev) {
       tip.show = true; tip.node = node;
@@ -251,15 +310,24 @@ createApp({
       };
     }
 
+    const directiveMode = computed(() => (detail.value && detail.value.directive)
+      ? detail.value.directive.mode
+      : null);
+
     async function directive(mode) {
       if (!selected.value) return;
+      const id = selected.value;
       try {
         await api("/api/directive", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ node_id: selected.value, mode }),
+          body: JSON.stringify({ node_id: id, mode }),
         });
-        await refreshAll();
+        // A directive changes what is offered, so the frontier and this node's
+        // own card are the only things that can have moved. Reloading the whole
+        // view would rebuild the narrative and the layout for nothing.
+        detail.value = await api(`/api/node/${encodeURIComponent(id)}`);
+        await Promise.all([loadGraph(), loadFrontier()]);
       } catch (e) {
         error.value = String(e.message || e);
       }
@@ -282,7 +350,14 @@ createApp({
       }, 420);
     });
     watch(scrub, () => { loadGraph(); loadNarrative(); });
-    watch(goalId, async () => { await refreshAll(); await nextTick(); fit(); });
+    watch(goalId, async () => {
+      // A dismissal is about one goal, not about the session.
+      bannerDismissed.value = false;
+      clearSelection();
+      await refreshAll();
+      await nextTick();
+      fit();
+    });
 
     onMounted(async () => {
       await loadMeta();
@@ -308,6 +383,7 @@ createApp({
       meta, graph, frontier, narrative, timeline, goalId, tab, selected, detail,
       live, working, scrub, scrubLabel, playing, tip, error, missing,
       lastTick, atLive, goLive, panelWidth, resizing, startResize, zoomBy,
+      activity, binOfScrub, cursorPct, stamp, directiveMode, clearSelection, bannerDismissed,
       edgeLines, radius, nodeOpacity, px, py, pick, hover, directive, fit,
       refreshAll, renderMd, at,
     };

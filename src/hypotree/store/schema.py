@@ -226,6 +226,13 @@ MIGRATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
                 actor   TEXT NOT NULL DEFAULT 'human',
                 set_at  TEXT NOT NULL
             )""",
+            # Whether an exclusion group's candidates are believed to be all of
+            # them. The engine had been assuming it: deduction by elimination
+            # confirms the last survivor for free, which is sound over a complete
+            # list and asserts something false over a partial one. NOT NULL with
+            # a default of 1, because that is exactly what every group written
+            # before this column meant.
+            "ALTER TABLE nodes ADD COLUMN exclusion_closed INTEGER NOT NULL DEFAULT 1",
         ),
     ),
 )

@@ -45,7 +45,9 @@ from eval.environment.landscape_scoring import (
 )
 from eval.runner.config import ALL_ARMS, ARM_B, run_dir, run_workspace_id
 from hypotree.engine import (
+    DEAD_QUESTION_PREFIX,
     DEDUCTION_REASON_PREFIX,
+    DEDUCTION_RETRACT_PREFIX,
     EXCLUSION_REASON_PREFIX,
     INTERACTION_REOPEN_PREFIX,
     SUBSTITUTION_ELIMINATE_PREFIX,
@@ -79,6 +81,8 @@ _DEDUCE_REASON = DEDUCTION_REASON_PREFIX
 _SUBSTITUTE_OUT_REASON = SUBSTITUTION_ELIMINATE_PREFIX
 _INTERACTION_REASON = INTERACTION_REOPEN_PREFIX
 _SHORTFALL_REASON = UNDERPERFORMANCE_REOPEN_PREFIX
+_DEAD_QUESTION_REASON = DEAD_QUESTION_PREFIX
+_DEDUCTION_RETRACT_REASON = DEDUCTION_RETRACT_PREFIX
 
 # Statuses a node lands in only because something else went wrong. These, and
 # only these, are the destructive propagation the belief state is supposed to
@@ -172,13 +176,28 @@ class RunLog:
     # conflict had been narrowed to a culprit.
     shortfall_reopens: int = 0
     same_question_dispatches: int = 0
-    # Members declared per exclusion group. Needed to say what the exclusion
-    # yield *should* be: probing a group of k in ignorance costs (k+1)/2 probes
-    # and retires the rest, so a run beating that is ordering better than chance
-    # and a run matching it is not ordering at all.
-    group_sizes: Counter[str] = field(default_factory=Counter)
+    # The distinct members declared per exclusion group. Needed to say what the
+    # exclusion yield *should* be: probing a group of k in ignorance costs
+    # (k+1)/2 probes and retires the rest, so a run beating that is ordering
+    # better than chance and a run matching it is not ordering at all. Node ids
+    # rather than a count, because the arm-B prompt tells the agent to re-create
+    # nodes with `if_exists="overwrite"` and every re-creation logs `created`
+    # again — counting events would inflate k, and k inflates the baseline the
+    # run is being judged against.
+    group_members: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     done_reasons: Counter[str] = field(default_factory=Counter)
     deduced: int = 0
+    # Nodes pruned because every candidate answer to a question they depend on
+    # was ruled out on its own evidence. Counted apart from the refutation
+    # cascade because it reaches what that cascade deliberately spares — a
+    # premise settled as EXHAUSTED was never refuted, so its dependents survive
+    # until this fires.
+    dead_question_prunes: int = 0
+    # Deductions handed back to the frontier because a composition resting on
+    # them fell short. Each one is the engine catching its own closed-world
+    # assumption being wrong — a free confirmation that turned out not to be
+    # free — and each costs exactly one probe to settle.
+    deductions_withdrawn: int = 0
     pruned_reexecutions: int = 0
     conflicts_recorded: int = 0
     conflict_members: int = 0
@@ -303,7 +322,7 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
     batch_groups: list[str] = []
     # Probe count when the currently-open conflict was recorded, so the swaps it
     # took to name a culprit can be attributed to it.
-    open_conflict_at: int | None = None
+    open_conflict_at: dict[str, int] = {}
 
     for ev in events:
         kind = ev.get("event_type")
@@ -353,7 +372,7 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
                 if ev.get("exclusion_group"):
                     log.nodes_with_group += 1
                     log.exclusion_declared = True
-                    log.group_sizes[str(ev["exclusion_group"])] += 1
+                    log.group_members[str(ev["exclusion_group"])].add(str(ev.get("node_id", "")))
 
         elif kind == "target_selected":
             if not ev.get("node_id"):
@@ -437,6 +456,10 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
                     log.shortfall_reopens += 1
             if new == "VERIFIED" and reason.startswith(_DEDUCE_REASON):
                 log.deduced += 1
+            if new == "PRUNED" and reason.startswith(_DEAD_QUESTION_REASON):
+                log.dead_question_prunes += 1
+            if new == "UNTESTED" and reason.startswith(_DEDUCTION_RETRACT_REASON):
+                log.deductions_withdrawn += 1
 
         elif kind == "pruned_reexecution":
             log.pruned_reexecutions += 1
@@ -444,13 +467,25 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
         elif kind == "conflict_recorded":
             log.conflicts_recorded += 1
             log.conflict_members += ev.get("n_members", 0)
-            open_conflict_at = log.experiments
+            # Keyed by conflict, not held in one slot: a second conflict opening
+            # before the first resolves used to overwrite the first's mark, and
+            # the resolution after that got no attribution at all. Logs written
+            # before the id was carried key on their arrival order instead, which
+            # is exactly the single-slot behaviour they were read with.
+            key = ev.get("nogood_id")
+            open_conflict_at[str(key) if key is not None else f"#{len(open_conflict_at)}"] = (
+                log.experiments
+            )
 
         elif kind == "conflict_resolved":
             log.conflicts_resolved += 1
-            if open_conflict_at is not None:
-                log.diagnosis_swaps.append(log.experiments - open_conflict_at)
-                open_conflict_at = None
+            opened = open_conflict_at.pop(str(ev.get("nogood_id")), None)
+            if opened is None and open_conflict_at:
+                # A legacy log: nothing to match on, so the oldest conflict still
+                # open is the only defensible attribution.
+                opened = open_conflict_at.pop(next(iter(open_conflict_at)))
+            if opened is not None:
+                log.diagnosis_swaps.append(log.experiments - opened)
 
         elif kind == "record_rejected":
             log.records_rejected += 1
@@ -890,19 +925,23 @@ def _exclusion_yield_lines(logs: list[RunLog]) -> list[str]:
     settled = exclusions + premise
     if not settled:
         return []
-    sizes = [n for log in b_logs for n in log.group_sizes.values() if n > 1]
+    sizes = [len(ids) for log in b_logs for ids in log.group_members.values() if len(ids) > 1]
     if not sizes:
         return []
     k = statistics.mean(sizes)
     baseline = (k - 1) / (2 * k)
     yield_ = exclusions / settled
-    verdict = (
-        "ordering better than chance"
-        if yield_ > baseline + 0.02
-        else "no better than probing the answers in a random order"
-        if yield_ < baseline + 0.02
-        else "at the baseline"
-    )
+    # A band around the baseline, not a threshold above it. The previous form
+    # tested `> baseline + 0.02` against `< baseline + 0.02`, which left "at the
+    # baseline" reachable only on exact float equality and reported a run
+    # performing *below* chance in the same words as one performing at it.
+    margin = 0.02
+    if yield_ > baseline + margin:
+        verdict = "ordering better than chance"
+    elif yield_ < baseline - margin:
+        verdict = "ordering worse than probing the answers in a random order"
+    else:
+        verdict = "at the baseline — the ordering is carrying no signal"
     return [
         f"**Exclusion yield (arm B): {_pct(yield_)}** of premise questions were settled "
         f"without a probe ({exclusions} retired free, {premise} probed). With a mean group "
@@ -997,6 +1036,21 @@ def _section_belief_state(logs: list[RunLog]) -> list[str]:
             "members deduced by elimination",
             str(sum(log.deduced for log in b_logs)),
             "last candidate standing, confirmed without spending a probe",
+        ],
+        [
+            "deductions withdrawn for testing",
+            str(sum(log.deductions_withdrawn for log in b_logs)),
+            "a free confirmation whose composition then fell short — either the value is "
+            "wrong or the question was missing a candidate, and the engine cannot tell "
+            "which because it never observed the node. Handed back for one probe instead "
+            "of being defended or convicted",
+        ],
+        [
+            "pruned by a dead question",
+            str(sum(log.dead_question_prunes for log in b_logs)),
+            "every candidate answer to a question was ruled out on its own evidence, so "
+            "what assumed one of them can never be satisfied — the dual of deducing the "
+            "last survivor, and it reaches what a refutation cascade spares",
         ],
         [
             "substitutes ruled out by a sub-par swap",

@@ -194,6 +194,7 @@ Only two of these mean stop. The rest are instructions:
 | `awaiting_composition` | build the combination from the `parent_ids` in the `rationale`, and give the goal that combination as a parent too |
 | `blocked_frontier` | your edges are wired so nothing can be tested — the `rationale` names the nodes and what gates them. A premise must be the **parent** of the combination that assumes it, never its child. Fix the wiring and the work reappears. |
 | `unreachable_goal` | the goal has no DEPENDENCY parents, so nothing can ever satisfy it. Re-create it with `parent_ids=[<your best combination>]` and `if_exists="overwrite"`. |
+| `dead_question` | every answer you listed for one question has been ruled out on its own evidence. Add the value you have not tried to the same `exclusion_group` — the `rationale` names the question. |
 
 ## Status Lifecycle
 

@@ -607,6 +607,44 @@ async def test_sse_pushes_a_revision_and_drops_slow_subscribers(
             await writer.wait_closed()
 
 
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_an_idle_stream_sends_a_keepalive_instead_of_dying(
+    server: DashboardServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`asyncio.TimeoutError` only became the builtin `TimeoutError` in 3.11.
+
+    Catching the builtin meant that on 3.10 the first quiet interval killed the
+    stream task instead of emitting a comment frame, and the page sat in a
+    reconnect loop that looks exactly like a flaky network. The interval is
+    patched down so the test does not wait fifteen seconds for it.
+    """
+    real_wait_for = asyncio.wait_for
+
+    async def impatient(aw, timeout):  # noqa: ANN001, ANN202
+        return await real_wait_for(aw, 0.05 if timeout == 15.0 else timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", impatient)
+
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+    writer.write(
+        f"GET /api/events?t={server.token} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{server.port}\r\n\r\n".encode()
+    )
+    await writer.drain()
+    try:
+        await real_wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+        await real_wait_for(reader.readuntil(b"\n\n"), timeout=5)
+        beat = await real_wait_for(reader.readuntil(b"\n\n"), timeout=5)
+        assert beat == b": keepalive\n\n"
+        # And it keeps going rather than emitting one and stopping.
+        assert await real_wait_for(reader.readuntil(b"\n\n"), timeout=5) == b": keepalive\n\n"
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
 @pytest.mark.unit
 def test_choose_port_skips_a_taken_one() -> None:
     import socket as _socket
@@ -666,10 +704,33 @@ async def test_static_assets_are_served_without_a_token(server: DashboardServer)
     """The page needs its scripts before it has anywhere to put a token."""
     status, body = await _request(server.port, "/static/app.css")
     assert status == 200
-    assert isinstance(body, str) and "--burgundy" in body
+    assert isinstance(body, str) and "--accent" in body
 
     status, _ = await _request(server.port, "/static/marked.min.js")
     assert status == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_the_logo_is_served_as_an_image(server: DashboardServer) -> None:
+    """The wordmark is a binary asset, and the table only carried text before.
+
+    A manifest that silently drops a file type serves a 404 for something the
+    page references, which is a broken header rather than a missing feature.
+    """
+    reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+    writer.write(
+        f"GET /static/logo.png HTTP/1.1\r\nHost: 127.0.0.1:{server.port}\r\n"
+        f"Connection: close\r\n\r\n".encode()
+    )
+    await writer.drain()
+    payload = await reader.read()
+    writer.close()
+    head, _, tail = payload.partition(b"\r\n\r\n")
+
+    assert head.split(b" ")[1] == b"200"
+    assert b"image/png" in head
+    assert tail.startswith(b"\x89PNG")
 
 
 @pytest.mark.asyncio

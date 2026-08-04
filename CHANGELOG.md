@@ -4,7 +4,7 @@ All notable changes to hypotree are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.4.0] - 2026-08-03
+## [0.4.0] - 2026-08-04
 
 ### Performance
 - **Selecting a target is 41× faster on a large belief state**: 1200 nodes went from
@@ -29,6 +29,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     silently wrong selections, and at 110 ms there is no case for taking that risk.
 
 ### Added
+- **The closed-world assumption is now declared rather than assumed.** Deduction by elimination
+  — confirming the last survivor of an exclusion group for free — is sound only if the listed
+  candidates really are all of them, and **nothing checked that**. Withhold one axis's winning
+  value and the engine refuted the four that remained and confirmed the survivor with *no
+  observation of its own*: a free confirmation of a value that is wrong, recorded as a
+  confirmation. The run then ended `empty_frontier` with the goal unmet and never said the
+  question had been incomplete. This is the mechanism the README credits for the moat, and it
+  had shipped unguarded for months.
+  - **`exclusion_closed` on `create_hypotheses`** (schema `10`, `nodes.exclusion_closed`,
+    `NOT NULL DEFAULT 1` — exactly what every group written before it meant). Defaults to
+    `true`. Pass `false` where the next candidate always exists — "which learning rate", "which
+    prompt wording", "which threshold" — and the last-one-standing deduction is withheld, along
+    with the pruning that rests on it. Confirming a member still retires the others: that is an
+    observation about the confirmed value, not a claim about the list.
+  - **Openness is per-group and one member declaring it is enough.** It withdraws an inference,
+    so the cautious declaration governs; the reverse would let a later call that forgot the flag
+    quietly re-enable deduction over a list its author knew was partial.
+  - **A deduction can now be withdrawn.** When every question is answered and the assembly still
+    falls short, the belief with no measurement behind it is the one to doubt. The engine hands
+    it back as `UNTESTED` and the navigator dispatches it, so one probe settles whether the value
+    was wrong or the list was incomplete. It never asserts the value false — nothing was ever
+    observed about it, and asserting on no evidence is the one thing the belief state may not do.
+    The same applies at conviction: a deduction named as a conflict's sole cause is tested rather
+    than convicted.
+  - **`_is_deduced` reads the whole history, not its last entry.** A deduction that passes
+    through conflict review comes back marked "released from review", which describes the last
+    thing that happened to it and erases where the confirmation came from — a node never once
+    observed looked like one that had stood up to scrutiny.
+  - **`dead_question` now says which kind.** Over a closed group it means the list was wrong or
+    one of the eliminations was, and what depended on those values is pruned. Over an open one it
+    means the answer is very likely one that was never listed — and **nothing is pruned**,
+    because an untried candidate could still satisfy it.
+  - **Measured.** Across all 30 seeds × 5 axes with the winner withheld, **144/150 (96%)** now
+    end `dead_question` naming the incomplete axis, against **0/150** before — every one of which
+    was `empty_frontier`. Still 0 solved, which is correct: the winning value was never offered,
+    so the goal is genuinely unreachable, and what changed is that the run says *why*. A wrong
+    answer reported as wrong is a result; the same answer reported as an empty frontier is not.
+    Fully-declared self-play is untouched at 30/30, mean 15.9.
+- **The dashboard runs by default.** It was behind `--dashboard` while it was unproven, and the
+  result was that the people it was built for never saw it — nobody opts into a feature they
+  have not been shown. It binds loopback only, mints a fresh token per start, and **cannot take
+  the MCP server down**: a bind failure is reported and the server carries on, because the cost
+  of a viewer failing must never be the cost of the tooling failing.
+  - `--dashboard-port PORT` picks the first port to try (it still probes upward, so several
+    workspaces can be open at once).
+  - `--no-dashboard` opens no socket at all.
+  - `--no-mcp` replaces `--dashboard-only` and reads better beside its sibling. v0.4.0 is
+    unreleased, so the old spelling never shipped and is simply gone.
+- **The agent can hand over the dashboard link.** The URL is minted at startup and printed to
+  stderr, which the model never sees — so an agent asked "where can I watch this?", which is
+  constant, had no way to answer. `get_workspace_info` now returns `dashboard_url`, and the new
+  `hypotree://dashboard` resource returns it on its own. Both carry the session token, which is
+  the whole credential; `null` means none is running, and the text says how to start one.
+- **Backward pruning over a complete question.** The exact dual of deduction by elimination,
+  and the half of that symmetry that had never shipped: all-but-one candidate eliminated
+  confirms the survivor for free, and *all* of them eliminated says the question has no answer
+  among the candidates offered — so nothing that assumes one of them can ever be satisfied.
+  Those branches are pruned under their own reason marker and the navigator reports a new DONE
+  reason, **`dead_question`**, naming the group that ran out and the goal it was holding up.
+  - **Soundness rests entirely on the exclusion group.** "All four approaches I tried failed"
+    does not entail "the objective is unreachable" — it entails "I need a fifth idea", and a
+    rule that could not tell those apart would let an unimaginative agent declare its own goal
+    impossible. What makes this version sound is that the caller *declared* these to be the
+    competing answers to one question.
+  - Three guards, each closing a way it could fire on a live search: at least two candidates
+    (one value is not a question); every member eliminated **on its own evidence**, which is
+    strictly stronger than the elimination test deduction uses — `PRUNED` does not count,
+    because it is a statement about an ancestor's subtree, and neither does a member with no
+    observation of its own; and no open conflict over any member, because conflict diagnosis
+    may hand one straight back.
+  - It reaches what the refutation cascade deliberately spares. A premise settled as
+    `EXHAUSTED` was never refuted, so its dependents stay on the frontier being re-attempted
+    long after the premise ran out; that is the case this exists for.
+  - `dead_question` is an instruction, not an ending: the fix is to add the candidate that was
+    never listed, and the eval harness treats it as a reason to continue.
 - **`record_evidence` is batch-native.** Pass `results=[{node_id, success, depth, claim_id}, …]`
   to report every experiment from one turn in one call. `create_hypotheses`, `update_status`
   and `get_next_targets` have all been batch-native for a while; `record_evidence` was the
@@ -131,6 +206,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     and says the fix is usually a missing DEPENDENCY edge.
 
 ### Fixed
+- **The live stream died every fifteen seconds on Python 3.10.** `asyncio.TimeoutError` only
+  became an alias of the builtin `TimeoutError` in 3.11, so the keepalive's `except TimeoutError`
+  caught nothing on the project's own minimum version: the first quiet interval killed the SSE
+  task, the browser reconnected, and the cycle repeated. It presented as a dashboard that
+  flickered between "live" and "reconnecting" for no reason, which reads as a flaky network
+  rather than as a bug. Caught as `asyncio.TimeoutError`, which is correct on both.
+- **A goal can no longer be given as a DEPENDENCY parent.** This is the one modelling mistake
+  strong models make reliably: "the goal decomposes into phases" is how everyone thinks about
+  objectives, so `parent_ids=[goal]` on the phase reads as "this phase belongs to that goal". In
+  hypotree it means the opposite — the phase cannot be tested until the goal is VERIFIED — and
+  both halves then break silently. A goal is never dispatched and `verify_upstream` only promotes
+  IN_PROGRESS nodes along REFINEMENT edges, so the goal can never reach VERIFIED and the child is
+  blocked forever, while the goal still depends on nothing and so can never be reached either.
+  The engine had been handling this **downstream**, reporting the wreckage as `blocked_frontier`;
+  it is now refused **upstream** with a `GoalDependencyError` carrying the corrected call. Only
+  DEPENDENCY is refused, because only DEPENDENCY gates a child on its parent.
+  - A real behaviour change: five existing tests were constructing exactly this state to exercise
+    the downstream reporting. They now build the same situations from ordinary nodes —
+    `blocked_frontier` from premises wired under an EXHAUSTED combination, which settles without
+    cascading — which is the general case and the one still representable.
+  - Databases written before this release keep the shape and nothing is rewritten. The engine may
+    change what it asserts only from an observation or a sound inference over one, and silently
+    flipping an edge someone declared is neither. The dashboard names such a goal's wiring as
+    `inverted` rather than merely `unwired`, because "turn your edges around" and "attach some
+    work" are different instructions.
+  - `parent_ids` is described as *what this rests on* at every point of use, and the guide states
+    the direction before it states the edge types.
+- **Selecting a goal hid the tree hanging off it.** Agents routinely wire a goal the other way
+  round — `goal -> phase0 -> work`, reading the goal as a container rather than as something the
+  work supports. The navigator's goal scope is its DEPENDENCY *ancestry*, which is the right set
+  to dispatch from and the wrong set to draw: filtering to such a goal showed a single dot beside
+  a lecture about wiring while a nine-node tree hung off the node in question. A viewer that
+  hides your work to make a point about how you built it is not making the point. The dashboard
+  now walks **both** directions — the selection scope plus everything downstream plus the
+  exclusion siblings of the result — and reports the unreachability in a dismissible banner over
+  the canvas instead of in place of the graph. The navigator's scope is deliberately unchanged:
+  it must not start selecting downstream of a goal just because the viewer draws it. The timeline
+  follows the drawing for the same reason the graph does — the scrubber moves the picture, so a
+  tick it cannot show is a step that does nothing.
+- **The left panel flashed on every node click.** Selecting a node cleared `detail` before
+  fetching it, which mounted the entire narrative for one frame before replacing it again. The
+  panel now branches on *what is selected* rather than on *what has arrived*, so the card
+  renders immediately and fills in. A slow response for a node the reader has already moved off
+  no longer overwrites the one they are looking at.
+- **A directive reloaded the whole view.** Pinning a node rebuilt the narrative and the layout
+  to change one badge; it now refreshes the node, the graph and the frontier, which are the only
+  things a directive can move.
+- **Binary assets were dropped from the manifest.** The table only carried `.js` and `.css`, so
+  the logo would have 404'd — a broken header rather than a missing feature. PNG and SVG are
+  served with the right content type and ship in the wheel.
+- **A dry run wrote to the belief state.** `get_next_targets(dry_run=True)` is documented as a
+  peek and issues no claim, but when a conflict's targeted narrowing had run out of advice the
+  peek performed the fallback: it marked the conflict recovered, released its members from
+  review and reopened every alternative they had retired. A caller asking what it *would* be
+  given settled the question it was asking about, and the next real call saw a belief state a
+  peek had moved. The sibling fallback on the same path was already guarded, so this was an
+  inconsistency rather than a design decision. The peek now reports the instruction it would
+  still give and changes nothing.
+- **The conflict fallback timestamped itself off the wall clock** rather than the instant the
+  selection pass was running at, so the status changes it wrote landed outside the interval
+  the rest of that pass recorded — a small tear in a history whose whole value is that it can
+  be read back.
 - **The dashboard's own buttons were refused as cross-origin.** The write path rejected any
   request carrying an `Origin` header. Browsers attach `Origin` to *same-origin* JSON POSTs
   too, so pin, suspend, back and clear each came back `403 cross-origin requests are refused`
@@ -198,6 +335,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   label that ever existed for them.
 
 ### Changed
+- **The dashboard has been redesigned as a light analytical interface.** The previous dark theme
+  was hard to read for long and, more to the point, spent colour on chrome — so status, the one
+  thing colour should carry, had to compete with it. Now warm paper (`#FAFAFA`), a gridded
+  canvas that pans with the graph, white cards on soft shadows instead of heavy borders, and a
+  single navy/cyan accent reused for goals, focus and selection so the eye learns one colour
+  rather than three. Every status has a pastel badge; `PRUNED` adds a diagonal hatch, because
+  grey alone reads as "not started" rather than "cut". No webfont is vendored: `font-src 'self'`
+  would mean shipping a ~90 KB binary in the wheel to displace a system stack that is
+  Inter-class on every current OS.
+  - **Node cards** put the id in its own monospaced bar — set in the prose face it read as part
+    of the sentence beneath it — and carry **created** and **settled** timestamps plus the
+    engine's own reason string. "Confirmed" and "confirmed last week and untouched since" are
+    different situations that a status column cannot tell apart.
+  - **The scheduling controls are labelled and explained.** `pin` / `suspend` / `clear` were
+    three bare verbs in a row and nobody could tell what any of them would do. They are now
+    **Test first** / **Hold back** / **Clear**, under a heading, with the current directive
+    stated in words and the standing rule beside them: this changes what the navigator *offers*,
+    never what is believed.
+  - **The timeline is an activity histogram** rather than a form slider. The shape of a run —
+    where the bursts were, where it stalled — is information, and a featureless track threw all
+    of it away. The handle travels along the bars.
+  - Transitions run at a single `0.3s ease` everywhere, so a status arriving over SSE eases from
+    one colour to the next instead of jumping.
+  - The goal `<select>`, the panel scrollbar and the zoom controls are all styled; they were
+    browser defaults sitting inside a designed page.
+- **Wide layers wrap into sub-rows.** Five values on each of five axes puts twenty-five nodes on
+  one line, and a drawing 25 wide by 3 deep fits the viewport at a scale where nothing is
+  legible. The wrap width is derived from the graph's own size, so the layout is still a pure
+  function of the topology — same graph, same picture, which is most of what a viewer is for.
 - `/hypotree-next` and the server-level instructions now teach the batch shape.
 - **Proof mode is no longer a toggle.** What an experiment cost is the reason the panel is
   worth reading; hiding it behind a button meant the default view was the less useful one.
@@ -209,6 +375,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   rather than in the header, next to the thing they act on.
 
 ### Eval harness
+- **The exclusion-yield verdict could not report two of its three outcomes.** It compared
+  `yield > baseline + 0.02` against `yield < baseline + 0.02`, which left "at the baseline"
+  reachable only on exact float equality and described a run performing *below* chance in the
+  same words as one performing at it. Now a symmetric band around the baseline, with a verdict
+  for each side of it. Runs J and K are unaffected — both sit above the band — but the
+  paragraph is the one the report calls "the only lever on premise cost", so a verdict it
+  could not actually produce is worse than no verdict.
+- **Group size counted creation events, not members.** The arm-B prompt tells the agent to
+  re-create nodes with `if_exists="overwrite"`, and every re-creation logs `created` again —
+  so an agent that rewrote its own nodes inflated `k`, which inflates the baseline it is being
+  judged against, which flatters its own ordering. Counted by distinct node id now. Latent in
+  J and K (both measured exactly 5.0, the true axis size) and corrected before it was not.
+- **A second conflict stole the first one's diagnosis.** Attribution lived in a single slot,
+  so a conflict opening before the previous one resolved overwrote its mark: the first
+  resolution was measured from the wrong starting probe and the second was attributed to
+  nothing at all. Keyed by conflict id now, which the runner had to start logging on
+  `conflict_recorded`. Logs written before that id existed fall back to oldest-open-first —
+  exactly the single-slot behaviour they were read with — so J and K still report the 2.15 and
+  2.20 they always did.
+- **`dead_question` prunes are counted** as a mechanism of their own in the belief-state table,
+  apart from the refutation cascade they are deliberately distinct from.
+- `RunLogger.log_lease_event` removed — no caller, and no `lease_event` in any log.
+- **Self-play can under-declare a question.** `solve_seed(..., omit_winner_on=<axis>)` leaves
+  the winning value off one axis's candidates. Every axis carries its winner by construction,
+  so a fully-declared question always confirms and the closed-world assumption is never
+  actually put under load; this is the only way this landscape can do it.
+
+### Eval harness — batch recording
+- **The closed-world check is a gated pre-flight.** `eval.sh` step 2c withholds one axis's
+  winning value on every seed and requires at least 80% of those runs to end `dead_question`
+  rather than `empty_frontier`. Gated on the *diagnosis*, not on a solve: the winning value was
+  never offered, so 0 solved is the correct answer and the only thing worth checking is whether
+  the run says why. Currently 30/30.
+- **`solve_seed(..., omit_winner_on=<axis>)`** is how that is constructed. Every axis carries its
+  winner by construction, so a fully-declared question always confirms and the closed-world
+  assumption is never actually put under load; withholding one is the only way this landscape can
+  do it.
+- **Withdrawn deductions are counted** in the belief-state table, apart from every other
+  mechanism. Each one is the engine catching its own assumption being wrong, and each costs
+  exactly one probe to settle.
 - **One bad result no longer discards the rest of a batch.** The harness looped the
   single-result call, so a batch containing an unknown node id aborted: the results already
   applied stayed in the belief state while the whole call was reported as an error, and every

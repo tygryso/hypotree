@@ -6,6 +6,7 @@
 #   1. generate the held-out landscapes + briefings
 #   2. pre-flight: assert the analytic difficulty calibration holds
 #   2b. pre-flight: assert the ENGINE can solve every seed with no LLM at all
+#   2c. pre-flight: assert an under-declared question is DIAGNOSED, not mis-answered
 #   3. criterion 2 — TS-quality ablation (no LLM)
 #   4. criteria 1/3/4 — three paired arms on every seed
 #   5. score the frozen gate → GO / STOP / ITERATE
@@ -247,6 +248,43 @@ PY
 #     probes out of 100 with the goal unmet, after several GPU-hours — this check
 #     catches that class in two seconds, before any of them are spent.
 uv run python -m eval.runner.engine_selfplay
+
+# 2c. Pre-flight — the closed-world assumption, put under load.
+#     Every axis carries its winning value, so a fully-declared question always
+#     confirms and the assumption behind deduction-by-elimination is never
+#     actually tested. Withholding one winner is the only way this landscape can
+#     test it: the engine then refutes the four candidates that remain and, before
+#     P8b-CLOSED, confirmed the survivor by elimination with no observation of its
+#     own and ended `empty_frontier` with the goal unmet.
+#
+#     Gated on the DIAGNOSIS, not on a solve. The winning value was never offered,
+#     so the goal is genuinely unreachable and 0 solved is the correct answer —
+#     what matters is whether the run says WHY. A wrong answer reported as a named
+#     incomplete question is a result; the same answer reported as an empty
+#     frontier is not.
+uv run python - <<'PY'
+import sys
+from collections import Counter
+
+from eval.environment.landscape_scoring import AXES
+from eval.runner.config import TASK_SEEDS
+from eval.runner.engine_selfplay import solve_seed
+
+# One axis per seed rather than the full 30x5 cross: the same claim, at a fifth
+# of the wall-clock, on a pre-flight that runs before every evaluation.
+rows = [solve_seed(seed, omit_winner_on=AXES[i % len(AXES)]) for i, seed in enumerate(TASK_SEEDS)]
+named = sum(r.end_reason == "dead_question" for r in rows)
+share = named / len(rows)
+print(f"Closed-world pre-flight: {named}/{len(rows)} ({share:.0%}) named the incomplete question")
+print(f"  end reasons: {dict(Counter(r.end_reason for r in rows))}")
+if share < 0.80:
+    sys.exit(
+        f"closed-world check FAILED: only {share:.0%} of under-declared questions were "
+        f"diagnosed (want >= 80%). A deduction over an incomplete list is being defended "
+        f"instead of withdrawn — see P8b-CLOSED."
+    )
+print("  (a wrong answer reported as an empty frontier is not a result)")
+PY
 
 # 3. Criterion 2 — TS-quality ablation (no LLM needed)
 uv run python -m eval.runner.ablation_navigator eval/ --run-id "${RUN_ID}"

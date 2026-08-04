@@ -47,6 +47,45 @@ def test_the_engine_does_not_need_more_probes_than_perfect_recall() -> None:
     assert mean_ratio <= MAX_PROBE_RATIO
 
 
+@pytest.mark.integration
+def test_an_under_declared_question_is_named_rather_than_answered_wrongly() -> None:
+    """The closed-world assumption is load-bearing, and it is now checked.
+
+    Leaving the winning value off one axis is an agent thinking of four answers
+    where there were five — the ordinary case, not a contrived one. Deduction by
+    elimination then confirms the survivor with **no observation of its own**: a
+    free confirmation of a value that is wrong.
+
+    Before P8b that stood, and the run ended `empty_frontier` with the goal unmet
+    — the least actionable sentence available, and the caller was never told that
+    the question it asked was incomplete. The engine now withdraws the deduction
+    when the assembly built on it falls short, which empties the question and
+    reports `dead_question` naming the axis that ran out of candidates.
+
+    A wrong answer reported as wrong is a result; a wrong answer reported as an
+    empty frontier is not. The goal is still unreachable — the winning value was
+    never offered — so what is asserted is the *diagnosis*, not a solve.
+    """
+    result = solve_seed(TASK_SEEDS[0], omit_winner_on="component")
+
+    assert not result.solved
+    assert result.end_reason == "dead_question"
+
+
+@pytest.mark.integration
+def test_the_under_declared_diagnosis_holds_across_seeds() -> None:
+    """One seed could be luck; the claim is about the mechanism.
+
+    Not all 30: a landscape where a member is eliminated by a sub-par
+    substitution reaches the same conclusion by a different route, so the bar is
+    a clear majority rather than unanimity.
+    """
+    reasons = [solve_seed(seed, omit_winner_on="component").end_reason for seed in TASK_SEEDS[:10]]
+
+    assert reasons.count("dead_question") >= 7
+    assert "empty_frontier" not in reasons[:1] or reasons[0] == "dead_question"
+
+
 @pytest.mark.unit
 def test_an_unsolved_seed_is_a_failure() -> None:
     """`empty_frontier` with the goal unmet is the defect this check is for."""

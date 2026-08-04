@@ -558,11 +558,13 @@ def test_the_guide_ships_inside_the_package(tmp_path: Path) -> None:
 @pytest.mark.e2e
 @pytest.mark.asyncio
 async def test_resources_serve_the_guide_and_the_live_state(tmp_path: Path) -> None:
-    """Two resources: one static contract, one derived from the workspace."""
+    """Three resources: a static contract, a derived narrative, and where to watch."""
     from hypotree.engine import HypoTreeEngine
     from hypotree.mcp_server import (
+        DASHBOARD_RESOURCE_URI,
         GUIDE_RESOURCE_URI,
         STATE_RESOURCE_URI,
+        _publish_dashboard_url,
         _read_resource,
         _resource_definitions,
     )
@@ -570,6 +572,7 @@ async def test_resources_serve_the_guide_and_the_live_state(tmp_path: Path) -> N
     assert {str(r.uri) for r in _resource_definitions()} == {
         GUIDE_RESOURCE_URI,
         STATE_RESOURCE_URI,
+        DASHBOARD_RESOURCE_URI,
     }
 
     engine = HypoTreeEngine(tmp_path / "mcp_res.db", rng_seed=3)
@@ -577,9 +580,41 @@ async def test_resources_serve_the_guide_and_the_live_state(tmp_path: Path) -> N
     try:
         assert "exclusion_group" in await _read_resource(engine, lock, GUIDE_RESOURCE_URI)
         assert "What we have learned" in await _read_resource(engine, lock, STATE_RESOURCE_URI)
+        # Asked before a dashboard is up, the answer says how to get one rather
+        # than reporting nothing.
+        with_none = await _read_resource(engine, lock, DASHBOARD_RESOURCE_URI)
+        assert "--no-mcp" in with_none
+        _publish_dashboard_url("http://127.0.0.1:7331/?t=secret")
+        try:
+            live = await _read_resource(engine, lock, DASHBOARD_RESOURCE_URI)
+            assert "http://127.0.0.1:7331/?t=secret" in live
+        finally:
+            _publish_dashboard_url(None)
         with pytest.raises(ValueError, match="Unknown resource"):
             await _read_resource(engine, lock, "hypotree://nope")
     finally:
+        engine.close()
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_workspace_info_carries_the_dashboard_link(tmp_path: Path) -> None:
+    """A human watching the agent asks for this by name.
+
+    The URL is minted at startup and printed to stderr, which the model never
+    sees — so the agent could not answer a question it is asked constantly.
+    """
+    from hypotree.engine import HypoTreeEngine
+    from hypotree.mcp_server import _handle_call_tool, _publish_dashboard_url
+
+    engine = HypoTreeEngine(tmp_path / "mcp_ws.db", rng_seed=3, project_path=tmp_path)
+    lock = asyncio.Lock()
+    _publish_dashboard_url("http://127.0.0.1:7409/?t=abc")
+    try:
+        out = await _handle_call_tool(engine, lock, "get_workspace_info", {})
+        assert "http://127.0.0.1:7409/?t=abc" in out[0].text
+    finally:
+        _publish_dashboard_url(None)
         engine.close()
 
 
@@ -648,6 +683,44 @@ def test_an_unknown_flag_exits_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
     from hypotree.mcp_server import main
 
     monkeypatch.setattr(sys, "argv", ["hypotree", "--nope"])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+
+
+@pytest.mark.e2e
+def test_the_serving_flags_resolve_to_a_port_and_two_switches() -> None:
+    """The dashboard is on by default, and turning both halves off is refused.
+
+    Default-on is the point: it was behind a flag while it was unproven and the
+    people it was built for never saw it.
+    """
+    from hypotree.dashboard.server import DEFAULT_PORT
+    from hypotree.mcp_server import _parse_serve_args
+
+    assert _parse_serve_args([]) == (DEFAULT_PORT, True, True)
+    assert _parse_serve_args(["--dashboard-port", "9001"]) == (9001, True, True)
+    assert _parse_serve_args(["--dashboard-port=9001"]) == (9001, True, True)
+    assert _parse_serve_args(["--no-dashboard"]) == (DEFAULT_PORT, False, True)
+    assert _parse_serve_args(["--no-mcp"]) == (DEFAULT_PORT, True, False)
+
+    for bad in (
+        ["--bogus"],
+        ["--dashboard-port"],
+        ["--dashboard-port", "x"],
+        ["--dashboard-port", "0"],
+    ):
+        with pytest.raises(ValueError):
+            _parse_serve_args(bad)
+
+
+@pytest.mark.e2e
+def test_asking_for_neither_server_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--no-mcp --no-dashboard` leaves nothing to run, and a process that starts
+    and does nothing is worse than one that says so."""
+    from hypotree.mcp_server import main
+
+    monkeypatch.setattr(sys, "argv", ["hypotree", "--no-mcp", "--no-dashboard"])
     with pytest.raises(SystemExit) as exc:
         main()
     assert exc.value.code == 2

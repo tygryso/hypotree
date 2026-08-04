@@ -235,9 +235,15 @@ def test_create_then_bulk_verify(engine: HypoTreeEngine) -> None:
     """Integration: create a tree in one call, then batch-verify all nodes."""
     engine.create_hypotheses(
         [
-            {"statement": "goal", "node_id": "g1", "is_goal": True, "target_metric": 0.8},
-            {"statement": "sub1", "node_id": "s1", "parent_ids": ["g1"]},
-            {"statement": "sub2", "node_id": "s2", "parent_ids": ["g1"]},
+            {"statement": "sub1", "node_id": "s1"},
+            {"statement": "sub2", "node_id": "s2"},
+            {
+                "statement": "goal",
+                "node_id": "g1",
+                "is_goal": True,
+                "target_metric": 0.8,
+                "parent_ids": ["s1", "s2"],
+            },
         ]
     )
 

@@ -92,6 +92,21 @@ SUBSTITUTION_CONFIRM_PREFIX = "confirmed by successful substitution in: "
 # slot and still fell short — which rules this value out for its own question.
 SUBSTITUTION_ELIMINATE_PREFIX = "ruled out by sub-par substitution in: "
 
+# Marks a hypothesis pruned because a question it depends on ran out of answers.
+# Kept apart from the ordinary "ancestor invalidated" cascade because the two say
+# different things: that one reports a refutation travelling downstream, this one
+# reports that a whole question was asked and none of its candidates survived.
+# The group name is appended, so the reader can name what ran out.
+DEAD_QUESTION_PREFIX = "no live answer to question: "
+
+# Marks a deduction handed back for an actual test. A deduced confirmation rests
+# on two things: observations refuting every rival, which are solid, and the
+# claim that those rivals were all the candidates, which is a declaration rather
+# than a measurement. When something built on the deduction fails and every other
+# assumption has been exonerated, the second premise is what is left to doubt —
+# and doubting it means asking the question for real, not asserting the opposite.
+DEDUCTION_RETRACT_PREFIX = "deduction withdrawn for testing: "
+
 # Upper bound on the assignment space suggest_discriminating_experiment will
 # enumerate exhaustively. Beyond this the search stops being instantaneous and
 # the answer stops being worth its latency; the tool says so instead of guessing.
@@ -119,6 +134,20 @@ class GoalEvidenceError(ValueError):
 
 class NodeNotFoundError(KeyError):
     """Raised when a referenced node does not exist."""
+
+
+class GoalDependencyError(ValueError):
+    """Raised when a node is given a goal as a DEPENDENCY parent.
+
+    Its own type because this is the one modelling mistake strong models make
+    reliably, and the recovery is mechanical. "Goal decomposes into phases" is
+    how everyone thinks about objectives, so `parent_ids=[goal]` on the phase
+    reads as "this phase belongs to that goal" — and in hypotree it means the
+    exact opposite, that the phase cannot be tested until the goal is verified.
+    Documentation lost this argument repeatedly; refusing the edge at the moment
+    it is drawn does not, because the message lands in the model's context while
+    it is still holding the intent.
+    """
 
 
 class TargetResponse(BaseModel):
@@ -621,7 +650,7 @@ class HypoTreeEngine:
             return []
         return chosen
 
-    def _next_substitution(self, dry_run: bool) -> TargetResponse | None:
+    def _next_substitution(self, dry_run: bool, now: datetime) -> TargetResponse | None:
         """The next diagnostic swap to run, as an instruction the caller can act on.
 
         Issued instead of dispatching a node, because the experiment that
@@ -644,7 +673,13 @@ class HypoTreeEngine:
             nogood_id = int(plan["nogood_id"])
             key = f"nogood:{nogood_id}:{plan['member_id']}"
             if self._review_dispatches[key] >= MAX_REVIEW_DISPATCHES:
-                self._recover_from_interaction(self._refetch_nogood(nogood_id) or nogood, utcnow())
+                # Abandoning the narrowing reopens alternatives, which is a
+                # write. A peek that performed it would settle the very question
+                # the caller was only asking about, so a dry run leaves the
+                # conflict alone and looks at the next one.
+                if dry_run:
+                    continue
+                self._recover_from_interaction(self._refetch_nogood(nogood_id) or nogood, now)
                 continue
             if not dry_run:
                 self._review_dispatches[key] += 1
@@ -741,6 +776,7 @@ class HypoTreeEngine:
         target_metric: float | None = None,
         param_config: dict[str, Any] | None = None,
         exclusion_group: str | None = None,
+        exclusion_closed: bool = True,
         node_id: str | None = None,
         if_exists: str = "error",
     ) -> CreateHypothesisResult:
@@ -777,8 +813,22 @@ class HypoTreeEngine:
         # parent silently makes this node un-selectable forever (its parent gate
         # can never be satisfied) and leaves a phantom node in the graph.
         for pid in parent_ids or []:
-            if self._store.get_node(pid) is None:
+            parent = self._store.get_node(pid)
+            if parent is None:
                 raise NodeNotFoundError(f"parent node not found: {pid}")
+            if parent.is_goal and edge_type == EdgeType.DEPENDENCY:
+                raise GoalDependencyError(
+                    f"'{pid}' is a goal, so nothing can depend on it — this edge would "
+                    f"point the wrong way. A goal is *reached when* the work supporting "
+                    f"it is verified, so the work is the goal's parent, not its child. "
+                    f"A DEPENDENCY parent must be VERIFIED before its child is testable, "
+                    f"and a goal is derived rather than probed, so '{node_id}' would be "
+                    f"blocked forever and '{pid}' would still depend on nothing.\n\n"
+                    f"Create '{node_id}' without that parent, then wire it the other way:\n"
+                    f'  create_hypotheses([{{"node_id": {json.dumps(pid)}, "statement": ..., '
+                    f'"is_goal": true, "target_metric": ..., '
+                    f'"parent_ids": [{json.dumps(node_id)}], "if_exists": "overwrite"}}])'
+                )
 
         node = Node(
             id=node_id,
@@ -789,6 +839,7 @@ class HypoTreeEngine:
             target_metric=target_metric,
             param_config=param_config,
             exclusion_group=exclusion_group,
+            exclusion_closed=exclusion_closed,
         )
         self._store.add_node(node)
 
@@ -1179,7 +1230,7 @@ class HypoTreeEngine:
                             "record evidence for what you have probed to get more"
                         ),
                     )
-                substitution = self._next_substitution(dry_run)
+                substitution = self._next_substitution(dry_run, now)
                 if substitution is not None:
                     return substitution
                 confirmed = self._confirmed_for_composition()
@@ -1201,6 +1252,48 @@ class HypoTreeEngine:
                             "them, with parent_ids="
                             f"{confirmed} (DEPENDENCY), then test that. Without those "
                             f"parents a failure cannot be traced back to an assumption.{reach}"
+                        ),
+                    )
+                # A question that ran out of answers is the one cause of an empty
+                # frontier the caller can still do something about, and it is
+                # invisible in every other reading: its dependents were pruned,
+                # so they are not "blocked", and the goal still has parents, so
+                # it is not "unreachable". Reported before those two because
+                # both would describe it as a wiring mistake and send the caller
+                # to fix edges that are correct.
+                dead = self._dead_questions()
+                if dead:
+                    goals = [n.id for n in self._store.get_all_nodes() if n.is_goal]
+                    held_up = f" This was holding up {goals}." if goals else ""
+                    # An open question that ran out needs a new candidate; a
+                    # closed one that ran out means the list was wrong, or one of
+                    # the eliminations was. Same situation, opposite next move.
+                    open_groups = [g for g in dead if not self._group_is_closed(g)]
+                    if open_groups:
+                        advice = (
+                            f"{open_groups} was declared open, so the answer is very likely "
+                            f"one you have not listed yet — add it to the same "
+                            f"exclusion_group and it becomes testable. Nothing downstream "
+                            f"has been pruned, because an untried candidate could still "
+                            f"satisfy it."
+                        )
+                    else:
+                        advice = (
+                            "The wiring is not the problem: the list of candidates is. Add "
+                            "the answer(s) you have not thought of to the same "
+                            "exclusion_group — passing exclusion_closed=false says the list "
+                            "was never meant to be exhaustive — or, if you believe it was "
+                            "complete, one of those eliminations is wrong and the evidence "
+                            "behind it is where to look. What depended on them has been "
+                            "pruned."
+                        )
+                    return TargetResponse(
+                        status="DONE",
+                        reason="dead_question",
+                        rationale=(
+                            f"every candidate answer to {dead} has been ruled out on its "
+                            f"own evidence, so nothing that assumes one of them can be "
+                            f"satisfied.{held_up} {advice} Nothing further is settled here."
                         ),
                     )
                 blocked = self._blocked_nodes()
@@ -1229,8 +1322,14 @@ class HypoTreeEngine:
                 # parents, so are always eligible) back on the frontier, and one
                 # pass is therefore enough by construction.
                 if _retry and not dry_run and self._recover_from_underperformance(now):
+                    # A fresh instant for the retry. The recovery just moved
+                    # nodes, and `status_history` keeps only the last write at a
+                    # given `valid_from` — rightly, since two states cannot both
+                    # be true at one moment. Reusing `now` therefore let the
+                    # dispatch overwrite the very interval that recorded why the
+                    # node came back, which is the one thing worth reading later.
                     return self._select_one(
-                        now, lease_ttl_s, dry_run, claimed_groups, _retry=False, scope=scope
+                        utcnow(), lease_ttl_s, dry_run, claimed_groups, _retry=False, scope=scope
                     )
                 # Reported only once there is genuinely nothing else to do:
                 # unwired goals are worth fixing, but handing the caller real
@@ -1257,7 +1356,7 @@ class HypoTreeEngine:
                 # caller, quite reasonably, would stop.
                 if _retry and self._frontier_nodes():
                     return self._select_one(
-                        now, lease_ttl_s, dry_run, claimed_groups, _retry=False, scope=scope
+                        utcnow(), lease_ttl_s, dry_run, claimed_groups, _retry=False, scope=scope
                     )
             return TargetResponse(status="DONE", reason=result.reason)
 
@@ -2473,9 +2572,11 @@ class HypoTreeEngine:
         if not self._diagnose_substitution(node_id, refuted=True, now=now):
             self._blame_failure(node_id, now, depth)
         # Refuting a candidate can leave exactly one answer standing, which is
-        # then entailed rather than merely likely — no probe needed.
+        # then entailed rather than merely likely — no probe needed. It can also
+        # take the last one, which says the question has no answer at all.
         if group:
             self._deduce_last_member(group, now)
+            self._propagate_dead_question(group, now)
         # A refutation can also be the very fact that explains an open conflict.
         self._narrow_conflicts(now)
 
@@ -3172,12 +3273,38 @@ class HypoTreeEngine:
                 reopened.extend(
                     self._reopen_alternatives(parent, now, why, UNDERPERFORMANCE_REOPEN_PREFIX)
                 )
-        return reopened
+        if reopened:
+            return reopened
+
+        # Nothing came back, and the objective is still unmet. That happens when
+        # a question's rivals were all refuted on their own evidence rather than
+        # retired by the exclusion inference: there is no sibling to hand back,
+        # and the answer standing is a *deduction* — confirmed for free because
+        # nothing else was left, never observed. It is now the only belief in the
+        # assembly with no measurement behind it, and the assembly has fallen
+        # short, so it is exactly what to doubt. Withdrawing it asks the question
+        # for real instead of leaving the search stranded on an assertion nobody
+        # ever tested. Without this the run ends `empty_frontier` with the goal
+        # unmet and never says that a candidate list was incomplete.
+        withdrawn = [
+            pid
+            for _node, parents in compositions
+            for pid in parents
+            if self._withdraw_deduction(pid, now)
+        ]
+        return withdrawn
 
     def _convict(self, culprit: str, nogood_id: int, now: datetime) -> None:
-        """Invalidate the identified cause of a conflict, with the full cascade."""
+        """Invalidate the identified cause of a conflict, with the full cascade.
+
+        Unless the cause is a *deduction*, which has no observation behind it to
+        contradict. Refuting one would be asserting a value false on no evidence;
+        it is handed back for an actual test instead. See ``_withdraw_deduction``.
+        """
         node = self._store.get_node(culprit)
         if node is None or node.status in (Status.INVALIDATED, Status.PRUNED):
+            return
+        if self._withdraw_deduction(culprit, now):
             return
         self._store.change_status(
             culprit,
@@ -3260,10 +3387,17 @@ class HypoTreeEngine:
         - the survivor must still be an open question — one already EXHAUSTED by
           its own sub-par evidence is a contradiction with the group's premise,
           and inventing a confirmation on top of it would bury that signal;
+        - the group must be **closed**. The whole inference is the closed-world
+          assumption being used, and over a group that admits more candidates it
+          is simply invalid: "the other three learning rates failed" says nothing
+          about the fourth. That is a declaration the caller makes, and until it
+          could be made the engine assumed it of every group.
         - the posterior is left untouched, because no observation was made. The
           status records what was deduced; the belief records what was seen.
         """
         members = self._store.get_nodes_in_exclusion_group(group)
+        if not self._group_is_closed(group, members):
+            return None
         eliminated = [m for m in members if self._is_eliminated(m)]
         survivors = [m for m in members if not self._is_eliminated(m)]
         if not eliminated or len(survivors) != 1:
@@ -3283,6 +3417,85 @@ class HypoTreeEngine:
         self._sync_exclusion(survivor.id, survivor.status, Status.VERIFIED, now)
         self.verify_upstream(survivor.id)
         return survivor.id
+
+    def _group_is_closed(self, group: str, members: list[Node] | None = None) -> bool:
+        """Whether the caller declared this question's candidates to be all of them.
+
+        Open if *any* member says so. Declaring openness is a weakening — it
+        withdraws an inference the engine would otherwise draw — so the safe
+        direction is for one member's caution to govern the group. The reverse
+        would let a later `create_hypotheses` call that forgot the flag quietly
+        re-enable deduction over a list its author knew was partial.
+
+        ``members`` is accepted already-fetched because every caller has just
+        read them: this runs on each elimination, and a second lookup per member
+        is the shape of cost P7-PERF removed elsewhere.
+        """
+        if members is None:
+            members = self._store.get_nodes_in_exclusion_group(group)
+        return all(m.exclusion_closed for m in members)
+
+    def _is_deduced(self, node: Node) -> bool:
+        """Whether this confirmation rests on elimination rather than observation.
+
+        Read over the whole history, not just its last entry: a deduction that
+        passes through conflict review comes back marked "released from review",
+        which describes the last thing that happened to it and erases where the
+        confirmation came from. Judging on that entry alone made a node that was
+        never once observed look like one that had stood up to scrutiny.
+
+        ``evidence_count`` is what makes the wider read safe. Zero means nothing
+        has ever been measured about this node, so a deduction anywhere in its
+        past is still the only reason it is confirmed.
+        """
+        if node.evidence_count > 0 or node.status != Status.VERIFIED:
+            return False
+        return any(
+            str(row["reason"] or "").startswith(DEDUCTION_REASON_PREFIX)
+            for row in self._store.get_status_history(node.id)
+        )
+
+    def _withdraw_deduction(self, node_id: str, now: datetime) -> bool:
+        """Hand a deduced confirmation back to the frontier instead of refuting it.
+
+        A deduction is entailed by two things: observations that refuted every
+        rival, and the claim that those rivals were all the candidates. When a
+        composition resting on it fails and every other assumption has been
+        exonerated, one of those two is wrong — and the engine cannot tell which,
+        because it has never observed this node at all.
+
+        Convicting it would assert the value is false on no evidence, which is
+        the one thing the belief state is not allowed to do. Leaving it confirmed
+        strands the search: a real run ended `empty_frontier` with the goal unmet
+        and never told the caller its question was incomplete.
+
+        So the deduction is withdrawn and the node becomes an open question
+        again. That is the honest state, and it is also the productive one: the
+        navigator dispatches it, and one probe settles which premise was wrong.
+        If it confirms, the deduction was right and the conflict lies elsewhere;
+        if it refutes, every member of the group is now eliminated on its own
+        evidence and ``_question_is_dead`` reports the list as incomplete.
+        """
+        node = self._store.get_node(node_id)
+        if node is None or not self._is_deduced(node):
+            return False
+        group = node.exclusion_group or "?"
+        self._store.change_status(
+            node_id,
+            Status.UNTESTED,
+            reason=(
+                f"{DEDUCTION_RETRACT_PREFIX}deduced from '{group}' having no other answer, "
+                f"but a composition resting on it failed — so either this value is wrong "
+                f"or '{group}' is missing a candidate. Probe it to find out which."
+            ),
+            now=now,
+        )
+        self._store.set_confirmed_depth(node_id, None)
+        self._refresh_node_in_graph(node_id)
+        # It was VERIFIED, so it was holding its siblings retired on an inference
+        # that no longer stands.
+        self._retract_exclusion(node_id, now)
+        return True
 
     def _is_eliminated(self, node: Node) -> bool:
         """Whether a node has been ruled out as an answer to its own question.
@@ -3304,6 +3517,142 @@ class HypoTreeEngine:
         history = self._store.get_status_history(node.id)
         reason = str(history[-1]["reason"]) if history else ""
         return not reason.startswith(EXCLUSION_REASON_PREFIX)
+
+    def _eliminated_on_its_own_evidence(self, node: Node) -> bool:
+        """The strict reading of elimination, for concluding a question has no answer.
+
+        ``_is_eliminated`` asks whether a member can still be the answer, which
+        is the right question when one survivor is about to inherit the group by
+        deduction: a node killed by its ancestry is out of the running however it
+        got there, and the survivor stands regardless.
+
+        Concluding that a *whole question* has run out is a far stronger claim
+        and needs a stricter test, because everything downstream of the question
+        is about to be pruned on it. So:
+
+        - PRUNED never counts. It means an ancestor was refuted, which is a
+          statement about that ancestor's subtree and not about whether this
+          value answers this question.
+        - EXHAUSTED by the exclusion inference never counts either, for the same
+          reason it does not count in ``_is_eliminated``: nothing was observed,
+          the member was set aside because a sibling was confirmed.
+        - Everything else needs a probe behind it. Usually that is the node's own
+          evidence. The exception is a **sub-par substitution**, where the probe
+          was spent on the composition that isolated this value rather than on
+          the value itself: the assembly was right in every other slot and still
+          fell short, which is an observation about this member however the
+          ledger records it. Excluding it made the rule miss precisely the groups
+          the diagnosis machinery had finished working on.
+        """
+        if node.status == Status.INVALIDATED:
+            return node.evidence_count > 0
+        if node.status != Status.EXHAUSTED:
+            return False
+        history = self._store.get_status_history(node.id)
+        reason = str(history[-1]["reason"]) if history else ""
+        if reason.startswith(EXCLUSION_REASON_PREFIX):
+            return False
+        return node.evidence_count > 0 or reason.startswith(SUBSTITUTION_ELIMINATE_PREFIX)
+
+    def _question_is_dead(self, group: str, members: list[Node] | None = None) -> bool:
+        """Whether every candidate answer to one question has been ruled out on its own.
+
+        The exact dual of ``_deduce_last_member``: all-but-one eliminated confirms
+        the survivor for free, and all-of-them eliminated says the question has no
+        answer among the candidates offered. Both are the closed-world assumption
+        being *used* rather than merely declared, and both are sound only because
+        an exclusion group is a declaration that these are the competing answers
+        to one question.
+
+        The soundness rests entirely on the group. "All four approaches I tried
+        failed" does not entail "the objective is unreachable" — it entails "I
+        need a fifth idea", and a rule that could not tell the two apart would let
+        an unimaginative agent declare its own goal impossible. What makes this
+        version sound is that the caller *declared* these to be the alternatives.
+
+        Three guards, each closing a way the rule could fire on a live search:
+
+        - **At least two candidates.** One value is not a question, and a lone
+          refuted node is already handled by the ordinary cascade; firing here as
+          well would report the same event twice under two different names.
+        - **Every member eliminated on its own evidence** — see
+          ``_eliminated_on_its_own_evidence``. A partially-probed group is a
+          question still being asked.
+        - **No open conflict over any member.** A member retired during conflict
+          diagnosis may be handed straight back by ``_recover_from_interaction``,
+          so the group is not out of answers, it is mid-argument.
+        """
+        members = (
+            members if members is not None else self._store.get_nodes_in_exclusion_group(group)
+        )
+        if len(members) < 2:
+            return False
+        if not all(self._eliminated_on_its_own_evidence(m) for m in members):
+            return False
+        member_ids = {m.id for m in members}
+        return not any(
+            member_ids & set(nogood["member_ids"])
+            for nogood in self._store.get_nogoods(open_only=True)
+        )
+
+    def _propagate_dead_question(self, group: str, now: datetime) -> list[str]:
+        """Prune whatever depended on a question that ran out of answers.
+
+        A node with a DEPENDENCY parent in the group can never be satisfied: it
+        assumes an answer to a question that has none. This reaches cases the
+        refutation cascade does not, because a member settled as EXHAUSTED was
+        never refuted — ``_exhaust_node`` deliberately leaves its descendants
+        alone — so a composition resting on one stays on the frontier being
+        re-attempted long after its premise ran out.
+
+        Goals are exempt, for the reason they are exempt from every other
+        cascade: the objective standing or falling is not something an attempt
+        gets to decide. A goal whose only route ran out is reported by the
+        navigator instead, where the caller can act on it.
+
+        What rested on a pruned dependent goes too, through the ordinary cascade.
+        Stopping at the direct dependents would leave a node whose only support
+        had just been pruned sitting on the frontier, which is the exact waste
+        this removes one level up.
+
+        Only over a **closed** question. Over one that admits more candidates,
+        "every listed answer failed" means the list needs another entry, not that
+        everything downstream is dead — so the situation is still reported, and
+        nothing is pruned on it.
+        """
+        members = self._store.get_nodes_in_exclusion_group(group)
+        if not self._question_is_dead(group, members) or not self._group_is_closed(group, members):
+            return []
+
+        member_ids = {m.id for m in members}
+        pruned: list[str] = []
+        for node in self._store.get_all_nodes():
+            if node.is_goal or node.status not in _OPEN_STATUSES:
+                continue
+            if not member_ids & set(self._graph.parents(node.id, EdgeType.DEPENDENCY)):
+                continue
+            self._store.change_status(
+                node.id,
+                Status.PRUNED,
+                reason=f"{DEAD_QUESTION_PREFIX}{group}",
+                now=now,
+            )
+            self._refresh_node_in_graph(node.id)
+            pruned.append(node.id)
+            pruned.extend(self._cascade_prune(node.id, now))
+        return pruned
+
+    def _dead_questions(self) -> list[str]:
+        """Every declared question with no live candidate left, in a stable order.
+
+        Groups the nodes in memory rather than re-querying per group: this runs
+        on the DONE path, where the caller is already waiting.
+        """
+        by_group: dict[str, list[Node]] = {}
+        for node in self._store.get_all_nodes():
+            if node.exclusion_group:
+                by_group.setdefault(node.exclusion_group, []).append(node)
+        return sorted(g for g, members in by_group.items() if self._question_is_dead(g, members))
 
     def _verify_node(self, node_id: str, now: datetime, depth: int = 0) -> None:
         """Transition to VERIFIED + exclusion inference + upstream verify.
@@ -3477,3 +3826,4 @@ class HypoTreeEngine:
         self._diagnose_substitution(node_id, refuted=False, now=now, depth=depth, achieved=False)
         if node is not None and node.exclusion_group:
             self._deduce_last_member(node.exclusion_group, now)
+            self._propagate_dead_question(node.exclusion_group, now)

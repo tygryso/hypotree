@@ -17,6 +17,7 @@ import pytest
 from hypotree.engine import (
     MAX_REVIEW_DISPATCHES,
     ClaimError,
+    GoalDependencyError,
     GoalEvidenceError,
     HypoTreeEngine,
 )
@@ -236,9 +237,7 @@ def test_a_goal_refuses_evidence_rather_than_absorbing_it(engine: HypoTreeEngine
     away. Refusing the record keeps the failure attributable.
     """
     engine.create_hypothesis("goal", node_id="goal", is_goal=True, target_metric=0.75)
-    engine.create_hypothesis(
-        "child", node_id="child", parent_ids=["goal"], edge_type=EdgeType.DEPENDENCY
-    )
+    engine.create_hypothesis("child", node_id="child")
 
     with pytest.raises(GoalEvidenceError):
         engine.record_evidence("goal", LogicalEvidence(success=0.0))
@@ -781,28 +780,95 @@ def test_goal_status_reflects_edges_after_a_reload(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_a_goal_cannot_be_something_elses_premise(engine: HypoTreeEngine) -> None:
+    """The one modelling mistake strong models make reliably, refused where it is made.
+
+    "The goal decomposes into phases" is how everyone thinks about objectives, so
+    `parent_ids=[goal]` on the phase reads as "this phase belongs to that goal".
+    In hypotree it means the opposite: the phase cannot be tested until the goal
+    is VERIFIED. A goal is never dispatched and `verify_upstream` only promotes
+    IN_PROGRESS nodes along REFINEMENT edges, so the goal can never reach
+    VERIFIED and the child is blocked forever — while the goal still depends on
+    nothing and so can never be reached either. Both halves broken, silently.
+
+    Documentation lost this argument against a very capable model. Refusing the
+    edge does not, because the message arrives while the caller still holds the
+    intent, and it carries the corrected call.
+    """
+    engine.create_hypothesis("ship it", node_id="goal", is_goal=True, target_metric=0.8)
+
+    with pytest.raises(GoalDependencyError) as exc:
+        engine.create_hypothesis(
+            "phase0", node_id="phase0", parent_ids=["goal"], edge_type=EdgeType.DEPENDENCY
+        )
+    assert "parent, not its child" in str(exc.value)
+    assert '"parent_ids": ["phase0"]' in str(exc.value)
+    # Refused means refused: no half-created node left behind.
+    assert engine._store.get_node("phase0") is None
+
+    # The right way round is untouched.
+    engine.create_hypothesis("phase0", node_id="phase0")
+    engine.create_hypothesis(
+        "ship it",
+        node_id="goal",
+        is_goal=True,
+        target_metric=0.8,
+        parent_ids=["phase0"],
+        if_exists="overwrite",
+    )
+    assert engine._graph.parents("goal", EdgeType.DEPENDENCY) == ["phase0"]
+
+
+@pytest.mark.unit
+def test_a_goal_may_still_refine_or_alternate(engine: HypoTreeEngine) -> None:
+    """Only DEPENDENCY is refused, because only DEPENDENCY gates a child on it.
+
+    The other two edge types carry no "parent must be VERIFIED first" rule, so
+    they create no dead branch and there is nothing to protect the caller from.
+    """
+    engine.create_hypothesis("ship it", node_id="goal", is_goal=True, target_metric=0.8)
+    engine.create_hypothesis(
+        "a narrower reading", node_id="narrow", parent_ids=["goal"], edge_type=EdgeType.REFINEMENT
+    )
+    assert engine._store.get_node("narrow") is not None
+
+
+@pytest.mark.unit
 def test_an_unreachable_graph_is_reported_as_blocked_not_finished(
     engine: HypoTreeEngine,
 ) -> None:
     """ "Nothing is testable" and "nothing is reachable" are opposite situations.
 
-    A premise wired as a *child* of the goal can never be dispatched, because a
-    DEPENDENCY parent must be confirmed first and a goal is never probed. A real
-    episode ended at step zero this way, with twenty-five untested hypotheses in
-    the store, and was scored as a completed search.
+    A premise wired as a *child* of the combination that assumes it can never be
+    dispatched, because a DEPENDENCY parent must be confirmed first and the
+    combination cannot be confirmed without the premise. A real episode ended at
+    step zero this way, with twenty-five untested hypotheses in the store, and
+    was scored as a completed search.
+
+    Built from two ordinary nodes rather than from a goal: the goal form of this
+    mistake is refused at creation now, so this covers the general case that is
+    still representable.
     """
+    engine.create_hypothesis("combo", node_id="combo")
     engine.create_hypothesis("goal", node_id="goal", is_goal=True, target_metric=0.75)
     for i in range(3):
         engine.create_hypothesis(
-            f"p{i}", node_id=f"p{i}", parent_ids=["goal"], edge_type=EdgeType.DEPENDENCY
+            f"p{i}", node_id=f"p{i}", parent_ids=["combo"], edge_type=EdgeType.DEPENDENCY
         )
+
+    # EXHAUSTED settles the root without cascading, so its children stay untested
+    # and gated on a parent that will never be VERIFIED — nothing is reachable
+    # while three hypotheses sit unprobed, which is the situation under test.
+    for _ in range(6):
+        engine.record_evidence("combo", LogicalEvidence(success=0.2, depth=1))
+    assert engine._store.get_node("combo").status == Status.EXHAUSTED
 
     done = engine.get_next_targets()[0]
 
     assert done.status == "DONE"
     assert done.reason == "blocked_frontier"
     # The caller is told which nodes and what gates them, not merely that it is over.
-    assert "p0" in done.rationale and "goal" in done.rationale
+    assert "p0" in done.rationale and "combo" in done.rationale
 
 
 @pytest.mark.unit

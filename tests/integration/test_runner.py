@@ -1484,6 +1484,10 @@ def test_an_unreachable_graph_does_not_end_the_run(tmp_path: Path) -> None:
     episode at step zero and the gate then scored it censored to the full budget
     — the worst possible outcome for a mistake the agent could have fixed in one
     turn had it been told.
+
+    The engine now refuses that edge outright, so the agent is corrected at the
+    moment it draws it rather than several turns later. Either way the run must
+    keep going: what is asserted here is that a mis-wiring never ends an episode.
     """
     from unittest.mock import patch
 
@@ -1537,7 +1541,7 @@ def test_an_unreachable_graph_does_not_end_the_run(tmp_path: Path) -> None:
         result = run(config)
 
     # It kept going and was stopped by the idle guard, not by mistaking an
-    # unreachable graph for a completed investigation.
+    # unwinnable graph for a completed investigation.
     assert result["reason"] == "no_progress"
     assert calls.count("ask") >= 2
     events = [
@@ -1546,7 +1550,9 @@ def test_an_unreachable_graph_does_not_end_the_run(tmp_path: Path) -> None:
         if line.strip()
     ]
     reasons = {e.get("reason") for e in events if e.get("event_type") == "target_selected"}
-    assert "blocked_frontier" in reasons
+    # Every one of these is an instruction rather than an ending, which is the
+    # property under test; which one fires depends on how far the mis-wiring got.
+    assert reasons & {"blocked_frontier", "unreachable_goal", "goal_scope_empty"}
 
 
 @pytest.mark.integration

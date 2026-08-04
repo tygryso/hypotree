@@ -15,10 +15,13 @@
 <div id="app">
 
   <header>
-    <h1>hypo<span>tree</span></h1>
+    <div class="brand">
+      <img src="/static/logo.png" alt="hypotree" width="282" height="147">
+      <span class="sub">belief state</span>
+    </div>
 
-    <select v-model="goalId" v-if="meta && meta.goals.length">
-      <option value="">all goals</option>
+    <select v-model="goalId" v-if="meta && meta.goals.length" title="Show only the case for one goal">
+      <option value="">All goals</option>
       <option v-for="g in meta.goals" :key="g.id" :value="g.id">
         {{ g.met ? '\u2713' : '\u00b7' }} {{ g.statement || g.id }}
       </option>
@@ -51,48 +54,88 @@
 
         <!-- Tab A — the narrative, typeset rather than dumped -->
         <template v-if="tab === 'path'">
-          <template v-if="detail">
-            <h2>{{ detail.node.id }}</h2>
-            <p>
-              <span class="pill" :class="detail.node.status">{{ detail.node.status }}</span>
-              {{ detail.node.statement }}
-            </p>
-            <table class="metrics">
-              <tr><td>posterior mean</td><td>{{ detail.node.posterior_mean.toFixed(3) }}</td></tr>
-              <tr><td>observations</td><td>{{ detail.node.evidence_count }}</td></tr>
-              <tr v-if="detail.node.exclusion_group">
-                <td>question</td><td>{{ detail.node.exclusion_group }}</td>
-              </tr>
-              <tr v-if="detail.directive">
-                <td>directive</td><td>{{ detail.directive.mode }}</td>
-              </tr>
-            </table>
+          <!-- Branching on `selected` rather than on `detail` is what stops the
+               panel flashing: clearing `detail` to fetch the next node mounted
+               the whole narrative for one frame before replacing it again. -->
+          <template v-if="selected">
+            <div class="card" :class="[detail ? detail.node.status : '', {goal: detail && detail.node.is_goal}]">
+              <div class="card-id">
+                <span>{{ selected }}</span>
+                <span class="pill" :class="detail ? detail.node.status : ''" v-if="detail">
+                  {{ detail.node.status }}
+                </span>
+              </div>
+              <div class="card-body">
+                <p class="claim" v-if="detail">{{ detail.node.statement }}</p>
+                <p class="claim st" v-else>loading…</p>
 
-            <h2 style="margin-top:1rem">what paid for this</h2>
-            <div v-if="!detail.evidence.length" class="empty" style="padding:1rem">
-              Nothing was observed here &mdash; this belief was inferred.
+                <table class="metrics" v-if="detail">
+                  <tr><td>posterior mean</td><td>{{ detail.node.posterior_mean.toFixed(3) }}</td></tr>
+                  <tr><td>observations</td><td>{{ detail.node.evidence_count }}</td></tr>
+                  <tr v-if="detail.node.exclusion_group">
+                    <td>question</td><td>{{ detail.node.exclusion_group }}</td>
+                  </tr>
+                </table>
+              </div>
+              <div class="card-stamps" v-if="detail">
+                <span><b>created</b> {{ stamp(detail.node.created_at) }}</span>
+                <span v-if="detail.node.settled_at">
+                  <b>{{ detail.node.status.toLowerCase() }}</b> {{ stamp(detail.node.settled_at) }}
+                </span>
+              </div>
             </div>
-            <table class="metrics" v-else>
-              <tr v-for="(e, i) in detail.evidence" :key="i">
-                <td>
-                  {{ e.success === null ? 'infra' : e.success.toFixed(2) }}
-                  at depth {{ e.depth }}
-                  <div class="st" v-if="e.source_ref || e.git_branch">
-                    {{ e.source_ref || '' }}
-                    <template v-if="e.git_branch">
-                      &middot; {{ e.git_branch }}@{{ (e.context_hash || '').slice(0, 7) }}
-                    </template>
-                  </div>
-                </td>
-                <td>{{ (e.recorded_at || '').slice(0, 19).replace('T', ' ') }}</td>
-              </tr>
-            </table>
 
-            <div style="display:flex;gap:.4rem;margin-top:.9rem">
-              <button @click="directive('pin')">pin</button>
-              <button @click="directive('suspend')">suspend</button>
-              <button @click="directive('clear')">clear</button>
-              <button @click="detail = null; selected = null">back</button>
+            <p class="st" v-if="detail && detail.node.reason" style="margin:-0.4rem 0 0.9rem">
+              {{ detail.node.reason }}
+            </p>
+
+            <template v-if="detail">
+              <h2>What paid for this</h2>
+              <div v-if="!detail.evidence.length" class="empty" style="padding:0.9rem">
+                Nothing was observed here &mdash; this belief was inferred.
+              </div>
+              <table class="metrics" v-else>
+                <tr v-for="(e, i) in detail.evidence" :key="i">
+                  <td>
+                    {{ e.success === null ? 'infra' : e.success.toFixed(2) }}
+                    at depth {{ e.depth }}
+                    <div class="st" v-if="e.source_ref || e.git_branch">
+                      {{ e.source_ref || '' }}
+                      <template v-if="e.git_branch">
+                        &middot; {{ e.git_branch }}@{{ (e.context_hash || '').slice(0, 7) }}
+                      </template>
+                    </div>
+                  </td>
+                  <td>{{ stamp(e.recorded_at) }}</td>
+                </tr>
+              </table>
+
+              <div class="sched">
+                <h2>Scheduling</h2>
+                <p>
+                  Changes what the navigator <em>offers</em> next, never what is believed.
+                  Neither touches the posterior.
+                </p>
+                <div class="sched-row">
+                  <button :class="{on: directiveMode === 'pin'}" @click="directive('pin')"
+                          title="Hand this out before anything else">Test first</button>
+                  <button :class="{on: directiveMode === 'suspend'}" @click="directive('suspend')"
+                          title="Withhold it from the frontier without asserting anything">Hold back</button>
+                  <button @click="directive('clear')" :disabled="!directiveMode"
+                          title="Remove the directive">Clear</button>
+                </div>
+                <span class="sched-state" v-if="directiveMode === 'pin'">
+                  Pinned &mdash; the navigator hands this out ahead of the queue.
+                </span>
+                <span class="sched-state" v-else-if="directiveMode === 'suspend'">
+                  Held back &mdash; withheld from the frontier. Nothing has been asserted about it.
+                </span>
+                <span class="sched-state" v-else>No directive &mdash; ordinary Thompson selection.</span>
+              </div>
+            </template>
+
+            <div style="margin-top:0.9rem">
+              <button @click="clearSelection()">&larr; Back to the learning path</button>
             </div>
           </template>
 
@@ -131,18 +174,26 @@
     </aside>
 
     <div class="graph-wrap">
-      <div class="empty" v-if="!graph.nodes.length" style="padding-top:6rem">
-        <h2 style="font-size:1rem;letter-spacing:0">Nothing here yet</h2>
+      <div class="empty" v-if="!graph.nodes.length" style="padding-top:5rem">
+        <h2>Nothing here yet</h2>
         <p>This workspace has no hypotheses. Point an agent at it and the graph draws itself.</p>
         <p><code>{"mcpServers":{"hypotree":{"command":"uvx","args":["hypotree"]}}}</code></p>
       </div>
 
       <svg class="graph" v-else @click="tip.show = false">
+        <defs>
+          <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+            <path d="M28 0H0V28" fill="none" stroke="var(--grid)" stroke-width="1"/>
+          </pattern>
+        </defs>
         <g id="viewport">
+          <!-- Inside the zoom group, so the grid travels with the graph and the
+               canvas reads as a surface rather than as a backdrop. -->
+          <rect class="grid" x="-6000" y="-6000" width="12000" height="12000" fill="url(#grid)"/>
           <!-- edges first, nodes second: a click on a node never competes with a
                line crossing it, which is the whole hit-testing problem in SVG -->
           <g>
-            <line v-for="e in edgeLines" :key="e.key" class="edge" :class="{dead: e.dead}"
+            <line v-for="e in edgeLines" :key="e.key" class="edge" :class="[e.type, {dead: e.dead}]"
                   :x1="e.x1" :y1="e.y1" :x2="e.x2" :y2="e.y2"/>
           </g>
           <transition-group tag="g" name="ghost">
@@ -152,20 +203,24 @@
                @click.stop="pick(n, $event)"
                @mouseenter="hover(n, $event)" @mouseleave="tip.show = false">
               <circle :r="radius(n)" :class="'s-' + n.status" :opacity="nodeOpacity(n)"/>
-              <text :y="radius(n) + 12" text-anchor="middle">{{ n.id }}</text>
+              <text :y="radius(n) + 13" text-anchor="middle">{{ n.id }}</text>
             </g>
           </transition-group>
         </g>
       </svg>
 
       <div class="tip" v-if="tip.show && tip.node" :style="{left: tip.x + 'px', top: tip.y + 'px'}">
-        <div><b>{{ tip.node.id }}</b> <span class="pill" :class="tip.node.status">{{ tip.node.status }}</span></div>
+        <div class="head">
+          <b>{{ tip.node.id }}</b>
+          <span class="pill" :class="tip.node.status">{{ tip.node.status }}</span>
+        </div>
         <div>{{ tip.node.statement }}</div>
         <div class="st" v-if="tip.node.status === 'UNTESTED'">
           {{ (tip.node.p_select * 100).toFixed(1) }}% chance of being picked next
         </div>
         <div class="st" v-else>posterior {{ tip.node.posterior_mean.toFixed(3) }}
           &middot; {{ tip.node.evidence_count }} observation(s)</div>
+        <div class="st" v-if="tip.node.settled_at">{{ stamp(tip.node.settled_at) }}</div>
       </div>
 
       <div class="zoom-controls">
@@ -173,17 +228,42 @@
         <button @click="zoomBy(1 / 1.4)" title="Zoom out">−</button>
         <button @click="fit()" title="Fit the graph to the viewport">fit</button>
       </div>
+
+      <!-- Beside the drawing, never instead of it. The tree is still the user's
+           work and still worth reading while the wiring is being fixed. -->
+      <div class="banner" v-if="graph.unwired_goal && !bannerDismissed">
+        <div v-if="graph.goal_wiring === 'inverted'">
+          <b>{{ graph.unwired_goal }}</b> has the work hanging <b>off</b> it instead of
+          supporting it, so the engine can never reach it. A goal is satisfied when everything
+          it <b>depends on</b> is verified &mdash; the work must be the goal's <b>parent</b>,
+          not its child. Re-create the goal with
+          <code>parent_ids=[…]</code> naming the nodes that should satisfy it.
+        </div>
+        <div v-else>
+          <b>{{ graph.unwired_goal }}</b> has nothing attached, so nothing can ever satisfy it.
+          Give it the combination you are aiming at as a DEPENDENCY parent:
+          <code>parent_ids=[…]</code>.
+        </div>
+        <button @click="bannerDismissed = true" title="Dismiss">×</button>
+      </div>
     </div>
   </main>
 
   <footer>
-    <button @click="playing = !playing" :disabled="!timeline.ticks.length">
+    <button @click="playing = !playing" :disabled="!timeline.ticks.length"
+            :title="playing ? 'Pause' : 'Replay the run from the beginning'">
       {{ playing ? '\u23f8' : '\u25b6' }}
     </button>
-    <input type="range" min="0" :max="lastTick" v-model.number="scrub"
-           :disabled="!timeline.ticks.length">
+    <div class="timebar" :title="'Activity over the run — drag to travel back'">
+      <div v-for="(b, i) in activity" :key="i" class="bin"
+           :class="{past: i <= binOfScrub, here: i === binOfScrub}"
+           :style="{height: b.h + '%'}"></div>
+      <div class="cursor" :style="{left: cursorPct + '%'}" v-if="timeline.ticks.length"></div>
+      <input type="range" min="0" :max="lastTick" v-model.number="scrub"
+             :disabled="!timeline.ticks.length" aria-label="Time travel">
+    </div>
     <span class="tick-label">{{ scrubLabel }}</span>
-    <button @click="goLive()" v-if="!atLive">live</button>
+    <button @click="goLive()" v-if="!atLive">Live</button>
   </footer>
 
 </div>

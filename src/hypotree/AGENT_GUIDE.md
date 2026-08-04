@@ -44,7 +44,7 @@ refuted or settled).
 | `get_evidence_history` | Evidence trail for a node (newest-first). `{id, kind, success, delta_success, monotonicity, context_hash, git_branch, source_ref, notes, recorded_at}`. |
 | `get_active_claims` | Live (unconsumed, unexpired) claims with `expires_in_s`. Use to resume interrupted work. |
 | `generate_learning_path` | What has been settled so far, **in order, and how**. Returns a markdown briefing plus structured `steps`, each marked `observed` (an experiment paid for it), `inferred` (the engine derived it for free) or `reversed` (a belief withdrawn or handed back). Carries `probes_spent`, `conclusions` and `conclusions_without_a_probe`. `limit` (default 200) bounds the narrative; the counters always cover the whole history. `goal_id` narrates one objective only — a workspace pursuing several otherwise interleaves their dead ends into one story. Call it **first** in a new session — something may already be settled — and to brief a human. |
-| `get_workspace_info` | **Which** belief state you are connected to, and how it was chosen. No arguments. Returns `workspace_id`, `source` (`env` \| `config` \| `remote` \| `path` — which of the four layers below produced it), `detail`, `project_path`, `store_root`, `db_path`, `db_exists`, and `warnings`. Call it when the graph is unexpectedly empty, or when two clients disagree about what has been established: that is almost always one project resolving to two workspaces. A pure read — it never creates the store, so asking cannot itself be what brings a workspace into being. |
+| `get_workspace_info` | **Which** belief state you are connected to, and how it was chosen. No arguments. Returns `workspace_id`, `source` (`env` \| `config` \| `remote` \| `path` — which of the four layers below produced it), `detail`, `project_path`, `store_root`, `db_path`, `db_exists`, `warnings`, and `dashboard_url` (the live dashboard link with its session token, or `null` if none is running — hand it over when someone asks where to watch). Call it when the graph is unexpectedly empty, or when two clients disagree about what has been established: that is almost always one project resolving to two workspaces. A pure read — it never creates the store, so asking cannot itself be what brings a workspace into being. |
 
 ---
 
@@ -60,22 +60,42 @@ Three MCP **prompts**. Clients that support them (Cursor, Claude Desktop, Cline)
 
 #### Resources
 
-Two MCP **resources**, pulled on demand rather than carried in context.
+Three MCP **resources**, pulled on demand rather than carried in context.
 
 | URI | What it is |
 |-----|------------|
 | `hypotree://guide` | This document, served live. ~23 KB — read it when something surprises you, rather than pasting it into a system prompt. |
 | `hypotree://state` | The current belief state as a narrative: what was established, how, and what it cost. Equivalent to `generate_learning_path`. |
+| `hypotree://dashboard` | Where a human can watch this belief state move, token included. Hand it over when someone asks to see the graph, the timeline, or what an experiment cost. |
 
 ---
 
 #### Edge Types
+
+**Direction, before anything else.** An edge runs *from the thing assumed to the
+thing assuming it*. A premise is the **parent** of the combination that uses it,
+and a goal is the **last** node in the chain — everything that satisfies it goes
+in its `parent_ids`.
+
+This is the opposite of task decomposition, which is why it is worth stating
+twice. "Goal breaks down into phases" makes `parent_ids=[goal]` on the phase feel
+right; in hypotree that says *the phase cannot be tested until the goal is
+verified*, which is backwards and unreachable. The engine refuses that edge with
+a `GoalDependencyError` rather than letting you find out later.
+
+```
+  right:  premise -> combination -> goal        goal.parent_ids = [combination]
+  wrong:  goal -> phase -> work                 work blocked forever
+```
 
 | Type | Semantics | Mermaid | Child eligible when |
 |------|-----------|---------|---------------------|
 | `DEPENDENCY` | AND logic — all parents must be VERIFIED | `-->` (solid) | **All** parents VERIFIED |
 | `ALTERNATIVE` | OR logic — any parent suffices | `-.->` (dashed) | **Any** parent VERIFIED |
 | `REFINEMENT` | Loose coupling — parent IN_PROGRESS is enough | `==>` (thick) | Parent IN_PROGRESS, VERIFIED, or EXHAUSTED |
+
+Several goals in one workspace is normal. They may share premises, and
+`get_goal_status` reports each separately; the global stop needs all of them met.
 
 ---
 
@@ -144,6 +164,33 @@ create_hypotheses(hypotheses=[
   a survivor that was itself tested and fell short — that combination means the
   group was mis-declared, and burying the signal would be worse than surfacing
   it.
+- **`exclusion_closed` — say whether your list is complete.** Deduction is sound
+  only if the candidates really are all of them, and that is your claim, not
+  something the engine can check. It defaults to `true`, which is what every
+  group means by default.
+
+  Pass `exclusion_closed=false` when the next candidate always exists — "which
+  learning rate", "which prompt wording", "which threshold". Confirming a member
+  still retires the others; only the last-one-standing deduction is withheld,
+  because "the other three learning rates failed" says nothing about the fourth.
+  Openness is per-group and one member declaring it is enough: it withdraws an
+  inference, so the cautious declaration wins.
+
+  ```
+  {"statement": "lr=1e-3", "exclusion_group": "lr", "exclusion_closed": false}
+  ```
+
+- **When every candidate is ruled out**, the navigator returns `dead_question`
+  naming the group. Over a *closed* group that means the list was wrong or one
+  of the eliminations was, and whatever depended on those values is pruned. Over
+  an *open* one it means the answer is very likely one you have not listed —
+  nothing is pruned, because an untried candidate could still satisfy it.
+- **A deduction can be withdrawn.** If every question is answered and the
+  assembled answer still falls short, the belief with no measurement behind it is
+  the one to doubt: the engine hands it back as `UNTESTED` and dispatches it, so
+  one probe settles whether the value was wrong or the candidate list was
+  incomplete. It never asserts the value false — nothing was ever observed about
+  it.
 
 This is inference, not observation: it updates beliefs about hypotheses you never
 tested, from a constraint you declared.
@@ -197,6 +244,7 @@ three DONE reasons are distinct and mean different things:
 | `awaiting_substitution` | a conflict is being narrowed; rebuild the failed combination with the one premise the `rationale` names swapped out, and probe it |
 | `awaiting_composition` | every question is answered; build the hypothesis that combines the confirmed answers (the `rationale` names them) and test that |
 | `blocked_frontier` | untested hypotheses exist but none is reachable — your DEPENDENCY edges run the wrong way. A premise must be the **parent** of the combination that assumes it, never its child. The `rationale` names the nodes and what gates them |
+| `dead_question` | every candidate answer to a question has been ruled out on its own evidence, so nothing that assumes one of them can be satisfied. The wiring is fine — the list of candidates is not. Add the answer you have not thought of to the same `exclusion_group`, or re-examine the evidence behind one of those eliminations |
 | `goal_scope_empty` | you passed `goal_id` and nothing reachable toward that goal is testable — but untested hypotheses exist *outside* its scope, because they are not wired to it. Give them a DEPENDENCY path to the goal, or drop the filter. Nothing is settled here |
 | `empty_frontier` | nothing is testable: everything is settled, or nothing exists yet |
 
@@ -349,10 +397,21 @@ record_evidence("node-id", success=0.5)  # claim_id is optional
 
 #### The dashboard (for the human, not for you)
 
-`hypotree --dashboard` runs a read-only web view beside this server on
-`127.0.0.1:7331`; `hypotree --dashboard-only` serves it with no MCP server at
-all. It shows the graph as it grows, replays any past instant from the bi-temporal
-history, and renders `generate_learning_path` as typeset markdown.
+A read-only web view runs beside this server **by default** on `127.0.0.1:7331`
+(probing upward if that port is taken). It shows the graph as it grows, replays
+any past instant from the bi-temporal history, and renders
+`generate_learning_path` as typeset markdown.
+
+**Someone will ask you for the link.** You have two ways to answer, and neither
+needs a shell:
+
+- `get_workspace_info` returns `dashboard_url` alongside the workspace fields.
+- The `hypotree://dashboard` resource returns the same URL on its own.
+
+Both carry the session token in `?t=`, which *is* the credential — it is minted
+fresh at every start, so a link from a previous session will not open. `null`
+means no dashboard is running: the server was started with `--no-dashboard`, or
+no port in the range was free.
 
 Two things there affect *you*:
 

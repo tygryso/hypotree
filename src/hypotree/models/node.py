@@ -40,6 +40,15 @@ class Node(BaseModel):
     # is retracted automatically if the confirmation is later withdrawn.
     exclusion_group: str | None = None
 
+    # Whether the group's candidates are believed to be *all* of them. This is
+    # the closed-world assumption, and until it was declared the engine simply
+    # assumed it: "all but one eliminated" confirmed the survivor for free, which
+    # is sound over a complete list of answers and false over a partial one.
+    # "Which catalyst, of these three" is closed; "which learning rate" is not,
+    # because the next candidate always exists. Defaults to True because that is
+    # what every group written before this field meant.
+    exclusion_closed: bool = True
+
     # Depth (rigour / scale / context) of the observation that confirmed this
     # node, or None if it was never confirmed. Recorded because a confirmation
     # is only as strong as the test that produced it: a composition that fails

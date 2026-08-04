@@ -1,237 +1,474 @@
-/* hypotree dashboard — hand-written, ~10 KB, no build step.
+/* hypotree dashboard — light analytical theme.
  *
- * Deliberately not Tailwind. Utility CSS is small only when a build step purges
- * it; the browser build is a ~350 KB runtime compiler that scans the DOM on
- * every load, and a precompiled "everything" bundle is megabytes of utilities
- * this page will never name. One fixed layout, one palette, one set of
- * components — that is a stylesheet, not a framework. */
+ * The palette is built around one rule: colour carries meaning and nothing else
+ * does. Status is the only thing that gets a hue; every chrome surface is a
+ * neutral, so a graph of eighty nodes reads as a distribution rather than as
+ * decoration.
+ *
+ * Typeface: no webfont is vendored. `font-src 'self'` means one would have to
+ * ship in the wheel, and a 90 KB binary to avoid the system UI stack is a poor
+ * trade when that stack is Inter-class on every current OS. "Plus Jakarta Sans"
+ * leads the list so it is used wherever it happens to be installed.
+ */
 
 :root {
-  --burgundy: #5b1a2e;
-  --burgundy-lift: #6d2239;
-  --graphite: #2d3142;
-  --graphite-deep: #23262f;
-  --graphite-line: #3b4054;
-  --gold: #c9a227;
-  --gold-soft: #e0bf55;
-  --ink: #e8e6e3;
-  --ink-dim: #a7a5a3;
+  /* Surfaces — warm paper, not clinical white. */
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --canvas: #f8fafc;
+  --grid: #dfe6ef;
+  --line: #e6e8ec;
+  --line-strong: #d8dce3;
 
-  --verified: #2fbf9b;
-  --invalidated: #e5484d;
-  --exhausted: #e08c3c;
-  --pruned: #6b6f7d;
-  --inprogress: #4c9be8;
-  --untested: #8b90a3;
+  /* Ink */
+  --ink: #0f172a;
+  --ink-2: #334155;
+  --ink-dim: #64748b;
+  --ink-faint: #94a3b8;
 
-  --radius: 12px;
-  --shadow: 0 14px 40px rgba(0, 0, 0, 0.42);
+  /* Brand. The goal navy doubles as the focus and selection accent, so the eye
+     learns one colour instead of three. */
+  --navy: #1e3a8a;
+  --accent: #0284c7;
+  --accent-soft: #e0f2fe;
+
+  /* Status: background / border / text. */
+  --ok-bg: #ecfdf5;    --ok-line: #a7f3d0;    --ok-ink: #047857;
+  --bad-bg: #fff1f2;   --bad-line: #fecdd3;   --bad-ink: #be123c;
+  --cut-bg: #f1f5f9;   --cut-line: #cbd5e1;   --cut-ink: #64748b;
+  --open-bg: #f8fafc;  --open-line: #e2e8f0;  --open-ink: #475569;
+  --work-bg: #eff6ff;  --work-line: #bfdbfe;  --work-ink: #1d4ed8;
+  --spent-bg: #fffbeb; --spent-line: #fde68a; --spent-ink: #b45309;
+  --doubt-bg: #faf5ff; --doubt-line: #e9d5ff; --doubt-ink: #7e22ce;
+
+  --shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-lift: 0 4px 12px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.04);
+  --radius: 10px;
+  --mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  --sans: "Plus Jakarta Sans", "Inter", "Segoe UI Variable Text", "Segoe UI",
+          system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  /* One duration for every state change, so an update arriving over SSE reads
+     as the same gesture wherever it lands. */
+  --t: 0.3s ease;
 }
 
 * { box-sizing: border-box; }
 
 html, body {
-  margin: 0;
-  height: 100%;
-  background:
-    radial-gradient(1100px 620px at 12% -8%, rgba(91, 26, 46, 0.55), transparent 60%),
-    radial-gradient(900px 520px at 92% 108%, rgba(201, 162, 39, 0.14), transparent 62%),
-    var(--graphite-deep);
+  margin: 0; height: 100%;
+  background: var(--bg);
   color: var(--ink);
-  font: 14px/1.6 ui-sans-serif, system-ui, "Segoe UI", Inter, Roboto, sans-serif;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
-#app { display: flex; flex-direction: column; height: 100vh; }
+#app { display: flex; flex-direction: column; height: 100vh; min-height: 0; }
 
-/* ---- chrome ---- */
+button {
+  font: inherit; cursor: pointer;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink-2);
+  border-radius: 8px;
+  padding: 0.34rem 0.7rem;
+  transition: background var(--t), border-color var(--t), color var(--t), box-shadow var(--t);
+}
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+
+/* ---- header ------------------------------------------------------------- */
 
 header {
-  display: flex; align-items: center; gap: 1rem;
-  padding: 0.7rem 1.1rem;
-  background: linear-gradient(180deg, rgba(91, 26, 46, 0.92), rgba(91, 26, 46, 0.72));
-  border-bottom: 1px solid var(--graphite-line);
-  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 0.9rem;
+  padding: 0.5rem 1rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  z-index: 10;
 }
-header h1 {
-  margin: 0; font-size: 1.02rem; font-weight: 620; letter-spacing: 0.015em;
+.brand { display: flex; align-items: center; gap: 0.6rem; }
+/* The logo ships on a white plate; multiply drops it onto the header without
+   the asset having to be re-cut with an alpha channel. */
+.brand img { height: 62px; width: auto; display: block; mix-blend-mode: multiply; }
+.brand .sub {
+  font-size: 0.7rem; color: var(--ink-faint); letter-spacing: 0.02em;
+  border-left: 1px solid var(--line-strong); padding-left: 0.6rem;
 }
-header h1 span { color: var(--gold); }
 .spacer { flex: 1; }
 
-select, button {
+select {
   font: inherit;
-  color: var(--ink);
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid var(--graphite-line);
+  color: var(--ink-2);
+  background-color: var(--surface);
+  border: 1px solid var(--line-strong);
   border-radius: 8px;
-  padding: 0.32rem 0.62rem;
+  padding: 0.34rem 2rem 0.34rem 0.65rem;
+  max-width: 22rem;
   cursor: pointer;
-  transition: border-color 0.18s, background 0.18s, color 0.18s;
+  appearance: none;
+  /* Inline SVG chevron — no extra asset, and `img-src data:` already allows it. */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  transition: border-color var(--t), box-shadow var(--t);
 }
-select:hover, button:hover { border-color: var(--gold); }
-button.on { background: var(--gold); color: #241a02; border-color: var(--gold); font-weight: 600; }
+select:hover { border-color: var(--accent); }
 
-/* Live indicator: a dot that is green when the stream is up, and a ring that
- * spins only while the agent is actually working. A dashboard that always looks
- * busy tells you nothing. */
-.live { display: flex; align-items: center; gap: 0.45rem; font-size: 0.82rem; color: var(--ink-dim); }
-.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--pruned); transition: background 0.3s; }
-.dot.up { background: var(--verified); box-shadow: 0 0 0 0 rgba(47, 191, 155, 0.7); animation: pulse 2.2s infinite; }
-@keyframes pulse {
-  70% { box-shadow: 0 0 0 7px rgba(47, 191, 155, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(47, 191, 155, 0); }
+.working, .live {
+  display: flex; align-items: center; gap: 0.4rem;
+  font-size: 0.78rem; color: var(--ink-dim);
 }
-.working { display: flex; align-items: center; gap: 0.4rem; color: var(--gold-soft); font-size: 0.82rem; }
+.working {
+  background: var(--work-bg); color: var(--work-ink);
+  border: 1px solid var(--work-line);
+  border-radius: 999px; padding: 0.16rem 0.6rem;
+}
 .spin {
-  width: 12px; height: 12px; border-radius: 50%;
-  border: 2px solid rgba(201, 162, 39, 0.28); border-top-color: var(--gold);
-  animation: spin 0.85s linear infinite;
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid var(--work-line); border-top-color: var(--work-ink);
+  animation: spin 0.9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ink-faint); transition: background var(--t), box-shadow var(--t);
+}
+.dot.up { background: #10b981; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16); }
 
-/* ---- layout ---- */
+/* ---- layout ------------------------------------------------------------- */
 
 main { flex: 1; display: flex; min-height: 0; }
 
 aside {
-  width: 24.5rem; flex: 0 0 auto; display: flex; flex-direction: column;
-  background: rgba(35, 38, 47, 0.86);
-  border-right: 1px solid var(--graphite-line);
-  min-height: 0; position: relative;
+  width: 24.5rem; flex: 0 0 auto;
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  position: relative;
 }
-/* The handle sits astride the border so it is grabbable without stealing
-   clicks from the panel's own scrollbar. */
+/* Astride the border, so it is grabbable without stealing the panel's scrollbar. */
 .resizer {
   position: absolute; top: 0; right: -3px; width: 7px; height: 100%;
   cursor: col-resize; z-index: 5; touch-action: none;
+  transition: background var(--t);
 }
-.resizer:hover, aside.resizing .resizer { background: rgba(201, 162, 39, 0.45); }
-/* A drag that crosses the graph must not select text on the way. */
+.resizer:hover, aside.resizing .resizer { background: var(--accent-soft); }
 aside.resizing, aside.resizing * { user-select: none; }
-.tabs { display: flex; border-bottom: 1px solid var(--graphite-line); }
+
+.tabs { display: flex; border-bottom: 1px solid var(--line); padding: 0 0.5rem; gap: 0.25rem; }
 .tabs button {
   flex: 1; border: 0; border-radius: 0; background: transparent;
-  padding: 0.6rem 0.4rem; color: var(--ink-dim); border-bottom: 2px solid transparent;
+  padding: 0.65rem 0.4rem; color: var(--ink-dim);
+  border-bottom: 2px solid transparent; font-size: 0.86rem;
 }
-.tabs button.on { background: transparent; color: var(--gold); border-bottom-color: var(--gold); }
-.panel { flex: 1; overflow: auto; padding: 0.9rem 1rem; min-height: 0; }
+.tabs button.on { color: var(--navy); border-bottom-color: var(--accent); font-weight: 600; }
+.tabs button:hover:not(.on) { color: var(--ink); border-color: transparent; }
 
-.graph-wrap { flex: 1; position: relative; min-width: 0; }
+.panel {
+  flex: 1; overflow-y: auto; overflow-x: hidden;
+  padding: 0.9rem 1rem 1.5rem; min-height: 0;
+  scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent;
+}
+.panel::-webkit-scrollbar { width: 10px; height: 10px; }
+.panel::-webkit-scrollbar-track { background: transparent; }
+.panel::-webkit-scrollbar-thumb {
+  background: var(--line-strong); border-radius: 999px;
+  border: 3px solid var(--surface);
+}
+.panel::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
+
+h2 {
+  font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--ink-faint); font-weight: 600; margin: 0 0 0.6rem;
+}
+
+/* ---- node card ---------------------------------------------------------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  margin-bottom: 0.9rem;
+  transition: box-shadow var(--t), border-color var(--t);
+}
+/* The id gets its own monospaced bar. Set in the prose face it read as part of
+   the sentence under it, which is exactly what an identifier is not. */
+.card-id {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+  font-family: var(--mono); font-size: 0.76rem;
+  color: var(--ink-dim);
+  background: var(--open-bg);
+  border-bottom: 1px solid var(--line);
+  padding: 0.42rem 0.7rem;
+}
+.card-body { padding: 0.75rem 0.8rem; }
+.card-body .claim { margin: 0 0 0.7rem; color: var(--ink); }
+.card-stamps {
+  display: flex; flex-wrap: wrap; gap: 0.15rem 0.9rem;
+  font-size: 0.72rem; color: var(--ink-faint);
+  border-top: 1px dashed var(--line);
+  padding: 0.45rem 0.8rem;
+}
+.card-stamps b { font-weight: 500; color: var(--ink-dim); }
+
+.pill {
+  display: inline-block; font-size: 0.68rem; font-weight: 600;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 0.13rem 0.48rem; border-radius: 999px; white-space: nowrap;
+  border: 1px solid var(--open-line); background: var(--open-bg); color: var(--open-ink);
+  transition: background var(--t), border-color var(--t), color var(--t);
+}
+.pill.VERIFIED       { background: var(--ok-bg);    border-color: var(--ok-line);    color: var(--ok-ink); }
+.pill.INVALIDATED    { background: var(--bad-bg);   border-color: var(--bad-line);   color: var(--bad-ink); }
+.pill.PRUNED         { background: var(--cut-bg);   border-color: var(--cut-line);   color: var(--cut-ink); }
+.pill.IN_PROGRESS    { background: var(--work-bg);  border-color: var(--work-line);  color: var(--work-ink); }
+.pill.EXHAUSTED      { background: var(--spent-bg); border-color: var(--spent-line); color: var(--spent-ink); }
+.pill.NEEDS_REVISION { background: var(--doubt-bg); border-color: var(--doubt-line); color: var(--doubt-ink); }
+.pill.BLOCKED        { background: var(--cut-bg);   border-color: var(--cut-line);   color: var(--cut-ink); }
+
+/* A cut branch needs more than grey: grey alone reads as "not started yet". */
+.card.PRUNED .card-body {
+  background-image: repeating-linear-gradient(
+    45deg, transparent, transparent 7px,
+    rgba(100, 116, 139, 0.06) 7px, rgba(100, 116, 139, 0.06) 14px);
+}
+.card.goal .card-id { background: var(--navy); color: #dbeafe; border-bottom-color: var(--navy); }
+
+table.metrics { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+table.metrics td { padding: 0.3rem 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.metrics tr:last-child td { border-bottom: 0; }
+table.metrics td:first-child { color: var(--ink-dim); }
+table.metrics td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.st { font-size: 0.72rem; color: var(--ink-faint); }
+
+/* ---- scheduling controls ------------------------------------------------ */
+
+/* These write to the belief state, so they are labelled and explained rather
+   than left as three bare verbs in a row — which is how they read before, and
+   nobody could tell what any of them would do. */
+.sched { border-top: 1px solid var(--line); margin-top: 0.9rem; padding-top: 0.8rem; }
+.sched p { margin: 0 0 0.6rem; font-size: 0.76rem; color: var(--ink-dim); }
+.sched-row { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.sched-row button { font-size: 0.8rem; flex: 1 1 7rem; }
+.sched-row button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--navy); }
+.sched-state {
+  display: block; margin-top: 0.6rem; font-size: 0.74rem; color: var(--ink-dim);
+  background: var(--open-bg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 0.4rem 0.55rem;
+}
+
+/* ---- frontier candidates ------------------------------------------------ */
+
+.cand {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 0.6rem 0.7rem; margin-bottom: 0.55rem; cursor: pointer;
+  transition: box-shadow var(--t), border-color var(--t);
+}
+.cand:hover { box-shadow: var(--shadow-lift); border-color: var(--line-strong); }
+.cand .row { display: flex; gap: 0.55rem; align-items: baseline; }
+.cand .p {
+  font-family: var(--mono); font-size: 0.8rem; font-weight: 600;
+  color: var(--accent); min-width: 2.6rem; font-variant-numeric: tabular-nums;
+}
+.cand .bar {
+  height: 4px; background: var(--open-bg); border-radius: 999px;
+  margin-top: 0.45rem; overflow: hidden;
+}
+.cand .bar i {
+  display: block; height: 100%; background: var(--accent);
+  border-radius: 999px; transition: width var(--t);
+}
+
+.empty { text-align: center; color: var(--ink-dim); font-size: 0.86rem; padding: 1.4rem 1rem; }
+.empty h2 { color: var(--ink-2); letter-spacing: 0; font-size: 0.95rem; text-transform: none; }
+.empty code {
+  display: inline-block; font-family: var(--mono); font-size: 0.72rem;
+  background: var(--open-bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 0.4rem 0.55rem; color: var(--ink-2);
+  max-width: 100%; overflow-wrap: anywhere; text-align: left;
+}
+.warn {
+  background: var(--spent-bg); border: 1px solid var(--spent-line); color: var(--spent-ink);
+  border-radius: 8px; padding: 0.5rem 0.65rem; font-size: 0.8rem; margin-bottom: 0.8rem;
+}
+.notice {
+  background: var(--accent-soft); border: 1px solid #bae6fd; color: var(--navy);
+  border-radius: var(--radius); padding: 0.7rem 0.8rem; font-size: 0.84rem;
+  text-align: left; max-width: 30rem; margin: 0 auto;
+}
+.notice h2 { color: var(--navy); text-transform: none; letter-spacing: 0; font-size: 0.92rem; }
+
+/* ---- markdown ----------------------------------------------------------- */
+
+.md { font-size: 0.88rem; color: var(--ink-2); }
+.md h1 { font-size: 1rem; color: var(--ink); margin: 0 0 0.6rem; letter-spacing: -0.01em; }
+.md h2 {
+  font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--ink-faint); margin: 1.2rem 0 0.5rem;
+  border-top: 1px solid var(--line); padding-top: 0.8rem;
+}
+.md p { margin: 0 0 0.6rem; }
+.md ul { margin: 0 0 0.7rem; padding-left: 1.1rem; }
+.md li { margin-bottom: 0.3rem; }
+.md li::marker { color: var(--ink-faint); }
+.md strong { color: var(--ink); font-weight: 600; }
+.md em { color: var(--ink-faint); font-style: normal; font-size: 0.9em; }
+.md code {
+  font-family: var(--mono); font-size: 0.82em;
+  background: var(--open-bg); border: 1px solid var(--line);
+  border-radius: 5px; padding: 0.05rem 0.3rem;
+}
+.md blockquote {
+  margin: 0 0 0.7rem; padding: 0.5rem 0.7rem;
+  background: var(--accent-soft); border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0; color: var(--navy); font-size: 0.84rem;
+}
+.md blockquote p:last-child { margin: 0; }
+
+/* ---- graph -------------------------------------------------------------- */
+
+.graph-wrap { flex: 1; position: relative; min-width: 0; background: var(--canvas); }
 svg.graph { width: 100%; height: 100%; display: block; cursor: grab; }
 svg.graph:active { cursor: grabbing; }
 
-.zoom-controls {
-  position: absolute; right: 0.9rem; bottom: 0.9rem;
-  display: flex; flex-direction: column; gap: 0.35rem; z-index: 4;
+/* A CSS custom property cannot resolve inside an SVG presentation attribute, so
+   the grid is stroked from a rule rather than from `stroke="var(--grid)"`. */
+#grid path { stroke: var(--grid); }
+
+.edge {
+  stroke: #b6c2d2; stroke-width: 1.4; fill: none;
+  transition: stroke var(--t), opacity var(--t);
 }
-.zoom-controls button {
-  background: transparent; border: 1px solid var(--graphite-line);
-  color: var(--ink-dim); min-width: 2rem; padding: 0.3rem 0.45rem;
-  font-size: 0.85rem; line-height: 1; backdrop-filter: blur(2px);
-}
-.zoom-controls button:hover { color: var(--gold); border-color: var(--gold); }
+.edge.ALTERNATIVE { stroke-dasharray: 3 4; stroke: #cbd5e1; }
+.edge.REFINEMENT { stroke-width: 2.2; stroke: #a5b4fc; }
+.edge.dead { stroke: #e6ebf1; }
 
-footer {
-  flex: 0 0 auto; padding: 0.6rem 1.1rem;
-  background: rgba(35, 38, 47, 0.9);
-  border-top: 1px solid var(--graphite-line);
-  display: flex; align-items: center; gap: 0.9rem;
-}
-footer input[type=range] { flex: 1; accent-color: var(--gold); }
-.tick-label { font-variant-numeric: tabular-nums; color: var(--ink-dim); font-size: 0.8rem; min-width: 12rem; }
-
-/* ---- graph ---- */
-
-.edge { stroke: var(--graphite-line); stroke-width: 1.4; fill: none; pointer-events: none; transition: stroke 0.6s ease, opacity 0.6s ease; }
-.edge.dead { stroke: var(--invalidated); opacity: 0.5; }
-
-/* Nodes are drawn after edges so they sit on top: clicking a node never has to
- * compete with a line crossing it. */
 .node { cursor: pointer; }
-.node circle { transition: fill 0.6s ease, opacity 0.6s ease, r 0.35s ease, stroke 0.25s ease; }
-.node text { font-size: 9.5px; fill: var(--ink-dim); pointer-events: none; }
-.node.sel circle { stroke: var(--gold); stroke-width: 2.4; }
+.node circle {
+  stroke-width: 1.5;
+  transition: fill var(--t), stroke var(--t), opacity var(--t);
+}
+.node text {
+  font-family: var(--mono); font-size: 9.5px; fill: var(--ink-dim);
+  pointer-events: none; transition: fill var(--t);
+}
+.node:hover circle { stroke: var(--accent); }
+.node.sel circle { stroke: var(--navy); stroke-width: 2.5; }
+.node.sel text { fill: var(--navy); font-weight: 600; }
 
-.s-UNTESTED { fill: var(--untested); }
-.s-IN_PROGRESS { fill: var(--inprogress); }
-.s-VERIFIED { fill: var(--verified); }
-.s-EXHAUSTED { fill: var(--exhausted); }
-.s-INVALIDATED { fill: var(--invalidated); }
-.s-NEEDS_REVISION { fill: var(--gold); }
-.s-BLOCKED { fill: var(--pruned); }
-/* Pruned does not vanish. The whole point being demonstrated is that the branch
- * was considered and cut, so it desaturates and stays on the canvas. */
-.s-PRUNED { fill: var(--pruned); opacity: 0.32; }
+.s-UNTESTED       { fill: #ffffff;           stroke: #cbd5e1; }
+.s-IN_PROGRESS    { fill: #bfdbfe;           stroke: var(--work-ink); }
+.s-VERIFIED       { fill: #6ee7b7;           stroke: var(--ok-ink); }
+.s-INVALIDATED    { fill: #fda4af;           stroke: var(--bad-ink); }
+.s-EXHAUSTED      { fill: var(--spent-line); stroke: var(--spent-ink); }
+.s-NEEDS_REVISION { fill: var(--doubt-line); stroke: var(--doubt-ink); }
+.s-PRUNED         { fill: var(--cut-bg);     stroke: var(--cut-line); }
+.s-BLOCKED        { fill: var(--cut-bg);     stroke: var(--cut-line); }
+.node.goal circle { fill: var(--navy); stroke: var(--accent); stroke-width: 2.5; }
 
-.node.goal circle { stroke: var(--gold); stroke-width: 2; }
-.node.working circle { animation: throb 1.5s ease-in-out infinite; }
-@keyframes throb { 50% { opacity: 0.45; r: 11; } }
+.node.working circle { animation: throb 1.8s ease-in-out infinite; }
+@keyframes throb {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
 
-/* A node the agent has just created fades in rather than appearing. Seeing the
- * graph grow is the entire pitch. */
-.ghost-enter-from { opacity: 0; }
-.ghost-enter-active { transition: opacity 0.55s ease; }
-.ghost-leave-active { transition: opacity 0.4s ease; }
-.ghost-leave-to { opacity: 0; }
+/* Nodes entering and leaving a scoped view fade rather than pop, so changing the
+   goal filter reads as a change of view instead of a redraw. */
+.ghost-enter-active, .ghost-leave-active { transition: opacity var(--t), transform var(--t); }
+.ghost-enter-from, .ghost-leave-to { opacity: 0; transform: scale(0.7); }
+.ghost-leave-active { position: absolute; }
 
 .tip {
   position: absolute; pointer-events: none; z-index: 20;
-  max-width: 21rem; padding: 0.5rem 0.65rem;
-  background: rgba(20, 22, 28, 0.96); border: 1px solid var(--graphite-line);
-  border-radius: 9px; box-shadow: var(--shadow); font-size: 0.82rem;
+  max-width: 21rem;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow-lift);
+  padding: 0.55rem 0.7rem; font-size: 0.82rem;
 }
-.tip b { color: var(--gold); }
+.tip b { font-family: var(--mono); font-size: 0.78rem; color: var(--ink); }
+.tip .head { display: flex; align-items: center; gap: 0.45rem; margin-bottom: 0.3rem; }
 
-/* ---- panel bits ---- */
+.zoom-controls {
+  position: absolute; right: 1rem; bottom: 1rem;
+  display: flex; flex-direction: column; gap: 0.3rem; z-index: 4;
+}
+.zoom-controls button {
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(4px);
+  box-shadow: var(--shadow);
+  min-width: 2rem; padding: 0.32rem 0.45rem;
+  font-size: 0.85rem; line-height: 1;
+}
 
-h2 { margin: 0 0 0.55rem; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-dim); }
+/* Sits over the canvas rather than replacing it: the diagnosis matters and so
+   does the tree it is about. */
+.banner {
+  position: absolute; top: 0.9rem; left: 0.9rem; right: 4.5rem; z-index: 6;
+  display: flex; align-items: flex-start; gap: 0.6rem;
+  background: var(--spent-bg); border: 1px solid var(--spent-line);
+  color: #92400e; border-radius: var(--radius);
+  box-shadow: var(--shadow-lift);
+  padding: 0.6rem 0.75rem; font-size: 0.82rem; line-height: 1.5;
+}
+.banner b { color: #78350f; }
+.banner code {
+  font-family: var(--mono); font-size: 0.94em;
+  background: rgba(180, 83, 9, 0.09); border-radius: 5px; padding: 0.05rem 0.3rem;
+}
+.banner button {
+  flex: 0 0 auto; border: 0; background: none; color: var(--spent-ink);
+  font-size: 1.05rem; line-height: 1; padding: 0 0.2rem;
+}
 
-table.metrics { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-table.metrics td { padding: 0.28rem 0.2rem; border-bottom: 1px solid rgba(255, 255, 255, 0.055); }
-table.metrics td:last-child { text-align: right; font-variant-numeric: tabular-nums; color: var(--gold-soft); }
+/* ---- timeline ----------------------------------------------------------- */
 
-.cand { padding: 0.55rem 0.6rem; border: 1px solid var(--graphite-line); border-radius: 9px; margin-bottom: 0.5rem; background: rgba(0, 0, 0, 0.2); }
-.cand .row { display: flex; align-items: baseline; gap: 0.5rem; }
-.cand .p { color: var(--gold); font-variant-numeric: tabular-nums; font-weight: 620; }
-.cand .st { font-size: 0.74rem; color: var(--ink-dim); }
-.bar { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.09); margin-top: 0.4rem; overflow: hidden; }
-.bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--gold), var(--gold-soft)); transition: width 0.5s ease; }
+footer {
+  display: flex; align-items: center; gap: 0.8rem;
+  padding: 0.45rem 1rem;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  z-index: 10;
+}
+footer button { padding: 0.3rem 0.6rem; min-width: 2.1rem; }
 
-.pill { display: inline-block; padding: 0.06rem 0.4rem; border-radius: 999px; font-size: 0.7rem; font-weight: 600; }
-.pill.VERIFIED { background: rgba(47, 191, 155, 0.18); color: var(--verified); }
-.pill.INVALIDATED { background: rgba(229, 72, 77, 0.18); color: var(--invalidated); }
-.pill.EXHAUSTED { background: rgba(224, 140, 60, 0.18); color: var(--exhausted); }
-.pill.PRUNED { background: rgba(107, 111, 125, 0.2); color: var(--pruned); }
-.pill.UNTESTED, .pill.IN_PROGRESS { background: rgba(139, 144, 163, 0.18); color: var(--untested); }
-
-.warn { background: rgba(229, 72, 77, 0.12); border: 1px solid rgba(229, 72, 77, 0.4); border-radius: 9px; padding: 0.6rem 0.7rem; margin-bottom: 0.8rem; font-size: 0.82rem; }
-.empty { text-align: center; color: var(--ink-dim); padding: 2.4rem 1rem; }
-.empty code { background: rgba(0, 0, 0, 0.35); padding: 0.15rem 0.4rem; border-radius: 5px; color: var(--gold); }
-
-/* ---- markdown ----
- * The learning path is meant to be pasted into a report, so it is typeset
- * rather than dumped. Reused wherever the dashboard renders model output. */
-
-.md { font-size: 0.88rem; line-height: 1.68; }
-.md h1, .md h2, .md h3 { color: var(--ink); text-transform: none; letter-spacing: 0; margin: 1.1rem 0 0.45rem; }
-.md h1 { font-size: 1.06rem; } .md h2 { font-size: 0.98rem; } .md h3 { font-size: 0.9rem; }
-.md h1:first-child, .md h2:first-child { margin-top: 0; }
-.md p { margin: 0.5rem 0; }
-.md ul, .md ol { padding-left: 1.15rem; margin: 0.45rem 0; }
-.md li { margin: 0.2rem 0; }
-.md code { background: rgba(0, 0, 0, 0.38); padding: 0.1rem 0.34rem; border-radius: 5px; font-size: 0.85em; color: var(--gold-soft); }
-.md pre { background: rgba(0, 0, 0, 0.42); border: 1px solid var(--graphite-line); border-radius: 9px; padding: 0.7rem 0.8rem; overflow-x: auto; }
-.md pre code { background: none; padding: 0; color: var(--ink); }
-.md blockquote { margin: 0.6rem 0; padding: 0.35rem 0.8rem; border-left: 3px solid var(--burgundy-lift); color: var(--ink-dim); }
-.md table { border-collapse: collapse; width: 100%; margin: 0.6rem 0; font-size: 0.83rem; }
-.md th, .md td { border: 1px solid var(--graphite-line); padding: 0.32rem 0.5rem; text-align: left; }
-.md th { background: rgba(0, 0, 0, 0.3); color: var(--gold-soft); }
-.md a { color: var(--gold); }
-.md hr { border: 0; border-top: 1px solid var(--graphite-line); margin: 1rem 0; }
-.md strong { color: var(--ink); }
-
-@media (max-width: 900px) {
-  main { flex-direction: column; }
-  aside { width: 100%; max-height: 44vh; border-right: 0; border-bottom: 1px solid var(--graphite-line); }
+/* An activity histogram the handle rides, rather than a form slider. The shape
+   of a run is information — where the bursts were, where it stalled — and a
+   featureless track threw all of it away. */
+.timebar {
+  position: relative; flex: 1; height: 32px; min-width: 0;
+  display: flex; align-items: flex-end; gap: 1px;
+  padding-bottom: 4px; cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+.timebar .bin {
+  flex: 1 1 0; min-width: 2px; min-height: 2px; border-radius: 2px 2px 0 0;
+  background: var(--open-line);
+  transition: background var(--t), height var(--t);
+}
+.timebar .bin.past { background: #a5b4fc; }
+.timebar .bin.here { background: var(--accent); }
+.timebar input[type="range"] {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  margin: 0; opacity: 0; cursor: pointer;
+}
+.timebar .cursor {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  background: var(--navy); pointer-events: none;
+  transition: left var(--t);
+}
+.timebar .cursor::after {
+  content: ""; position: absolute; top: -3px; left: -3px;
+  width: 8px; height: 8px; border-radius: 50%; background: var(--navy);
+}
+.tick-label {
+  font-size: 0.76rem; color: var(--ink-dim); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }

@@ -73,28 +73,39 @@ def _load(seed: int) -> dict:
     return json.loads((LANDSCAPE_DIR / f"landscape_seed_{seed}.json").read_text(encoding="utf-8"))
 
 
-def solve_seed(seed: int, rng_seed: int = 7) -> SelfPlayResult:
+def solve_seed(seed: int, rng_seed: int = 7, omit_winner_on: str | None = None) -> SelfPlayResult:
     """Drive one episode with a caller that does exactly what it is told.
 
     The caller has no strategy of its own on purpose. Every decision — what to
     probe, at what depth, what to compose — comes from the navigator, so the
     result measures the engine and nothing else.
+
+    ``omit_winner_on`` leaves the winning value off one axis's declared
+    candidates, which is the only way this landscape can produce a question that
+    genuinely has no answer: every axis carries its winner by construction, so a
+    fully-declared question always confirms. Under-declaring is not a contrived
+    case — it is an agent thinking of three values where there were five — and it
+    is the situation the dead-question rule exists for.
     """
     land = _load(seed)
     with tempfile.TemporaryDirectory() as tmp:
         engine = HypoTreeEngine(Path(tmp) / "state.db", rng_seed=rng_seed, project_path=Path(tmp))
         try:
-            return _drive(engine, land, seed)
+            return _drive(engine, land, seed, omit_winner_on)
         finally:
             engine.close()
 
 
-def _drive(engine: HypoTreeEngine, land: dict, seed: int) -> SelfPlayResult:
+def _drive(
+    engine: HypoTreeEngine, land: dict, seed: int, omit_winner_on: str | None = None
+) -> SelfPlayResult:
+    withheld = land["winning_values"][omit_winner_on] if omit_winner_on else None
     engine.create_hypotheses(
         [
             {"statement": f"{axis}={value}", "node_id": f"{axis}_{value}", "exclusion_group": axis}
             for axis in land["axes"]
             for value in land["axis_values"][axis]
+            if not (axis == omit_winner_on and value == withheld)
         ]
     )
     reference = int(land["reference_strategy_probes"])

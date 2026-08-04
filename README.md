@@ -1,12 +1,18 @@
-# hypotree — Memory That Forgets
+<p align="center">
+  <img src="src/hypotree/dashboard/static/logo.png" alt="hypotree" width="380">
+</p>
 
-[![CI](https://github.com/tygryso/hypotree/actions/workflows/ci.yml/badge.svg)](https://github.com/tygryso/hypotree/actions/workflows/ci.yml)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg)](CHANGELOG.md)
-[![Tests: 723](https://img.shields.io/badge/tests-723-brightgreen.svg)](tests/)
-[![Version: 0.4.0](https://img.shields.io/badge/version-0.4.0-blue.svg)](pyproject.toml)
-[![PyPI](https://img.shields.io/pypi/v/hypotree.svg)](https://pypi.org/project/hypotree/)
+<h1 align="center">Memory That Forgets</h1>
+
+<p align="center">
+<a href="https://github.com/tygryso/hypotree/actions/workflows/ci.yml"><img src="https://github.com/tygryso/hypotree/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+<a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+<a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg" alt="Changelog"></a>
+<a href="tests/"><img src="https://img.shields.io/badge/tests-773-brightgreen.svg" alt="Tests: 773"></a>
+<a href="pyproject.toml"><img src="https://img.shields.io/badge/version-0.4.0-blue.svg" alt="Version: 0.4.0"></a>
+<a href="https://pypi.org/project/hypotree/"><img src="https://img.shields.io/pypi/v/hypotree.svg" alt="PyPI"></a>
+</p>
 
 A persistent, self-revising **hypothesis DAG** for agentic R&D — exposed as an [MCP server](https://modelcontextprotocol.io/).
 
@@ -20,6 +26,8 @@ Current agent memory is passive: vector stores and scratchpads accumulate facts 
 - **Cascading prune** — invalidating a parent hypothesis instantly transitions its entire subtree to `PRUNED`. No tokens spent on dead branches.
 - **Exclusion-group inference** — confirming one member of a mutually exclusive group retires the rest as `EXHAUSTED` without probing them.
 - **Deduction by elimination** — last-man-standing: when all but one alternative in an exclusion group are refuted, the survivor is `VERIFIED` without a probe.
+- **Backward pruning over a complete question** — the dual of the above: when *every* candidate answer to a question is ruled out on its own evidence, nothing that assumes one of them can be satisfied, so those branches are `PRUNED` and the navigator names the question that ran out.
+- **The closed-world assumption is declared, not assumed.** Both inferences above are sound only if the listed answers are *all* the answers. `exclusion_closed=False` says they are not — "which learning rate?" always admits another — and the engine then withholds both. And when a deduction it *did* draw turns out to rest on an incomplete list, it is **withdrawn** rather than defended: the node goes back on the frontier and one probe settles which premise was wrong.
 - **Thompson Sampling navigation** — Beta-distribution sampling over the open frontier, giving bounded worst-case regret (no catastrophic lock-in).
 - **Conflict resolution via differential ablation** — when an integration test fails but every component passes alone, the engine rebuilds the failing combination one swap at a time to pinpoint the culprit.
 - **A derivation trail, not just a state** — `generate_learning_path` narrates what was settled, in order, separating what an experiment paid for from what the engine inferred for free, and calling out beliefs that were later withdrawn.
@@ -88,6 +96,9 @@ create_hypotheses(hypotheses=[
     {"node_id": "catalyst_A", "statement": "Pd/C catalyst works", "exclusion_group": "catalyst"},
     {"node_id": "catalyst_B", "statement": "Pt catalyst works",   "exclusion_group": "catalyst"},
     {"node_id": "catalyst_C", "statement": "Ni catalyst works",   "exclusion_group": "catalyst"},
+    # Enumerable question → closed by default, so eliminating two confirms the third.
+    # For "which learning rate?" pass exclusion_closed=False: there is always another,
+    # and the engine then refuses to deduce a survivor it cannot justify.
     {"node_id": "yield_target", "statement": "reach 90% yield",
      "is_goal": True, "target_metric": 0.9, "parent_ids": ["catalyst_A"]},
 ])
@@ -113,6 +124,49 @@ generate_learning_path()
 # → markdown briefing + counters:
 #   probes_spent = 2, conclusions = 3, conclusions_without_a_probe = 1
 ```
+
+---
+
+## Watch it think
+
+A belief state that revises itself is hard to appreciate from a status column. **The dashboard runs by default**, beside the MCP server, so the graph is already there the first time you look for it:
+
+```bash
+hypotree                        # MCP server + dashboard on 127.0.0.1:7331
+hypotree --dashboard-port 8080  # start probing from a port you choose
+hypotree --no-dashboard         # MCP server only, no socket opened
+hypotree --no-mcp               # dashboard alone, against an existing belief state
+```
+
+It binds `127.0.0.1` only and mints a session token at startup; the URL, token included, goes to stderr (stdout is the JSON-RPC channel). Ask the agent for it instead — `get_workspace_info` returns `dashboard_url`, and so does the `hypotree://dashboard` resource. If no port in the range is free the MCP server still starts and says so: a viewer must never be able to take the server down.
+
+`--no-mcp` opens the database read-only, so it is safe to point at a workspace an agent is actively writing — and it needs no client configured to try.
+
+What you get:
+
+- **A live graph.** Nodes are laid out server-side with `networkx` and rendered as SVG with `d3-zoom` for hardware-accelerated pan and zoom. Untested nodes glow at their real chance of being dispatched next; in-progress nodes pulse; **pruned branches desaturate instead of disappearing**, because the point being shown is that they were considered and cut.
+- **New nodes fade in.** When the agent creates a hypothesis, it arrives as a ghost and resolves — you watch the search grow without touching the page.
+- **An activity timeline.** `status_history` is bi-temporal, so any past instant is a `WHERE` clause. The bar chart is the shape of the run — where the bursts were, where it stalled — and the handle travels along it. Drag back to see what was believed then, or press play and watch the whole investigation replay.
+- **Provenance on every card.** What each belief cost: the score, the depth, the commit, the `source_ref`, when it was created and when it settled. The graph is a ledger, not a drawing.
+- **The learning path as typeset markdown**, ready to paste into a report — and it rewinds with the graph, so a rewound picture is never captioned with conclusions it has not reached.
+- **Pin and suspend.** Redirect the search without faking evidence — directives change what is *offered*, never what is believed.
+
+Everything is vendored (Vue 3, d3 micromodules, marked — 276 KB total). No CDN, no npm, no build step: it works on a plane and in an air-gapped network.
+
+The API is read-only JSON, and every `/api/*` call needs the token:
+
+| Route | What it returns |
+|-------|-----------------|
+| `GET /api/meta` | workspace identity and the goal list |
+| `GET /api/graph?goal_id=&at=` | nodes and edges with server-computed layout; `at` reconstructs any past instant |
+| `GET /api/node/<id>` | one node's evidence, provenance and status intervals |
+| `GET /api/frontier?goal_id=&k=` | the top candidates and how likely the navigator is to pick each next |
+| `GET /api/learning-path?goal_id=` | the narrative, same as the MCP tool |
+| `GET /api/timeline?goal_id=` | every status change in order |
+| `GET /api/events` | server-sent revision numbers — the client refetches what it is showing |
+| `POST /api/directive` | pin / suspend / clear (the only write, and only when an engine is attached) |
+
+`p_select` is the real thing, not a proxy: Thompson Sampling picks the argmax of one draw per candidate, so the number is how often each candidate wins that draw.
 
 ---
 
@@ -197,7 +251,9 @@ belief state in hypotree rather than in the conversation.
 - Record against the node whose statement you actually tested. A composition's
   failure filed against a premise destroys a confirmation that is still true.
 - When `get_next_targets` returns DONE, read the reason. Only `all_goals_met`
-  and `empty_frontier` mean stop; the rest are instructions.
+  and `empty_frontier` mean stop; the rest are instructions. `dead_question`
+  means one of your questions ran out of candidate answers — add the one you
+  have not thought of to the same `exclusion_group`.
 ```
 
 ---
@@ -225,7 +281,7 @@ belief state in hypotree rather than in the conversation.
 └─────────────┼───────────────────────────┘
               │
 ┌─────────────▼───────────────────────────┐
-│   SQLite-WAL (Schema v10, 9 tables)      │
+│   SQLite-WAL (Schema v10, 9 tables)     │
 │   • Bi-temporal history                 │
 │   • Belief state + evidence + conflicts │
 │   • Keyed by workspace_id               │
@@ -260,45 +316,6 @@ uv run python -m eval.runner.engine_selfplay
 The eval harness lives in [`eval/`](eval/) and includes the frozen landscape generators, the agent runner, and the gate scorer. Run artifacts are gitignored (`eval/runs/`).
 
 `eval.sh` is bash — on Windows, run it under WSL or Git Bash. The Python parts of the harness (`engine_selfplay`, `runner`, `analyse_gate`, `seed_reader`) are cross-platform and can be driven directly.
-
----
-
-## Watch it think
-
-A belief state that revises itself is hard to appreciate from a status column. Start the dashboard beside the agent and watch the graph grow, dead ends grey out, and the navigator's attention move:
-
-```bash
-hypotree --dashboard          # MCP server + dashboard, default port 7331
-hypotree --dashboard-only     # dashboard alone, against an existing belief state
-```
-
-Both bind `127.0.0.1` and mint a session token at startup; the URL, token included, is printed to stderr (stdout is the JSON-RPC channel). `--dashboard-only` starts no MCP server and opens the database read-only, so it is safe to point at a workspace an agent is actively writing — and it needs no client configured to try.
-
-What you get:
-
-- **A live graph.** Nodes are laid out server-side with `networkx` and rendered as SVG with `d3-zoom` for hardware-accelerated pan and zoom. Untested nodes glow at their real chance of being dispatched next; in-progress nodes pulse; **pruned branches desaturate instead of disappearing**, because the point being shown is that they were considered and cut.
-- **New nodes fade in.** When the agent creates a hypothesis, it arrives as a ghost and resolves — you watch the search grow without touching the page.
-- **A timeline scrubber.** `status_history` is bi-temporal, so any past instant is a `WHERE` clause. Drag back and see what was believed then, or press play and watch the whole investigation replay.
-- **Proof mode.** Overlays what each belief cost: the score, the depth, the commit, the `source_ref`. The graph is a ledger, not a drawing.
-- **The learning path as typeset markdown**, ready to paste into a report.
-- **Pin and suspend.** Redirect the search without faking evidence — directives change what is *offered*, never what is believed.
-
-Everything is vendored (Vue 3, d3 micromodules, marked — 276 KB total). No CDN, no npm, no build step: it works on a plane and in an air-gapped network.
-
-The API is read-only JSON, and every `/api/*` call needs the token:
-
-| Route | What it returns |
-|-------|-----------------|
-| `GET /api/meta` | workspace identity and the goal list |
-| `GET /api/graph?goal_id=&at=` | nodes and edges with server-computed layout; `at` reconstructs any past instant |
-| `GET /api/node/<id>` | one node's evidence, provenance and status intervals |
-| `GET /api/frontier?goal_id=&k=` | the top candidates and how likely the navigator is to pick each next |
-| `GET /api/learning-path?goal_id=` | the narrative, same as the MCP tool |
-| `GET /api/timeline?goal_id=` | every status change in order |
-| `GET /api/events` | server-sent revision numbers — the client refetches what it is showing |
-| `POST /api/directive` | pin / suspend / clear (the only write, and only when an engine is attached) |
-
-`p_select` is the real thing, not a proxy: Thompson Sampling picks the argmax of one draw per candidate, so the number is how often each candidate wins that draw.
 
 ---
 

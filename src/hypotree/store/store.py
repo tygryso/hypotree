@@ -221,6 +221,20 @@ class HypoTreeStore:
             return
 
         pending = [(v, sql) for v, sql in MIGRATIONS if _is_newer_version(v, current)]
+        if not pending and current == SCHEMA_VERSION and MIGRATIONS:
+            # The head of the chain is the version under development, and it is
+            # the only one that can gain statements *after* a database has been
+            # stamped with it. Older steps are frozen history and never move.
+            # Re-applying the head is what stops a workspace written by an
+            # earlier build of the same unreleased version from reading as
+            # corrupt — the failure is an IndexError deep in a row mapper, which
+            # is the worst possible way to learn about it.
+            #
+            # Safe because every statement in the chain is additive and applied
+            # idempotently; the alternative — a second reconciliation path
+            # alongside the chain — is what produced a `duplicate column name`
+            # collision when it was tried.
+            self._reapply(MIGRATIONS[-1][1])
         for target, statements in pending:
             # DDL is transactional in SQLite, so an interrupted upgrade rolls
             # back to the version it started from and the next open retries it.
@@ -248,6 +262,21 @@ class HypoTreeStore:
                 self._stamp(conn, SCHEMA_VERSION)
         elif not pending:
             self._record_app_version()
+
+    def _reapply(self, statements: tuple[str, ...]) -> None:
+        """Apply additive DDL that may already be present, one statement at a time.
+
+        Each in its own transaction so one already-applied statement does not
+        roll back the ones after it. Only "already exists" is swallowed —
+        anything else is a real schema problem and must surface.
+        """
+        for sql in statements:
+            try:
+                with self.transaction() as conn:
+                    conn.execute(sql)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
     def _stamp(self, conn: sqlite3.Connection, version: str) -> None:
         """Record the schema version, the release that wrote it, and when."""
@@ -318,12 +347,12 @@ class HypoTreeStore:
         conn.execute(
             """INSERT OR REPLACE INTO nodes (
                 id, statement, status, evidence_regime, is_parametric, param_config,
-                is_goal, target_metric, exclusion_group, confirmed_depth,
+                is_goal, target_metric, exclusion_group, exclusion_closed, confirmed_depth,
                 alpha, beta, evidence_count,
                 active_claim_id, claimed_at, infra_retry_count,
                 created_at, first_dispatched_at, first_evidence_at,
                 verified_at, invalidated_at, pruned_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 node.id,
                 node.statement,
@@ -334,6 +363,7 @@ class HypoTreeStore:
                 int(node.is_goal),
                 node.target_metric,
                 node.exclusion_group,
+                int(node.exclusion_closed),
                 node.confirmed_depth,
                 node.alpha,
                 node.beta,
@@ -451,6 +481,7 @@ class HypoTreeStore:
             is_goal=bool(row["is_goal"]),
             target_metric=row["target_metric"],
             exclusion_group=row["exclusion_group"],
+            exclusion_closed=bool(row["exclusion_closed"]),
             confirmed_depth=row["confirmed_depth"],
             alpha=row["alpha"],
             beta=row["beta"],

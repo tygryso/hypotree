@@ -803,6 +803,60 @@ def test_the_migration_chain_adds_every_column_the_version_introduced(tmp_path: 
         assert len(rows) == 1, "the existing edge must survive the upgrade"
         # No timestamp means "was already there", which is what a replay should show.
         assert rows[0]["created_at"] is None
+        node_columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(nodes)")}
+        assert "exclusion_closed" in node_columns
+    finally:
+        store.close()
+
+
+@pytest.mark.unit
+def test_a_database_stamped_with_the_head_version_is_repaired_not_trusted(
+    tmp_path: Path,
+) -> None:
+    """Editing an unreleased migration in place strands workspaces already stamped with it.
+
+    The chain only runs steps *newer* than the recorded version, so a file
+    written by an earlier build of the same unreleased version gets nothing —
+    and the failure surfaces as an `IndexError` deep in a row mapper, which is
+    the worst possible way to learn a column is missing.
+
+    The head of the chain is the only step that can gain statements after a
+    database has been stamped with it; every earlier step is frozen history. So
+    the head is re-applied on open, idempotently.
+    """
+    db = tmp_path / "head.db"
+    store = HypoTreeStore(db)
+    node = Node(id="n1", statement="s", exclusion_group="g")
+    store.add_node(node)
+    store.close()
+
+    conn = sqlite3.connect(db)
+    conn.execute("ALTER TABLE nodes DROP COLUMN exclusion_closed")
+    conn.commit()
+    conn.close()
+
+    store = HypoTreeStore(db)
+    try:
+        loaded = store.get_all_nodes()
+        assert [n.id for n in loaded] == ["n1"]
+        # Back-filled to closed, which is what every group written before the
+        # column already meant.
+        assert loaded[0].exclusion_closed is True
+    finally:
+        store.close()
+
+
+@pytest.mark.unit
+def test_repairing_the_head_is_a_no_op_on_an_intact_database(tmp_path: Path) -> None:
+    """Re-applying additive DDL must not disturb what is already there."""
+    db = tmp_path / "intact.db"
+    store = HypoTreeStore(db)
+    store.add_node(Node(id="n1", statement="s", exclusion_group="g", exclusion_closed=False))
+    store.close()
+
+    store = HypoTreeStore(db)
+    try:
+        assert store.get_node("n1").exclusion_closed is False
     finally:
         store.close()
 

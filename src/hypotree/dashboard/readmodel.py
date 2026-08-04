@@ -24,6 +24,7 @@ Three things are deliberately not done the obvious way:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -31,8 +32,14 @@ from typing import Any
 import numpy as np
 
 from hypotree.engine import HypoTreeEngine
+from hypotree.models.edge import EdgeType
 from hypotree.models.status import posterior_mean
 from hypotree.navigator.sampler import effective_posterior, live_group_counts
+
+# Vertical spacing between the sub-rows a wide layer wraps into, as a fraction of
+# the gap between layers. Below one, so wrapped siblings still read as one band
+# rather than as two separate depths.
+_SUB_ROW_GAP = 0.62
 
 # Draws used to estimate each frontier node's chance of being selected next.
 # The estimate's standard error is ~sqrt(p(1-p)/N); at 2000 that is under 1.2
@@ -50,6 +57,13 @@ class Snapshot:
     scope: list[str] | None
     at: str | None = None
     stats: dict[str, Any] = field(default_factory=dict)
+    # Why a goal filter cannot be satisfied, when it cannot. `"inverted"` means
+    # the work hangs *off* the goal instead of supporting it — the mistake a model
+    # makes when it reads a goal as a container — and `"unwired"` means there is
+    # no work attached at all. The fixes differ, so a single flag would leave the
+    # reader to guess which one they are looking at.
+    unwired_goal: str | None = None
+    goal_wiring: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -59,6 +73,8 @@ class Snapshot:
             "nodes": self.nodes,
             "edges": self.edges,
             "stats": self.stats,
+            "unwired_goal": self.unwired_goal,
+            "goal_wiring": self.goal_wiring,
         }
 
 
@@ -117,11 +133,25 @@ def _layer_positions(
             order[n] = i
 
     positions: dict[str, tuple[float, float]] = {}
-    for depth, row in by_layer.items():
+    # A layer of competing answers is naturally wide — five values on each of
+    # five axes puts twenty-five nodes on one line — and a drawing 25 wide by 3
+    # deep fits the viewport at a scale where nothing is legible. Wide layers
+    # wrap into sub-rows, which keeps the reading order and the top-down
+    # semantics while bringing the aspect ratio back to something a screen is
+    # shaped like. The width is derived from the graph's own size so the layout
+    # is still a pure function of the topology: same graph, same picture.
+    wrap = max(6, math.ceil(math.sqrt(len(node_ids))) * 2)
+    y = 0.0
+    for depth in sorted(by_layer):
+        row = by_layer[depth]
+        sub_rows = math.ceil(len(row) / wrap) or 1
+        width = math.ceil(len(row) / sub_rows)
         for i, node in enumerate(row):
+            col, sub = i % width, i // width
             # Centred on x=0 so a viewport can frame the graph without knowing
             # its width in advance.
-            positions[node] = (float(i) - (len(row) - 1) / 2.0, float(depth))
+            positions[node] = (float(col) - (width - 1) / 2.0, y + sub * _SUB_ROW_GAP)
+        y += 1.0 + (sub_rows - 1) * _SUB_ROW_GAP
     return positions
 
 
@@ -195,6 +225,40 @@ class ReadModel:
 
     # -- graph -----------------------------------------------------------------
 
+    def _view_scope(self, goal_id: str | None) -> set[str] | None:
+        """What to *draw* for one goal — deliberately wider than what to *select*.
+
+        The navigator's `_goal_scope` is the set of nodes that could satisfy the
+        goal: its DEPENDENCY ancestry plus the exclusion siblings that answer
+        those questions. That is the right set to dispatch from, and the wrong
+        set to draw.
+
+        Agents routinely wire a goal the other way round — `goal -> phase0 ->
+        work`, reading it as "the goal contains this work" rather than "the goal
+        depends on it". The engine cannot reach such a goal and says so, but the
+        nodes are still there and still the user's, and filtering them out left a
+        single dot on screen next to a message about wiring while a whole tree
+        hung off the node in question. A viewer that hides what you built to make
+        a point about how you built it is not making the point.
+
+        So the view walks both ways: the selection scope, plus everything
+        downstream of the goal by any edge type, plus the exclusion siblings of
+        the result. The unreachability is reported alongside the drawing instead
+        of in place of it.
+        """
+        scope = self._engine._resolve_goal_scope(goal_id)
+        if scope is None or goal_id is None:
+            return scope
+        scope = set(scope) | self._engine._graph.descendants(goal_id)
+        groups = {
+            node.exclusion_group
+            for node in (self.store.get_node(nid) for nid in scope)
+            if node is not None and node.exclusion_group
+        }
+        for group in groups:
+            scope.update(n.id for n in self.store.get_nodes_in_exclusion_group(group))
+        return scope
+
     def graph(self, goal_id: str | None = None, at: str | None = None) -> Snapshot:
         """The laid-out graph, live or reconstructed at an instant."""
         key = ("graph", self.revision(), goal_id, at)
@@ -209,7 +273,7 @@ class ReadModel:
 
     def _build_graph(self, goal_id: str | None, at: str | None) -> Snapshot:
         self._engine._sync_graph_from_store()
-        scope = self._engine._resolve_goal_scope(goal_id)
+        scope = self._view_scope(goal_id)
         nodes = [n for n in self.store.get_all_nodes() if scope is None or n.id in scope]
         historical = _parse_at(at)
 
@@ -222,6 +286,18 @@ class ReadModel:
             nodes = [n for n in nodes if n.id in status_at]
 
         directives = self.store.get_directives()
+        # When the current status was entered. The cards show it beside the
+        # creation time, because "confirmed" and "confirmed three days ago and
+        # untouched since" are different situations and the status alone cannot
+        # tell them apart. Rewound, it is the start of the interval covering that
+        # instant — the same question asked of a different present.
+        settled_at: dict[str, str] = {}
+        for row in self.store.get_all_status_history():
+            covering = (
+                _covers(row, historical) if historical is not None else row["valid_to"] is None
+            )
+            if covering:
+                settled_at[str(row["node_id"])] = str(row["valid_from"])
         node_ids = [n.id for n in nodes]
         known = set(node_ids)
         edge_rows = [
@@ -264,6 +340,8 @@ class ReadModel:
                     "evidence_count": node.evidence_count,
                     "p_select": round(p_select.get(node.id, 0.0), 4),
                     "directive": directive["mode"] if directive is not None else None,
+                    "created_at": node.created_at.isoformat() if node.created_at else None,
+                    "settled_at": settled_at.get(node.id),
                     "x": x,
                     "y": y,
                 }
@@ -272,6 +350,15 @@ class ReadModel:
         stats = {"nodes": len(out_nodes), "edges": len(edge_rows)}
         for entry in out_nodes:
             stats[entry["status"]] = int(stats.get(entry["status"], 0)) + 1
+        # The engine's own complaint, reported beside the drawing rather than in
+        # place of it: a goal wired `goal -> work` instead of `work -> goal` can
+        # never be satisfied, and its tree is still worth looking at while that
+        # is being fixed.
+        unwired = None
+        wiring = None
+        if goal_id is not None and not self._engine._graph.parents(goal_id, EdgeType.DEPENDENCY):
+            unwired = goal_id
+            wiring = "inverted" if self._engine._graph.children(goal_id) else "unwired"
         return Snapshot(
             revision=self.revision(),
             nodes=out_nodes,
@@ -279,6 +366,8 @@ class ReadModel:
             scope=sorted(scope) if scope is not None else None,
             at=at,
             stats=stats,
+            unwired_goal=unwired,
+            goal_wiring=wiring,
         )
 
     def _status_at(self, when: datetime) -> dict[str, tuple[str, str]]:
@@ -305,6 +394,7 @@ class ReadModel:
         if node is None:
             return None
         directive = self.store.get_directives().get(node_id)
+        history = self.store.get_status_history(node_id)
         return {
             "node": {
                 "id": node.id,
@@ -317,6 +407,12 @@ class ReadModel:
                 "posterior_mean": posterior_mean(node.alpha, node.beta),
                 "evidence_count": node.evidence_count,
                 "parent_ids": self.store.get_parent_ids(node.id),
+                "created_at": node.created_at.isoformat() if node.created_at else None,
+                # When the current status was entered — "confirmed" and
+                # "confirmed last week and untouched since" are different
+                # situations that the status alone cannot tell apart.
+                "settled_at": str(history[-1]["valid_from"]) if history else None,
+                "reason": str(history[-1]["reason"] or "") if history else "",
             },
             "directive": dict(directive) if directive is not None else None,
             "evidence": [
@@ -377,9 +473,14 @@ class ReadModel:
         ).model_dump(mode="json")
 
     def timeline(self, goal_id: str | None = None) -> dict[str, Any]:
-        """Every status change in order — the ticks a scrubber steps through."""
+        """Every status change in order — the ticks a scrubber steps through.
+
+        Scoped to what is *drawn*, not to what the navigator would select: the
+        scrubber moves the picture, so a tick it cannot show is a step that does
+        nothing and a node on screen whose changes are missing is a gap.
+        """
         self._engine._sync_graph_from_store()
-        scope = self._engine._resolve_goal_scope(goal_id)
+        scope = self._view_scope(goal_id)
         ticks = []
         for row in self.store.get_all_status_history():
             node_id = str(row["node_id"])

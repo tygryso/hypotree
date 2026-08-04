@@ -803,6 +803,29 @@ def test_giving_up_hands_back_the_work_it_just_reopened(engine: HypoTreeEngine) 
     assert result.node_id in {"comp_v2", "reg_v2"}
 
 
+@pytest.mark.unit
+def test_a_peek_never_gives_up_on_a_conflict(engine: HypoTreeEngine) -> None:
+    """`dry_run=True` is a peek, and a peek that abandons a narrowing is a write.
+
+    Giving up on the targeted route reopens the alternatives its members had
+    retired and marks the conflict recovered. Reached through a dry run, that
+    settled the very question the caller was only asking about — and the next
+    real call then saw a belief state a peek had moved.
+    """
+    _build_two_axis_landscape(engine)
+    engine.record_evidence("combo1", LogicalEvidence(success=0.0, depth=2))
+    for _ in range(MAX_REVIEW_DISPATCHES):
+        engine.get_next_targets(dry_run=True)
+
+    peek = engine.get_next_targets(dry_run=True)[0]
+
+    assert [n["reopened_at"] for n in engine._store.get_nogoods()] == [None]
+    assert engine._store.get_node("comp_v2").status == Status.EXHAUSTED
+    # It still says something useful — it just says it without moving anything.
+    assert peek.status == "DONE"
+    assert peek.reason == "awaiting_substitution"
+
+
 # -- the search must not declare itself over while the goal is unmet ---------
 
 
@@ -1444,7 +1467,6 @@ def test_a_goal_filter_that_hides_the_work_says_so(engine: HypoTreeEngine) -> No
     was over while a dozen untested hypotheses sat one missing edge away.
     """
     engine.create_hypothesis("goal", node_id="goal", is_goal=True, target_metric=0.75)
-    engine.create_hypothesis("wired", node_id="wired", parent_ids=["goal"])
     for i in range(3):
         engine.create_hypothesis(f"loose={i}", node_id=f"loose{i}", exclusion_group="loose")
 

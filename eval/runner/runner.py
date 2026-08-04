@@ -87,10 +87,11 @@ MAX_WINDDOWN_TURNS = 2
 # covers several states the agent is expected to act on and continue from: it is
 # holding every remaining node under an unreported lease, a conflict is waiting
 # for a diagnostic swap, every question is answered and the answers have still to
-# be composed, the graph is wired so nothing is reachable, or the goal is wired
-# to nothing and so can never be satisfied. Ending a run on any of these would
-# score ordinary mid-task progress — or a fixable modelling mistake — as a dead
-# end.
+# be composed, the graph is wired so nothing is reachable, the goal is wired to
+# nothing and so can never be satisfied, or a question has run out of candidate
+# answers and needs one the agent has not thought of yet. Ending a run on any of
+# these would score ordinary mid-task progress — or a fixable modelling mistake —
+# as a dead end.
 _CONTINUE_REASONS = frozenset(
     {
         "awaiting_evidence",
@@ -98,6 +99,7 @@ _CONTINUE_REASONS = frozenset(
         "awaiting_composition",
         "blocked_frontier",
         "unreachable_goal",
+        "dead_question",
     }
 )
 
@@ -842,7 +844,9 @@ def _record_one_result(
     # belief-revision events that a per-node status simply cannot express.
     for conflict in engine._store.get_nogoods():
         if conflict["id"] not in conflicts_before:
-            logger.log_conflict_recorded(conflict["source_node_id"], conflict["member_ids"])
+            logger.log_conflict_recorded(
+                conflict["id"], conflict["source_node_id"], conflict["member_ids"]
+            )
         if (
             conflict["resolved_at"] is not None
             and conflict["id"] not in resolved_before
@@ -1275,10 +1279,18 @@ class RunLogger:
             composed=composed,
         )
 
-    def log_conflict_recorded(self, source_node_id: str, member_ids: list[str]) -> None:
-        """A failure whose cause is indeterminate: these cannot all hold."""
+    def log_conflict_recorded(
+        self, nogood_id: int, source_node_id: str, member_ids: list[str]
+    ) -> None:
+        """A failure whose cause is indeterminate: these cannot all hold.
+
+        Carries the conflict's id so a later resolution can be matched to the
+        conflict it settles. Without it the reader had to assume one conflict was
+        open at a time, and attributed the second one's diagnosis to nothing.
+        """
         self._write(
             "conflict_recorded",
+            nogood_id=nogood_id,
             source_node_id=source_node_id,
             member_ids=member_ids,
             n_members=len(member_ids),
@@ -1424,10 +1436,6 @@ class RunLogger:
         of an effect.
         """
         self._write("agent_action", action=action, status_context=status_context, tool=tool)
-
-    def log_lease_event(self, kind: str, claim_ids: list[str], node_ids: list[str]) -> None:
-        """Record a lease renewal or a voluntary release."""
-        self._write("lease_event", kind=kind, claim_ids=claim_ids, node_ids=node_ids)
 
     def log_tool_call(self, tool_name: str, result_summary: str, ok: bool = True) -> None:
         """Record every tool invocation and whether it succeeded.

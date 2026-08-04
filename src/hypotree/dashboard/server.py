@@ -435,7 +435,13 @@ class DashboardServer:
                 try:
                     revision = await asyncio.wait_for(queue.get(), timeout=15.0)
                     frame = f"data: {json.dumps({'revision': revision})}\n\n".encode()
-                except TimeoutError:
+                except asyncio.TimeoutError:
+                    # `asyncio.TimeoutError` only became an alias of the builtin
+                    # in 3.11. Catching the builtin here meant that on 3.10 the
+                    # keepalive never fired: the stream task died on the first
+                    # quiet fifteen seconds and the page sat in a reconnect loop,
+                    # which looks exactly like a flaky network.
+                    #
                     # A comment frame. Keeps idle sockets and proxies from
                     # deciding a quiet search means a dead connection.
                     frame = b": keepalive\n\n"
