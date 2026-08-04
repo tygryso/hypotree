@@ -34,7 +34,7 @@
     </div>
     <div class="live">
       <div class="dot" :class="{up: live}"></div>
-      <span>{{ live ? 'live' : 'reconnecting' }}</span>
+      <span>{{ live ? 'connected' : 'reconnecting' }}</span>
     </div>
   </header>
 
@@ -262,8 +262,10 @@
       <input type="range" min="0" :max="lastTick" v-model.number="scrub"
              :disabled="!timeline.ticks.length" aria-label="Time travel">
     </div>
-    <span class="tick-label">{{ scrubLabel }}</span>
-    <button @click="goLive()" v-if="!atLive">Live</button>
+    <span class="timbar-right">
+      <button @click="goLive()" v-if="!atLive">Live</button>
+      <span class="tick-label">{{ scrubLabel }}</span>
+    </span>
   </footer>
 
 </div>

@@ -437,7 +437,7 @@ footer {
   border-top: 1px solid var(--line);
   z-index: 10;
 }
-footer button { padding: 0.3rem 0.6rem; min-width: 2.1rem; }
+footer button { padding: 0.3rem 0.6rem; min-width: 2.1rem; margin-left: 0.3rem; margin-right: 0.3rem; }
 
 /* An activity histogram the handle rides, rather than a form slider. The shape
    of a run is information — where the bursts were, where it stalled — and a
@@ -468,7 +468,11 @@ footer button { padding: 0.3rem 0.6rem; min-width: 2.1rem; }
   content: ""; position: absolute; top: -3px; left: -3px;
   width: 8px; height: 8px; border-radius: 50%; background: var(--navy);
 }
+.timbar-right {
+  width: 250px;
+}
 .tick-label {
   font-size: 0.76rem; color: var(--ink-dim); white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  max-width: 200px;
 }

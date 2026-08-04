@@ -35,6 +35,20 @@ Current agent memory is passive: vector stores and scratchpads accumulate facts 
 
 ---
 
+## Watch it think
+
+A belief state that revises itself is hard to appreciate from a status column. **The dashboard runs by default**, beside the MCP server, so the graph is already there the first time you look for it:
+
+<p align="center">
+  <img src="dashboard.gif" alt="hypotree" width="1024">
+</p>
+
+That is a real run. Nodes arrive as the agent creates them and glow at their actual chance of being dispatched next; confirmed answers turn green and their rivals retire without ever being probed; a refuted premise takes its subtree with it. The bar along the bottom is the run's own activity — drag it and the whole graph rewinds to what was believed at that moment, narrative included.
+
+Nothing on that page writes evidence. If a belief moved, an experiment moved it.
+
+---
+
 ## Install
 
 ```bash
@@ -127,9 +141,9 @@ generate_learning_path()
 
 ---
 
-## Watch it think
+## MCP with dashboard
 
-A belief state that revises itself is hard to appreciate from a status column. **The dashboard runs by default**, beside the MCP server, so the graph is already there the first time you look for it:
+Additionally, you can start the server with these flags:
 
 ```bash
 hypotree                        # MCP server + dashboard on 127.0.0.1:7331
@@ -174,7 +188,7 @@ The API is read-only JSON, and every `/api/*` call needs the token:
 
 | Tool | What it does |
 |------|-------------|
-| `create_hypotheses` | Create one or many nodes with `parent_ids`, `exclusion_group`, `is_goal` |
+| `create_hypotheses` | Create one or many nodes with `parent_ids`, `exclusion_group`, `exclusion_closed`, `is_goal` |
 | `get_next_targets` | Thompson Sampling — returns the next hypothesis to test, under a lease. `goal_id` narrows the search to one objective |
 | `record_evidence` | Record one result — or every result from a turn at once with `results=[…]` — and trigger write-back propagation |
 | `generate_learning_path` | What we learned, in order, and what it cost — separates conclusions an experiment paid for from ones the engine inferred free. `goal_id` narrates one objective |
@@ -211,12 +225,13 @@ The server ships three MCP **prompts**. Clients that support them (Cursor, Claud
 
 ## Resources
 
-Two MCP **resources**, pulled on demand rather than carried in context:
+Three MCP **resources**, pulled on demand rather than carried in context:
 
 | URI | What it is |
 |-----|-----------|
 | `hypotree://guide` | The full agent contract — every tool, the status lifecycle, exclusion groups, leases, confirmation depth, conflict sets, and the rules. ~23 KB, so it belongs nowhere near a system prompt |
 | `hypotree://state` | The current belief state as a narrative: what was established, how, and what it cost |
+| `hypotree://dashboard` | Where a human can watch this belief state move, token included — so the agent can answer "send me the link" without you going near a terminal |
 
 ---
 
@@ -226,7 +241,7 @@ The operating contract reaches the model through four channels. You do not have 
 
 1. **Server instructions.** MCP hands a server-level `instructions` block to the client during `initialize`, and every major client puts it in front of the model. Hypotree uses it for four rules: one hypothesis per node, mark the goal with `is_goal=True` and wire it to the work, record against the node you actually tested, and report what you were leased. Nothing to configure.
 2. **Tool descriptions.** Each tool description carries the one rule that tool is misused without — that a goal never accepts evidence, that a lease reserves a node until you report it, that confirming one member of an exclusion group retires the rest. These are the only text guaranteed to be in context at the moment a tool is chosen.
-3. **Resources.** The full guide is `hypotree://guide`. An agent that hits something surprising can read it without you pasting 23 KB into a system prompt.
+3. **Resources.** The full guide is `hypotree://guide`. An agent that hits something surprising can read it without you pasting 23 KB into a system prompt. `hypotree://dashboard` hands over the live link.
 4. **Your project rules file** — optional, and the only part you touch. If you want the agent to reach for hypotree *unprompted* on multi-day work, add the block below.
 
 ### Optional: `.cursorrules` / `AGENTS.md` / `CLAUDE.md`
@@ -244,6 +259,9 @@ belief state in hypotree rather than in the conversation.
   `parent_ids`. Progress is then derived, not asserted.
 - Competing answers to one question share an `exclusion_group`. Confirming one
   retires the rest without testing them — this is where most of the saving is.
+  If the list could always grow ("which learning rate?"), add
+  `exclusion_closed: false` so the engine does not deduce a survivor it cannot
+  justify.
 - Ask `get_next_targets` for work and record every result you were handed. A
   target is leased to you; anything you hold and never report is work nobody
   can do. Probed several things in one turn? Report them in one call with
@@ -300,7 +318,7 @@ Hypotree is validated by a **pre-registered adversarial benchmark** using *qwen3
 - **Arm F** — LLM agent with perfect-recall auto-transcript (steel-man baseline)
 - **Arm B** — LLM agent on the full hypotree DAG belief state
 
-**The moat is inferential, not mnemonic.** Arm F remembered every fact (0% duplicates) and still lost 30/0/0 because **hypotree deduced answers without spending probes**: 362 exclusion inferences, 19 deductions by elimination.
+**The moat is inferential, not mnemonic.** Arm F remembered every raw fact it ever saw — **zero** duplicate probes across the whole run — and still lost 30/0/0, because hypotree closes questions it never has to ask: **329 exclusion inferences, 37 answers deduced without a probe, 12 values eliminated by a swap that fell short**. None of those is something you can look up.
 
 
 ### Running the eval
