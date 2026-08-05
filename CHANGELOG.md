@@ -4,6 +4,11 @@ All notable changes to hypotree are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] - 2026-08-05
+
+### Fixed
+- **Align `choose_port` socket flags with `asyncio` on Windows.** On Windows, `SO_REUSEADDR` allows probing sockets to bind over active listeners, reporting occupied ports as free and causing `asyncio.create_server` to crash with `address in use`. `choose_port` now applies `SO_REUSEADDR` only on POSIX (`os.name == 'posix'`), matching `asyncio`'s standard library implementation.
+
 ## [0.4.1] - 2026-08-04
 
 ### Fixed

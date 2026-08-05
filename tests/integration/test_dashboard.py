@@ -27,7 +27,7 @@ from hypotree.dashboard.readmodel import (
     _layer_positions,
     _selection_probabilities,
 )
-from hypotree.dashboard.server import DashboardServer, choose_port
+from hypotree.dashboard.server import PORT_PROBE_RANGE, DashboardServer, choose_port
 from hypotree.engine import HypoTreeEngine
 from hypotree.models.edge import EdgeType
 from hypotree.models.evidence import LogicalEvidence
@@ -647,14 +647,75 @@ async def test_an_idle_stream_sends_a_keepalive_instead_of_dying(
 
 @pytest.mark.unit
 def test_choose_port_skips_a_taken_one() -> None:
+    """A probe that sets `SO_REUSEADDR` on Windows binds straight through a listener.
+
+    The option waives TIME_WAIT on POSIX but grants address *sharing* on Windows,
+    so the probe reported every occupied port as free and handed back one that
+    `asyncio.start_server` — which sets the option on POSIX only — then failed to
+    bind. The test held its socket the same way, so it agreed with the bug.
+    """
     import socket as _socket
 
     port = choose_port(7600)
     with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as held:
-        held.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
         held.bind(("127.0.0.1", port))
         held.listen(1)
         assert choose_port(port) != port
+    # Released, so the same port is offered again rather than skipped forever.
+    assert choose_port(port) == port
+
+
+@pytest.mark.unit
+def test_the_probe_only_requests_address_reuse_where_it_means_time_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No POSIX runner can observe the Windows bind semantics, which is why this shipped.
+
+    The option cannot be asked for on Windows and cannot be dropped on POSIX —
+    without it a restart trips over its own TIME_WAIT sockets. Both halves are
+    checked here by driving the platform switch directly.
+    """
+    import socket as _socket
+
+    from hypotree.dashboard import server as server_module
+
+    requested: list[tuple[int, int]] = []
+
+    class _Spy(_socket.socket):
+        def setsockopt(self, *args: Any) -> None:
+            requested.append((args[0], args[1]))
+            super().setsockopt(*args)
+
+    monkeypatch.setattr(server_module.socket, "socket", _Spy)
+    reuse = (_socket.SOL_SOCKET, _socket.SO_REUSEADDR)
+
+    monkeypatch.setattr(server_module, "_PROBE_REUSES_ADDRESS", False)
+    choose_port(7640)
+    assert reuse not in requested, "on Windows this binds through a live listener"
+
+    monkeypatch.setattr(server_module, "_PROBE_REUSES_ADDRESS", True)
+    choose_port(7640)
+    assert reuse in requested, "on POSIX dropping it makes a restart trip over TIME_WAIT"
+
+
+@pytest.mark.unit
+def test_choose_port_reports_what_it_tried_when_the_range_is_full() -> None:
+    """ "Address in use" with no next step is the message this exists to avoid."""
+    import socket as _socket
+
+    base = choose_port(7620)
+    held = []
+    try:
+        for offset in range(PORT_PROBE_RANGE):
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", base + offset))
+            sock.listen(1)
+            held.append(sock)
+        with pytest.raises(OSError, match=rf"no free port on 127\.0\.0\.1 in {base}\.\."):
+            choose_port(base)
+    finally:
+        for sock in held:
+            sock.close()
 
 
 # -- vendored assets and the SPA ----------------------------------------------

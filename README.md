@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/hypotree/dashboard/static/logo.png" alt="hypotree" width="380">
+  <img src="https://raw.githubusercontent.com/tygryso/hypotree/master/src/hypotree/dashboard/static/logo.png" alt="hypotree" width="380">
 </p>
 
 <h1 align="center">Memory That Forgets</h1>
@@ -7,10 +7,10 @@
 <p align="center">
 <a href="https://github.com/tygryso/hypotree/actions/workflows/ci.yml"><img src="https://github.com/tygryso/hypotree/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
-<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-<a href="CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg" alt="Changelog"></a>
-<a href="tests/"><img src="https://img.shields.io/badge/tests-773-brightgreen.svg" alt="Tests: 773"></a>
-<a href="pyproject.toml"><img src="https://img.shields.io/badge/version-0.4.1-blue.svg" alt="Version: 0.4.1"></a>
+<a href="https://github.com/tygryso/hypotree/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+<a href="https://github.com/tygryso/hypotree/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg" alt="Changelog"></a>
+<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-775-brightgreen.svg" alt="Tests: 775"></a>
+<a href="https://github.com/tygryso/hypotree/blob/master/pyproject.toml"><img src="https://img.shields.io/badge/version-0.4.2-blue.svg" alt="Version: 0.4.2"></a>
 <a href="https://pypi.org/project/hypotree/"><img src="https://img.shields.io/pypi/v/hypotree.svg" alt="PyPI"></a>
 </p>
 
@@ -40,7 +40,7 @@ Current agent memory is passive: vector stores and scratchpads accumulate facts 
 A belief state that revises itself is hard to appreciate from a status column. **The dashboard runs by default**, beside the MCP server, so the graph is already there the first time you look for it:
 
 <p align="center">
-  <img src="dashboard.gif" alt="hypotree" width="1024">
+  <img src="https://raw.githubusercontent.com/tygryso/hypotree/master/dashboard.gif" alt="hypotree" width="1024">
 </p>
 
 That is a real run. Nodes arrive as the agent creates them and glow at their actual chance of being dispatched next; confirmed answers turn green and their rivals retire without ever being probed; a refuted premise takes its subtree with it. The bar along the bottom is the run's own activity — drag it and the whole graph rewinds to what was believed at that moment, narrative included.
@@ -412,5 +412,5 @@ uv run mypy src/hypotree/
 ## Links
 
 - **GitHub:** [github.com/tygryso/hypotree](https://github.com/tygryso/hypotree)
-- **Changelog:** [`CHANGELOG.md`](CHANGELOG.md) — version history with gate results
-- **Agent guide:** [`src/hypotree/AGENT_GUIDE.md`](src/hypotree/AGENT_GUIDE.md) — the full contract, also served live as the `hypotree://guide` MCP resource
+- **Changelog:** [`CHANGELOG.md`](https://github.com/tygryso/hypotree/blob/master/CHANGELOG.md) — version history with gate results
+- **Agent guide:** [`src/hypotree/AGENT_GUIDE.md`](https://github.com/tygryso/hypotree/blob/master/src/hypotree/AGENT_GUIDE.md) — the full contract, also served live as the `hypotree://guide` MCP resource

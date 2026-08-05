@@ -29,6 +29,7 @@ import contextlib
 import json
 import secrets
 import socket
+import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,13 @@ from hypotree.dashboard.readmodel import ReadModel
 # of what was tried beats failing with "address in use" and no next step.
 DEFAULT_PORT = 7331
 PORT_PROBE_RANGE = 10
+
+# `SO_REUSEADDR` means opposite things on the two platforms. On POSIX it only
+# waives TIME_WAIT; on Windows it lets a bind succeed against a port another
+# socket is actively listening on, which would make the probe below report every
+# taken port as free. `asyncio.create_server` draws the same line, so matching it
+# keeps the probe's answer true of the bind it is predicting.
+_PROBE_REUSES_ADDRESS = sys.platform != "win32"
 
 # Hard caps on anything a client controls before it has authenticated. A request
 # line long enough to matter is an attack, not a browser.
@@ -129,7 +137,8 @@ def choose_port(preferred: int = DEFAULT_PORT, host: str = "127.0.0.1") -> int:
     tried = []
     for port in range(preferred, preferred + PORT_PROBE_RANGE):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if _PROBE_REUSES_ADDRESS:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 probe.bind((host, port))
                 return port
