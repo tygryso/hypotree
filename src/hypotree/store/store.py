@@ -677,6 +677,53 @@ class HypoTreeStore:
                 txn,
             )
 
+    def reattribute_status(self, node_id: str, reason: str, now: datetime) -> bool:
+        """Rewrite why a node holds its current status, without moving it.
+
+        ``change_status`` correctly refuses a no-op transition, because writing
+        one would open a second history interval at the instant the first closes.
+        But a node can keep its status while the *justification* for it changes:
+        a sibling retired because one answer was confirmed has to be re-attributed
+        when a second confirmation takes over. Routing that through
+        ``change_status`` silently dropped it, leaving the marker naming a node
+        that no longer confirms anything — and since retraction keys on that
+        marker, nothing could ever reopen the sibling again.
+
+        Returns False when there is no open interval to amend.
+        """
+        now_str = _dt_to_str(now)
+        txn = self._txn_id()
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE status_history SET reason=? WHERE node_id=? AND valid_to IS NULL",
+                (reason, node_id),
+            )
+            if cur.rowcount == 0:
+                return False
+            conn.execute("UPDATE nodes SET updated_at=? WHERE id=?", (now_str, node_id))
+            self._write_event(
+                conn,
+                "StatusReattributed",
+                json.dumps({"node_id": node_id, "reason": reason, "at": now_str}),
+                txn,
+            )
+        return True
+
+    def latest_context_hash_by_node(self) -> dict[str, str]:
+        """The newest ``context_hash`` per node, in one query.
+
+        Reading it per node meant one round-trip for every VERIFIED hypothesis
+        just to answer "is this still current?" — the shape of query that cost
+        41x on the dispatch path.
+        """
+        rows = self._conn.execute(
+            "SELECT e.node_id AS node_id, e.context_hash AS context_hash FROM evidence e "
+            "JOIN (SELECT node_id, MAX(id) AS newest FROM evidence GROUP BY node_id) latest "
+            "ON e.id = latest.newest "
+            "WHERE e.context_hash IS NOT NULL"
+        ).fetchall()
+        return {r["node_id"]: r["context_hash"] for r in rows}
+
     # -- posterior cache -------------------------------------------------------
 
     def update_posterior(self, node_id: str, alpha: float, beta: float) -> None:

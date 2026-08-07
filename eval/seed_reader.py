@@ -185,6 +185,7 @@ class RunLog:
     # again — counting events would inflate k, and k inflates the baseline the
     # run is being judged against.
     group_members: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
+    open_groups: set[str] = field(default_factory=set)
     done_reasons: Counter[str] = field(default_factory=Counter)
     deduced: int = 0
     # Nodes pruned because every candidate answer to a question they depend on
@@ -372,7 +373,14 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
                 if ev.get("exclusion_group"):
                     log.nodes_with_group += 1
                     log.exclusion_declared = True
-                    log.group_members[str(ev["exclusion_group"])].add(str(ev.get("node_id", "")))
+                    group = str(ev["exclusion_group"])
+                    log.group_members[group].add(str(ev.get("node_id", "")))
+                    # Openness is per-group and one member declaring it is
+                    # enough, matching the engine: it withdraws an inference, so
+                    # the cautious declaration governs. Absent on older logs,
+                    # where every group was closed because nothing else existed.
+                    if not ev.get("exclusion_closed", True):
+                        log.open_groups.add(group)
 
         elif kind == "target_selected":
             if not ev.get("node_id"):
@@ -904,18 +912,42 @@ def _section_probe_economy(logs: list[RunLog]) -> list[str]:
     ]
 
 
+def _blind_free_retirements(k: int, closed: bool) -> float:
+    """Questions a group of ``k`` answers retires for free under random ordering.
+
+    Probe candidates in ignorance until one confirms; the rest are retired by the
+    exclusion inference. With the winner uniform over the k positions that is
+    (k-1)/2 free.
+
+    A **closed** group does better without any ordering skill at all, because the
+    engine confirms the last survivor by elimination: reaching the final
+    candidate costs k-1 probes rather than k, so one more question is settled for
+    free exactly when the winner sits last. Scoring a closed group against the
+    open baseline credited chance with skill — at k=5 it compares 44% of actual
+    behaviour against a 40% baseline that describes an engine we do not ship.
+    """
+    if k < 2:
+        return float(k)
+    if not closed:
+        return (k - 1) / 2
+    return (k * k - k + 2) / (2 * k)
+
+
 def _exclusion_yield_lines(logs: list[RunLog]) -> list[str]:
     """How much of the premise search the exclusion inference paid for.
 
     Every question is settled exactly once, either by a probe or by the
     exclusion inference retiring it for free, so premise probes and exclusions
     are two halves of one fixed total. That makes the split the single lever on
-    premise cost, and it has a known baseline: probing a group of k answers in
-    ignorance costs (k+1)/2 probes and retires the remaining (k-1)/2, a yield of
-    (k-1)/2k. Matching that baseline means the ordering carries no signal;
-    beating it means something is steering. Reported because two runs differing
-    by a probe an episode differed here and nowhere else, and without the
-    baseline there was no way to tell an ordering win from a lucky draw.
+    premise cost, and it has a known baseline: what blind ordering would retire.
+    Matching that baseline means the ordering carries no signal; beating it means
+    something is steering. Reported because two runs differing by a probe an
+    episode differed here and nowhere else, and without the baseline there was no
+    way to tell an ordering win from a lucky draw.
+
+    The baseline is summed **per group** rather than computed from the mean group
+    size: it is non-linear in k, so averaging the sizes first is only correct when
+    every group is the same size.
     """
     b_logs = [log for log in logs if log.arm == "B" and log.complete]
     if not b_logs:
@@ -925,12 +957,19 @@ def _exclusion_yield_lines(logs: list[RunLog]) -> list[str]:
     settled = exclusions + premise
     if not settled:
         return []
-    sizes = [len(ids) for log in b_logs for ids in log.group_members.values() if len(ids) > 1]
-    if not sizes:
+    groups = [
+        (len(ids), name not in log.open_groups)
+        for log in b_logs
+        for name, ids in log.group_members.items()
+        if len(ids) > 1
+    ]
+    if not groups:
         return []
-    k = statistics.mean(sizes)
-    baseline = (k - 1) / (2 * k)
+    k = statistics.mean(size for size, _ in groups)
+    questions = sum(size for size, _ in groups)
+    baseline = sum(_blind_free_retirements(size, closed) for size, closed in groups) / questions
     yield_ = exclusions / settled
+    closed_share = sum(1 for _, closed in groups if closed) / len(groups)
     # A band around the baseline, not a threshold above it. The previous form
     # tested `> baseline + 0.02` against `< baseline + 0.02`, which left "at the
     # baseline" reachable only on exact float equality and reported a run
@@ -942,12 +981,13 @@ def _exclusion_yield_lines(logs: list[RunLog]) -> list[str]:
         verdict = "ordering worse than probing the answers in a random order"
     else:
         verdict = "at the baseline — the ordering is carrying no signal"
+    world = "closed" if closed_share == 1.0 else f"{_pct(closed_share)} closed"
     return [
         f"**Exclusion yield (arm B): {_pct(yield_)}** of premise questions were settled "
         f"without a probe ({exclusions} retired free, {premise} probed). With a mean group "
-        f"of {k:.1f} answers, blind ordering yields {_pct(baseline)} — so this run is "
-        f"**{verdict}**. This is the only lever on premise cost: every question is settled "
-        f"exactly once, so a probe saved here is a probe saved outright.",
+        f"of {k:.1f} answers ({world}), blind ordering already yields {_pct(baseline)} — so "
+        f"this run is **{verdict}**. This is the only lever on premise cost: every question "
+        f"is settled exactly once, so a probe saved here is a probe saved outright.",
     ]
 
 

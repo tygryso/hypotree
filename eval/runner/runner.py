@@ -1052,6 +1052,7 @@ def _execute_tool_inner(
                 created.created,
                 exclusion_group=created.node.exclusion_group,
                 composed=bool(spec.get("parent_ids")),
+                exclusion_closed=created.node.exclusion_closed,
             )
         return json.dumps([r.model_dump() for r in results], default=str)
 
@@ -1256,6 +1257,7 @@ class RunLogger:
         created: bool,
         exclusion_group: str | None = None,
         composed: bool = False,
+        exclusion_closed: bool = True,
     ) -> None:
         """Record a node creation, including whether it declared its question.
 
@@ -1269,6 +1271,12 @@ class RunLogger:
         measure how many combinations an episode built rather than how
         disciplined it was — conflict episodes read 77% against 89% purely
         because they build more of them.
+
+        ``exclusion_closed`` decides which blind baseline the exclusion yield is
+        scored against: a closed group confirms its last survivor without a
+        probe, so probing one in ignorance already retires more than an open one.
+        Without it the reader assumed the open baseline and credited a run at
+        chance with beating it.
         """
         self._write(
             "node_created",
@@ -1277,6 +1285,7 @@ class RunLogger:
             created=created,
             exclusion_group=exclusion_group,
             composed=composed,
+            exclusion_closed=exclusion_closed,
         )
 
     def log_conflict_recorded(

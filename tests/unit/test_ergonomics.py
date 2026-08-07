@@ -10,6 +10,7 @@ import pytest
 
 from hypotree.engine import HypoTreeEngine, NodeNotFoundError
 from hypotree.models.edge import EdgeType
+from hypotree.models.evidence import LogicalEvidence
 from hypotree.models.status import Status
 
 
@@ -412,3 +413,95 @@ def test_a_caller_already_at_capacity_is_handed_nothing(engine: HypoTreeEngine) 
     result = engine.record_evidence("n3", LogicalEvidence(success=1.0), count_next_targets=2)
     assert result.next_targets == []
     assert len(engine.get_active_claims()) == 2
+
+
+@pytest.mark.unit
+def test_a_pipeline_goal_left_pinned_to_its_first_stage_reports_achieved_early(
+    tmp_path: Path,
+) -> None:
+    """Forward growth requires re-pinning the goal, and the guide now says so.
+
+    A goal is met when all its DEPENDENCY parents are VERIFIED. Extending a
+    pipeline without moving the goal leaves it pinned to stage one, so it reports
+    itself achieved the moment stage one verifies while the later stages sit
+    untested — the run stops early and calls it a success. Pinned here because it
+    is silent, and because the only way to re-pin is a full node replacement.
+    """
+    engine = HypoTreeEngine(tmp_path / "pipeline.db", rng_seed=7)
+    try:
+        engine.create_hypotheses(
+            [
+                {"statement": "stage a", "node_id": "P2a"},
+                {
+                    "statement": "ship it",
+                    "node_id": "goal",
+                    "is_goal": True,
+                    "target_metric": 0.8,
+                    "parent_ids": ["P2a"],
+                },
+            ]
+        )
+        engine.create_hypotheses(
+            [{"statement": "stage b", "node_id": "P2b", "parent_ids": ["P2a"]}]
+        )
+        engine.record_evidence("P2a", LogicalEvidence(success=1.0, depth=1))
+
+        goal = engine._store.get_node("goal")
+        assert engine.goal_achieved(goal) is True, "this is the trap the guide warns about"
+
+        # Re-pinned to the real last stage, the goal correctly waits for it.
+        engine.create_hypotheses(
+            [
+                {
+                    "statement": "ship it",
+                    "node_id": "goal",
+                    "is_goal": True,
+                    "target_metric": 0.8,
+                    "parent_ids": ["P2b"],
+                    "if_exists": "overwrite",
+                }
+            ]
+        )
+        assert engine.goal_achieved(engine._store.get_node("goal")) is False
+        assert engine._store.get_node("goal").target_metric == 0.8
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_overwriting_a_goal_without_its_metric_drops_the_bar(tmp_path: Path) -> None:
+    """`if_exists="overwrite"` is a documented full replace, including for goals.
+
+    Re-pinning is the common reason to overwrite a goal, and a re-pin that omits
+    `target_metric` silently leaves a goal with no bar to miss. Pinned as the
+    current contract so P8i.2 has something to change deliberately rather than by
+    accident.
+    """
+    engine = HypoTreeEngine(tmp_path / "bar.db", rng_seed=7)
+    try:
+        engine.create_hypotheses(
+            [
+                {"statement": "work", "node_id": "w"},
+                {
+                    "statement": "goal",
+                    "node_id": "goal",
+                    "is_goal": True,
+                    "target_metric": 0.9,
+                    "parent_ids": ["w"],
+                },
+            ]
+        )
+        engine.create_hypotheses(
+            [
+                {
+                    "statement": "goal",
+                    "node_id": "goal",
+                    "is_goal": True,
+                    "parent_ids": ["w"],
+                    "if_exists": "overwrite",
+                }
+            ]
+        )
+        assert engine._store.get_node("goal").target_metric is None
+    finally:
+        engine.close()

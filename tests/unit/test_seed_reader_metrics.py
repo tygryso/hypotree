@@ -45,7 +45,7 @@ def test_a_group_is_sized_by_its_members_not_by_its_creation_events() -> None:
     [
         (9, 1, "better than chance"),
         (1, 9, "worse than probing"),
-        (4, 6, "at the baseline"),
+        (44, 56, "at the baseline"),
     ],
 )
 def test_the_yield_verdict_can_report_all_three_outcomes(
@@ -55,7 +55,7 @@ def test_the_yield_verdict_can_report_all_three_outcomes(
 
     That left "at the baseline" reachable only on exact float equality, and
     described a run performing *below* chance in the same words as one performing
-    at it. With five answers per question the baseline is 40%.
+    at it. With five closed answers per question the baseline is 44%.
     """
     log = _log()
     log.group_members["colour"].update({f"c{i}" for i in range(5)})
@@ -64,6 +64,53 @@ def test_the_yield_verdict_can_report_all_three_outcomes(
 
     lines = _exclusion_yield_lines([log])
     assert lines and expected in lines[0]
+
+
+@pytest.mark.unit
+def test_a_closed_group_is_scored_against_a_higher_blind_baseline() -> None:
+    """A closed group retires more for free without any ordering skill at all.
+
+    The engine confirms the last survivor by elimination, so reaching the final
+    candidate costs k-1 probes rather than k. Scoring that behaviour against the
+    open baseline credited chance with skill: three consecutive runs sat exactly
+    at 44% and were all reported as beating a 40% baseline that describes an
+    engine hypotree does not ship.
+    """
+    closed = _log()
+    closed.group_members["colour"].update({f"c{i}" for i in range(5)})
+    closed.exclusions_applied, closed.premise_probes = 44, 56
+
+    open_ = _log()
+    open_.group_members["colour"].update({f"c{i}" for i in range(5)})
+    open_.open_groups.add("colour")
+    open_.exclusions_applied, open_.premise_probes = 44, 56
+
+    assert "at the baseline" in _exclusion_yield_lines([closed])[0]
+    assert "(closed)" in _exclusion_yield_lines([closed])[0]
+    # Identical behaviour, open question: the same 44% now genuinely beats the
+    # 40% an open group can reach blind.
+    assert "better than chance" in _exclusion_yield_lines([open_])[0]
+
+
+@pytest.mark.unit
+def test_the_blind_baseline_is_summed_per_group_not_taken_from_the_mean_size() -> None:
+    """The baseline is non-linear in k, so averaging sizes first is wrong.
+
+    Latent while every group in the eval had exactly five answers; a workspace
+    mixing a binary question with a ten-way one would have been scored against a
+    baseline belonging to neither.
+    """
+    from eval.seed_reader import _blind_free_retirements
+
+    mixed = _log()
+    mixed.group_members["binary"].update({"b0", "b1"})
+    mixed.group_members["wide"].update({f"w{i}" for i in range(10)})
+    mixed.exclusions_applied, mixed.premise_probes = 45, 55
+
+    expected = (_blind_free_retirements(2, True) + _blind_free_retirements(10, True)) / 12
+    assert f"{round(expected * 100)}%" in _exclusion_yield_lines([mixed])[0]
+    # The mean size is 6, whose own baseline differs — the bug this pins.
+    assert round(expected * 100) != round(_blind_free_retirements(6, True) / 6 * 100)
 
 
 @pytest.mark.unit

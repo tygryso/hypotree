@@ -52,6 +52,20 @@ class StatusChanged(Event):
     valid_to: datetime | None = None
 
 
+class StatusReattributed(Event):
+    """The status held, the justification for it changed.
+
+    Distinct from ``StatusChanged`` because no transition happened: a sibling
+    retired by one confirmation is re-attributed to another when the first is
+    withdrawn. Recording it as a transition would open a second history interval
+    at the instant the first closed; recording it as nothing left the marker
+    naming a node that no longer confirms anything.
+    """
+
+    node_id: str
+    reason: str = ""
+
+
 class SubtreePruned(Event):
     root_id: str
     pruned_ids: list[str]

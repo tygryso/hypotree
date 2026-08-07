@@ -9,7 +9,7 @@
 <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg" alt="Changelog"></a>
-<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-775-brightgreen.svg" alt="Tests: 775"></a>
+<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-788-brightgreen.svg" alt="Tests: 788"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/pyproject.toml"><img src="https://img.shields.io/badge/version-0.4.2-blue.svg" alt="Version: 0.4.2"></a>
 <a href="https://pypi.org/project/hypotree/"><img src="https://img.shields.io/pypi/v/hypotree.svg" alt="PyPI"></a>
 </p>
@@ -161,7 +161,7 @@ What you get:
 - **A live graph.** Nodes are laid out server-side with `networkx` and rendered as SVG with `d3-zoom` for hardware-accelerated pan and zoom. Untested nodes glow at their real chance of being dispatched next; in-progress nodes pulse; **pruned branches desaturate instead of disappearing**, because the point being shown is that they were considered and cut.
 - **New nodes fade in.** When the agent creates a hypothesis, it arrives as a ghost and resolves — you watch the search grow without touching the page.
 - **An activity timeline.** `status_history` is bi-temporal, so any past instant is a `WHERE` clause. The bar chart is the shape of the run — where the bursts were, where it stalled — and the handle travels along it. Drag back to see what was believed then, or press play and watch the whole investigation replay.
-- **Provenance on every card.** What each belief cost: the score, the depth, the commit, the `source_ref`, when it was created and when it settled. The graph is a ledger, not a drawing.
+- **Provenance on every card.** What each belief cost: the score, the depth, the commit, the `source_ref`, any files the experiment left behind, when it was created and when it settled. The graph is a ledger, not a drawing.
 - **The learning path as typeset markdown**, ready to paste into a report — and it rewinds with the graph, so a rewound picture is never captioned with conclusions it has not reached.
 - **Pin and suspend.** Redirect the search without faking evidence — directives change what is *offered*, never what is believed.
 

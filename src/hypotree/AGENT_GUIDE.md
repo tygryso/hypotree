@@ -88,6 +88,54 @@ a `GoalDependencyError` rather than letting you find out later.
   wrong:  goal -> phase -> work                 work blocked forever
 ```
 
+#### Two ways a graph grows — and when the goal has to move
+
+Both are correct. They answer different questions, and one rule decides which you
+are in: **a goal's parents are exactly the nodes whose verification means the
+objective is achieved.** So ask only *"did the last step change?"*
+
+**Backward — drilling into a cause. The goal does not move.**
+`Phase_0` is pinned to the goal and fails. You form `Fix_1`, which `Phase_0` now
+depends on, so `Fix_1` becomes its **parent**:
+
+```
+  Fix_1 -> Phase_0 -> goal          goal.parent_ids stays [Phase_0]
+```
+
+The graph grew upstream. `Phase_0` is still the thing that satisfies the goal, so
+nothing about the goal changed.
+
+**Forward — building a pipeline. The goal must be re-pinned.**
+You create `P2a` and pin the goal to it. Then `P2b` follows `P2a`, then `P2c`:
+
+```
+  P2a -> goal                       goal.parent_ids = [P2a]
+  P2a -> P2b -> goal                goal.parent_ids = [P2b]     <- re-pin
+  P2a -> P2b -> P2c -> goal         goal.parent_ids = [P2c]     <- re-pin
+```
+
+**Leaving the goal pinned to `P2a` is a bug, and a silent one.** A goal is met
+when all its DEPENDENCY parents are VERIFIED, so a goal still pinned to `P2a`
+reports itself **achieved the moment `P2a` verifies** — while `P2b` and `P2c` sit
+untested. The run stops early and calls it a success.
+
+Pinning to the *last* node is enough; you do not need to list the whole chain.
+`P2c` cannot be tested until `P2b` is verified, which cannot happen until `P2a`
+is, so the chain is enforced transitively.
+
+Re-pinning today means re-creating the goal with `if_exists="overwrite"`, and
+**overwrite is a full replace**: any field you leave out reverts to its default.
+Omit `target_metric` on a re-pin and the goal silently loses its bar. Always
+re-send `is_goal` and `target_metric` with the new `parent_ids`:
+
+```
+create_hypotheses(hypotheses=[{
+  "node_id": "goal", "statement": "...", "is_goal": True,
+  "target_metric": 0.85,                 # re-send it, or it becomes null
+  "parent_ids": ["P2c"], "if_exists": "overwrite",
+}])
+```
+
 | Type | Semantics | Mermaid | Child eligible when |
 |------|-----------|---------|---------------------|
 | `DEPENDENCY` | AND logic — all parents must be VERIFIED | `-->` (solid) | **All** parents VERIFIED |

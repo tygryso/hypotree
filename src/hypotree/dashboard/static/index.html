@@ -105,6 +105,11 @@
                         &middot; {{ e.git_branch }}@{{ (e.context_hash || '').slice(0, 7) }}
                       </template>
                     </div>
+                    <div class="st" v-if="e.artifacts && e.artifacts.length">
+                      <span v-for="(a, j) in e.artifacts" :key="j">
+                        <template v-if="j">&middot; </template><code>{{ a }}</code>
+                      </span>
+                    </div>
                   </td>
                   <td>{{ stamp(e.recorded_at) }}</td>
                 </tr>

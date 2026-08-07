@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from hypotree.graph.dag import CycleError, HypoTreeGraph
 from hypotree.models.edge import Edge, EdgeType
@@ -242,6 +242,10 @@ class EvidenceSummary(BaseModel):
     context_hash: str | None
     git_branch: str | None
     source_ref: str | None = None
+    # Paths the experiment left behind. Recorded since the first release and
+    # never once read back, which made the field a question nobody asked; an
+    # audit trail that cannot produce the log it refers to is not an audit trail.
+    artifacts: list[str] = Field(default_factory=list)
     notes: str
     recorded_at: datetime
 
@@ -412,6 +416,28 @@ def _translate_like_wildcards(query: str) -> str:
     escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     # Then translate the user-friendly * to the SQL % wildcard.
     return escaped.replace("*", "%")
+
+
+class _GitContextOnce:
+    """Resolves the working tree's commit and branch at most once.
+
+    ``capture_git_context`` shells out twice, each with a 5s timeout. Recording
+    a batch of results called it per result, so eight reports spawned sixteen
+    processes to learn a commit that cannot have moved between them. Lazy as
+    well as memoised: a batch whose evidence already carries its own context
+    spawns nothing at all.
+    """
+
+    __slots__ = ("_path", "_value")
+
+    def __init__(self, project_path: Path) -> None:
+        self._path = project_path
+        self._value: tuple[str | None, str | None] | None = None
+
+    def resolve(self) -> tuple[str | None, str | None]:
+        if self._value is None:
+            self._value = capture_git_context(self._path)
+        return self._value
 
 
 class HypoTreeEngine:
@@ -1221,15 +1247,6 @@ class HypoTreeEngine:
                             f"settled here."
                         ),
                     )
-                if self._store.get_active_claims(now):
-                    return TargetResponse(
-                        status="DONE",
-                        reason="awaiting_evidence",
-                        rationale=(
-                            "every remaining hypothesis is already dispatched to you; "
-                            "record evidence for what you have probed to get more"
-                        ),
-                    )
                 substitution = self._next_substitution(dry_run, now)
                 if substitution is not None:
                     return substitution
@@ -1294,6 +1311,21 @@ class HypoTreeEngine:
                             f"every candidate answer to {dead} has been ruled out on its "
                             f"own evidence, so nothing that assumes one of them can be "
                             f"satisfied.{held_up} {advice} Nothing further is settled here."
+                        ),
+                    )
+                # Checked only after every diagnosis that names a concrete next
+                # move. A caller holding one stale lease was otherwise told to
+                # "record evidence for what you have probed" while an open
+                # conflict, an unbuilt composition, a dead question or a wiring
+                # error went unreported — and recording evidence could not help,
+                # because there was nothing left to record.
+                if self._store.get_active_claims(now):
+                    return TargetResponse(
+                        status="DONE",
+                        reason="awaiting_evidence",
+                        rationale=(
+                            "every remaining hypothesis is already dispatched to you; "
+                            "record evidence for what you have probed to get more"
                         ),
                     )
                 blocked = self._blocked_nodes()
@@ -1468,9 +1500,13 @@ class HypoTreeEngine:
 
         recorded: list[RecordEvidenceResult] = []
         failed: list[FailedRecord] = []
+        # One git capture for the whole batch. HEAD cannot move between results
+        # that arrived in a single call, and resolving it per result spawned two
+        # subprocesses each with a 5s timeout to learn the same commit hash.
+        git = _GitContextOnce(self._project_path)
         for report in reports:
             try:
-                node = self._record_one(report.node_id, report.evidence, report.claim_id)
+                node = self._record_one(report.node_id, report.evidence, report.claim_id, git=git)
             except (NodeNotFoundError, GoalEvidenceError, ClaimError) as exc:
                 failed.append(FailedRecord(node_id=report.node_id, error=str(exc)))
                 continue
@@ -1493,6 +1529,8 @@ class HypoTreeEngine:
         node_id: str,
         evidence: Evidence,
         claim_id: str | None = None,
+        *,
+        git: _GitContextOnce | None = None,
     ) -> Node:
         """Validate + consume claim, update posterior, apply transitions.
 
@@ -1532,7 +1570,7 @@ class HypoTreeEngine:
         if isinstance(evidence, LogicalEvidence) and (
             evidence.context_hash is None or evidence.git_branch is None
         ):
-            ctx_hash, branch = capture_git_context(self._project_path)
+            ctx_hash, branch = (git or _GitContextOnce(self._project_path)).resolve()
             if evidence.context_hash is None:
                 evidence.context_hash = ctx_hash
             if evidence.git_branch is None:
@@ -1543,6 +1581,16 @@ class HypoTreeEngine:
         # Only logical observations count toward the convergence gate — infra
         # errors are operational noise, not samples of the hypothesis.
         logical_count = sum(1 for r in prior_rows if r["kind"] == "logical")
+
+        if claim_id is None:
+            # Reporting on a node the navigator dispatched, without quoting the
+            # claim, is the ordinary case: claim_id is optional everywhere and
+            # self-initiated probes never have one. Leaving that lease live held
+            # the node off the frontier for its whole TTL and counted it as
+            # dispatched-and-never-reported, while `awaiting_evidence` told the
+            # caller to report the very result it had just reported.
+            recovered = self._recoverable_claim(node_id, now)
+            claim_id = str(recovered["claim_id"]) if recovered is not None else None
 
         if claim_id is not None:
             claim = self._store.get_claim(claim_id)
@@ -2193,15 +2241,14 @@ class HypoTreeEngine:
         head, _ = capture_git_context(self.project_path)
         if head is None:
             return set()
-        stale: set[str] = set()
-        for node in self._store.get_all_nodes():
-            if node.status is not Status.VERIFIED:
-                continue
-            rows = self._store.get_evidence_paginated(node.id, limit=1, offset=0)
-            recorded = rows[0]["context_hash"] if rows else None
-            if recorded is not None and recorded != head:
-                stale.add(node.id)
-        return stale
+        newest = self._store.latest_context_hash_by_node()
+        return {
+            node.id
+            for node in self._store.get_all_nodes()
+            if node.status is Status.VERIFIED
+            and (recorded := newest.get(node.id)) is not None
+            and recorded != head
+        }
 
     def get_evidence_history(
         self,
@@ -2227,6 +2274,7 @@ class HypoTreeEngine:
                 context_hash=r["context_hash"],
                 git_branch=r["git_branch"],
                 source_ref=r["source_ref"],
+                artifacts=json.loads(r["artifacts"] or "[]"),
                 notes=r["notes"],
                 recorded_at=datetime.fromisoformat(r["recorded_at"]),
             )
@@ -2642,12 +2690,38 @@ class HypoTreeEngine:
         A conflict leaves this set when a culprit is convicted, when every member
         has been cleared (a genuine multi-assumption interaction), or when the
         broad recovery has already fired for it.
+
+        It also never enters when *no* uncleared member could be swapped at all —
+        a member with no exclusion group, or whose group has no live alternative
+        left, can never be cleared, so the conflict would sit here forever
+        holding its members off the frontier. That deadlock reported itself as a
+        bare ``empty_frontier`` while untested hypotheses sat in the store, which
+        is exactly what the DONE taxonomy exists to prevent.
         """
-        return [
-            n
-            for n in self._store.get_nogoods(open_only=True)
-            if not n["reopened_at"] and set(n["member_ids"]) - set(n["cleared_ids"])
-        ]
+        diagnosing = []
+        for n in self._store.get_nogoods(open_only=True):
+            if n["reopened_at"]:
+                continue
+            uncleared = set(n["member_ids"]) - set(n["cleared_ids"])
+            if not uncleared:
+                continue
+            if any(self._can_be_swapped(m) for m in uncleared):
+                diagnosing.append(n)
+        return diagnosing
+
+    def _can_be_swapped(self, member_id: str) -> bool:
+        """Whether a conflict member has any alternative left to swap in for it.
+
+        Deliberately cheaper than ``_substitution_candidate``: it does not
+        consider which combinations are already on file, because this runs on the
+        dispatch path. It answers the question that decides a deadlock — is there
+        any live sibling at all — not which one to try next.
+        """
+        node = self._store.get_node(member_id)
+        if node is None or not node.exclusion_group:
+            return False
+        siblings = self._store.get_nodes_in_exclusion_group(node.exclusion_group, member_id)
+        return any(not self._is_eliminated(s) for s in siblings)
 
     def _diagnosis_order(self, member_ids: list[str]) -> list[str]:
         """Members in the order diagnosis should interrogate them.
@@ -2970,6 +3044,11 @@ class HypoTreeEngine:
         self._refresh_node_in_graph(candidate)
         if node.exclusion_group:
             self._deduce_last_member(node.exclusion_group, now)
+            # The other half of the pair every elimination path runs. This is the
+            # call site `_eliminated_on_its_own_evidence` was extended to cover,
+            # and it was the one missing it — so a question this swap emptied was
+            # never reported and its dependents stayed on the frontier.
+            self._propagate_dead_question(node.exclusion_group, now)
         return True
 
     def _refetch_nogood(self, nogood_id: int) -> dict[str, Any] | None:
@@ -3105,11 +3184,16 @@ class HypoTreeEngine:
             members = list(nogood["member_ids"])
             suspects = self._remaining_suspects(nogood, exonerated)
 
+            # PRUNED is not a refutation of this member. It says an ancestor of
+            # the member was refuted, which is a statement about that ancestor's
+            # subtree and says nothing about whether this assumption is what made
+            # the composition fail. Convicting on it closed the conflict on
+            # collateral damage, released every other member, and then spent the
+            # review budget prioritising the wrong question's alternatives.
             refuted = [
                 m
                 for m in members
-                if (n := self._store.get_node(m)) is not None
-                and n.status in (Status.INVALIDATED, Status.PRUNED)
+                if (n := self._store.get_node(m)) is not None and n.status is Status.INVALIDATED
             ]
             if refuted:
                 culprit = refuted[0]
@@ -3341,8 +3425,16 @@ class HypoTreeEngine:
             node = self._store.get_node(pid)
             if node is not None and node.is_goal:
                 continue
+            old_status = node.status if node is not None else None
             self._store.change_status(pid, Status.PRUNED, reason="ancestor invalidated", now=now)
             self._refresh_node_in_graph(pid)
+            # A confirmation that has just been pruned has lost the authority to
+            # keep its competing answers retired. Every other path out of
+            # VERIFIED gives that authority up; the cascade was the one that did
+            # not, so a question could end up with no live answer at all and the
+            # only untried candidate buried under a node nobody believes.
+            if old_status is not None:
+                self._sync_exclusion(pid, old_status, Status.PRUNED, now)
             pruned.append(pid)
         return pruned
 
@@ -3590,9 +3682,15 @@ class HypoTreeEngine:
         if not all(self._eliminated_on_its_own_evidence(m) for m in members):
             return False
         member_ids = {m.id for m in members}
+        # A conflict that has *already* been recovered from cannot hand anything
+        # back — `_recover_from_interaction` returns early once `reopened_at` is
+        # set. Counting it as live left the question permanently undiagnosable:
+        # one interaction recovery anywhere in the group silenced the dead
+        # question for the rest of the workspace's life.
         return not any(
             member_ids & set(nogood["member_ids"])
             for nogood in self._store.get_nogoods(open_only=True)
+            if not nogood["reopened_at"]
         )
 
     def _propagate_dead_question(self, group: str, now: datetime) -> list[str]:
@@ -3776,11 +3874,15 @@ class HypoTreeEngine:
             if not history or history[-1]["reason"] != marker:
                 continue
             if standing is not None and standing.id != sibling.id:
-                self._store.change_status(
+                # The sibling keeps its status and changes its justification, so
+                # this is not a transition. Routing it through change_status
+                # dropped it as a no-op and left the marker naming a node that
+                # no longer confirms anything — after which nothing could ever
+                # reopen the sibling, because retraction keys on that marker.
+                self._store.reattribute_status(
                     sibling.id,
-                    Status.EXHAUSTED,
-                    reason=f"{EXCLUSION_REASON_PREFIX}{standing.id}",
-                    now=now,
+                    f"{EXCLUSION_REASON_PREFIX}{standing.id}",
+                    now,
                 )
                 self._refresh_node_in_graph(sibling.id)
                 continue

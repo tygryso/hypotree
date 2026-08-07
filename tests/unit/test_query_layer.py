@@ -455,3 +455,105 @@ def test_evidence_carries_the_artifact_it_came_from(engine: HypoTreeEngine) -> N
     engine.record_evidence("n1", LogicalEvidence(success=0.85, source_ref="ci://run/4412"))
 
     assert engine.get_evidence_history("n1")[0].source_ref == "ci://run/4412"
+
+
+@pytest.mark.unit
+def test_staleness_resolves_every_node_in_one_query(tmp_path: Path, monkeypatch) -> None:
+    """One evidence query per VERIFIED node is the shape that cost 41x on dispatch.
+
+    Asserted by counting round-trips rather than by timing, so it cannot pass
+    again by accident on a fast machine.
+    """
+    import hypotree.engine as engine_mod
+
+    engine = HypoTreeEngine(tmp_path / "stale.db", rng_seed=7)
+    try:
+        for i in range(12):
+            engine.create_hypothesis(f"n{i}", node_id=f"n{i}")
+            engine.record_evidence(
+                f"n{i}", LogicalEvidence(success=1.0, depth=1, context_hash="old")
+            )
+        monkeypatch.setattr(engine_mod, "capture_git_context", lambda p: ("head", "main"))
+
+        calls = 0
+        original = engine._store.get_evidence_paginated
+
+        def counted(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(engine._store, "get_evidence_paginated", counted)
+        assert len(engine.stale_node_ids()) == 12
+        assert calls == 0, f"expected a single bulk query, saw {calls} per-node reads"
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_a_batch_captures_git_context_once_not_once_per_result(tmp_path: Path, monkeypatch) -> None:
+    """HEAD cannot move between results that arrived in one call.
+
+    Resolving it per result spawned two subprocesses each with a 5s timeout, so
+    an eight-result batch spawned sixteen to learn one commit hash.
+    """
+    import hypotree.engine as engine_mod
+    from hypotree.engine import EvidenceReport
+
+    calls = 0
+
+    def counting_capture(path):
+        nonlocal calls
+        calls += 1
+        return "abc123", "main"
+
+    monkeypatch.setattr(engine_mod, "capture_git_context", counting_capture)
+    engine = HypoTreeEngine(tmp_path / "batch-git.db", rng_seed=7)
+    try:
+        for i in range(8):
+            engine.create_hypothesis(f"n{i}", node_id=f"n{i}")
+        engine.record_results(
+            [
+                EvidenceReport(node_id=f"n{i}", evidence=LogicalEvidence(success=0.5, depth=1))
+                for i in range(8)
+            ]
+        )
+        assert calls == 1, f"expected one capture for the batch, saw {calls}"
+
+        # Lazy as well as memoised: evidence carrying its own context asks git nothing.
+        calls = 0
+        engine.record_results(
+            [
+                EvidenceReport(
+                    node_id="n0",
+                    evidence=LogicalEvidence(
+                        success=0.5, depth=1, context_hash="x", git_branch="y"
+                    ),
+                )
+            ]
+        )
+        assert calls == 0
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_recorded_artifacts_are_read_back(tmp_path: Path) -> None:
+    """Written since the first release and consumed by nothing.
+
+    An audit trail that cannot produce the log it refers to is not an audit
+    trail — the same defect that was fixed for `context_hash` and left here.
+    """
+    engine = HypoTreeEngine(tmp_path / "artifacts.db", rng_seed=7)
+    try:
+        engine.create_hypothesis("n", node_id="n")
+        engine.record_evidence(
+            "n",
+            LogicalEvidence(
+                success=1.0, depth=1, artifacts=[Path("/tmp/run.log"), Path("/tmp/plot.png")]
+            ),
+        )
+        history = engine.get_evidence_history("n")
+        assert history[0].artifacts == ["/tmp/run.log", "/tmp/plot.png"]
+    finally:
+        engine.close()

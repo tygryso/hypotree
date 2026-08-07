@@ -26,6 +26,7 @@ from hypotree.engine import (
 from hypotree.models.edge import EdgeType
 from hypotree.models.evidence import LogicalEvidence
 from hypotree.models.status import Status
+from hypotree.store.store import utcnow
 
 
 @pytest.fixture
@@ -1502,3 +1503,117 @@ def test_the_learning_path_and_goal_status_scope_to_the_same_set(
     status = engine.get_goal_status(goal_id="goal_a")
     assert [g.node_id for g in status.goals] == ["goal_a"]
     assert status.total_nodes == len(engine._goal_scope("goal_a"))
+
+
+@pytest.mark.unit
+def test_a_conflict_nobody_can_swap_does_not_withhold_its_members(tmp_path: Path) -> None:
+    """Diagnosis by substitution needs an alternative to substitute.
+
+    A member with no exclusion group can never be cleared, so the conflict never
+    left the diagnosing set and its members were held off the frontier forever.
+    The caller was handed a bare `empty_frontier` — no rationale at all — while
+    two untested hypotheses sat in the store, which is the exact failure the DONE
+    taxonomy exists to prevent.
+    """
+    engine = HypoTreeEngine(tmp_path / "deadlock.db", rng_seed=7)
+    try:
+        engine.create_hypothesis("A", node_id="A")
+        engine.create_hypothesis("B", node_id="B")
+        engine.create_hypothesis(
+            "AB", node_id="AB", parent_ids=["A", "B"], edge_type=EdgeType.DEPENDENCY
+        )
+        engine.record_evidence("A", LogicalEvidence(success=1.0, depth=1))
+        engine.record_evidence("B", LogicalEvidence(success=1.0, depth=1))
+        engine.record_evidence("AB", LogicalEvidence(success=0.0, depth=2))
+
+        assert engine._store.get_nogoods(open_only=True), "the conflict is still recorded"
+        assert {n.id for n in engine._frontier_nodes()} == {"A", "B"}
+        assert engine.get_next_targets(count=1)[0].status == "SELECTED"
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_a_pruned_member_is_not_convicted_of_causing_the_conflict(tmp_path: Path) -> None:
+    """PRUNED says an ancestor was refuted, not that this assumption is at fault.
+
+    Convicting on it closed the conflict on collateral damage, released every
+    other member, and then spent the review budget prioritising the alternatives
+    of a question that was never implicated.
+    """
+    engine = HypoTreeEngine(tmp_path / "pruned.db", rng_seed=7)
+    try:
+        engine.create_hypothesis("anc", node_id="anc")
+        engine.create_hypothesis(
+            "A", node_id="A", parent_ids=["anc"], edge_type=EdgeType.REFINEMENT
+        )
+        for nid in ("B", "C"):
+            engine.create_hypothesis(nid, node_id=nid)
+        engine.create_hypothesis(
+            "combo", node_id="combo", parent_ids=["A", "B", "C"], edge_type=EdgeType.DEPENDENCY
+        )
+        for nid in ("anc", "A", "B", "C"):
+            engine.record_evidence(nid, LogicalEvidence(success=1.0, depth=1))
+        engine.record_evidence("combo", LogicalEvidence(success=0.0, depth=2))
+
+        engine.record_evidence("anc", LogicalEvidence(success=0.0, depth=1))
+
+        assert engine._store.get_node("A").status is Status.PRUNED
+        open_now = engine._store.get_nogoods(open_only=True)
+        assert open_now, "collateral damage must not close the conflict"
+        assert open_now[0]["resolved_at"] is None
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_recording_without_a_claim_id_consumes_the_nodes_own_lease(tmp_path: Path) -> None:
+    """`claim_id` is optional everywhere, so omitting it is the ordinary path.
+
+    A *wrong* id was recovered from the node's own live lease and consumed; an
+    absent one was not, which is backwards. The lease stayed live for its whole
+    TTL, holding a settled node off the frontier and reporting it as
+    dispatched-and-never-reported.
+    """
+    engine = HypoTreeEngine(tmp_path / "lease.db", rng_seed=7)
+    try:
+        engine.create_hypothesis("L", node_id="L")
+        engine.get_next_targets(count=1)
+        engine.record_evidence("L", LogicalEvidence(success=1.0, depth=1))
+
+        assert engine._store.get_active_claims(utcnow()) == []
+        assert engine._store.get_node("L").active_claim_id is None
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_a_live_lease_no_longer_masks_the_diagnosis_that_names_the_next_move(
+    tmp_path: Path,
+) -> None:
+    """`awaiting_evidence` was checked before every substantive diagnosis.
+
+    One leaked lease therefore told the caller to record evidence it had already
+    recorded, while an unbuilt composition, a conflict, a dead question or a
+    wiring error went unreported — and recording could not help, because there
+    was nothing left to record.
+    """
+    engine = HypoTreeEngine(tmp_path / "mask.db", rng_seed=7)
+    try:
+        engine.create_hypothesis("goal", node_id="goal", is_goal=True, target_metric=0.7)
+        for i in range(2):
+            engine.create_hypothesis(f"a{i}", node_id=f"a{i}", exclusion_group="a")
+        engine.record_evidence("a0", LogicalEvidence(success=1.0, depth=1))
+
+        # Strand a lease on a node the exclusion inference then settles.
+        engine.create_hypothesis("spare", node_id="spare")
+        engine.get_next_targets(count=1)
+        engine._store.change_status(
+            "spare", Status.EXHAUSTED, reason="settled elsewhere", now=utcnow()
+        )
+
+        result = engine.get_next_targets(count=1)[0]
+        assert result.reason == "awaiting_composition", result.reason
+        assert "a0" in (result.rationale or "")
+    finally:
+        engine.close()

@@ -17,6 +17,7 @@ import pytest
 from hypotree.engine import (
     DEDUCTION_REASON_PREFIX,
     DEDUCTION_RETRACT_PREFIX,
+    EXCLUSION_REASON_PREFIX,
     HypoTreeEngine,
 )
 from hypotree.models.edge import EdgeType
@@ -309,3 +310,67 @@ def test_a_member_retired_by_a_sibling_never_counts(engine: HypoTreeEngine) -> N
         assert node.status == Status.EXHAUSTED
         assert engine._eliminated_on_its_own_evidence(node) is False
     assert engine._question_is_dead("a") is False
+
+
+@pytest.mark.unit
+def test_a_second_confirmation_takes_over_the_retirement_it_inherits(
+    tmp_path: Path,
+) -> None:
+    """Re-attribution changes the justification, not the status — so it is not a transition.
+
+    Routing it through `change_status` made it a silent no-op, leaving the marker
+    naming a node that no longer confirms anything. Since retraction keys on that
+    marker, nothing could ever reopen the sibling again: the question ended with
+    zero live answers and its only untried candidate buried, reported by nothing.
+    """
+    engine = HypoTreeEngine(tmp_path / "reattribute.db", rng_seed=7)
+    try:
+        for nid in ("A", "B", "C"):
+            engine.create_hypothesis(nid, node_id=nid, exclusion_group="g")
+        engine.record_evidence("A", LogicalEvidence(success=1.0, depth=1))
+        engine.record_evidence("B", LogicalEvidence(success=1.0, depth=1))
+        assert engine._store.get_node("C").status is Status.EXHAUSTED
+
+        engine.record_evidence("A", LogicalEvidence(success=0.0, depth=1))
+        reason = engine._store.get_status_history("C")[-1]["reason"]
+        assert reason == f"{EXCLUSION_REASON_PREFIX}B", reason
+
+        # B was the only thing still holding C back; withdrawing it must free C.
+        engine.record_evidence("B", LogicalEvidence(success=0.0, depth=1))
+        assert engine._store.get_node("C").status is not Status.EXHAUSTED
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_a_pruned_confirmation_gives_up_its_hold_on_the_alternatives(
+    tmp_path: Path,
+) -> None:
+    """Every path out of VERIFIED surrenders the authority to retire siblings.
+
+    The cascade was the one that did not, so a question could be left with no
+    live answer at all: the confirmation pruned, and the only untried candidate
+    still EXHAUSTED underneath a node nobody believes any more.
+    """
+    engine = HypoTreeEngine(tmp_path / "cascade.db", rng_seed=7)
+    try:
+        engine.create_hypothesis("root", node_id="root")
+        engine.create_hypothesis(
+            "X",
+            node_id="X",
+            exclusion_group="g",
+            parent_ids=["root"],
+            edge_type=EdgeType.REFINEMENT,
+        )
+        engine.create_hypothesis("Y", node_id="Y", exclusion_group="g")
+        engine.record_evidence("root", LogicalEvidence(success=1.0, depth=1))
+        engine.record_evidence("X", LogicalEvidence(success=1.0, depth=1))
+        assert engine._store.get_node("Y").status is Status.EXHAUSTED
+
+        engine.record_evidence("root", LogicalEvidence(success=0.0, depth=1))
+
+        assert engine._store.get_node("X").status is Status.PRUNED
+        assert engine._store.get_node("Y").status is Status.UNTESTED
+        assert "Y" in {n.id for n in engine._frontier_nodes()}
+    finally:
+        engine.close()
