@@ -40,25 +40,42 @@ VERIFY_THRESHOLD = 0.8
 # Below this posterior mean upper-bound, a stochastic node is "confidently bad."
 EPSILON_LOW = 0.2
 
-# Statuses that remove a node from the running for its exclusion group's answer.
-# EXHAUSTED does NOT appear here: an exhausted member was settled by inference or
-# scored below the bar, but it has not been ruled out as the group's answer in
-# the way a refutation rules it out.
+# Statuses that remove a node from the running for its exclusion group's answer
+# on the status alone. EXHAUSTED is deliberately absent: it is reached two ways
+# that mean opposite things, and only the reason can tell them apart — see
+# `live_group_counts`.
 _REFUTED_STATUSES = frozenset({Status.INVALIDATED, Status.PRUNED})
 
 
-def live_group_counts(all_nodes: list[Node]) -> dict[str, int]:
+def live_group_counts(
+    all_nodes: list[Node], eliminated_ids: set[str] | None = None
+) -> dict[str, int]:
     """Count the still-viable members of every exclusion group.
 
     A group is a closed-world question: its members are competing answers, of
-    which one is true. The count of members not yet refuted is therefore the
+    which one is true. The count of members not yet ruled out is therefore the
     size of the remaining answer space, and it is what makes the group's
-    posterior informative — three refutations out of four leave the survivor
+    posterior informative — three eliminations out of four leave the survivor
     nearly certain, and no per-node Beta can express that.
+
+    ``eliminated_ids`` carries the engine's own definition of *ruled out*, which
+    is the one the guide states and the deduction rule uses: refuted, **or**
+    EXHAUSTED by its own evidence. Counting only refutations made this inert on
+    the common path, because the deterministic regime refutes only on an exact
+    0.0 and sends everything else to EXHAUSTED — so a five-way question with four
+    candidates measured and rejected still reported k=5, and the survivor's prior
+    mean stayed at 0.2, *below* an untouched ungrouped node. The mechanism
+    deprioritised the one candidate nearly certain to be the answer.
+
+    Omitting it falls back to status alone, which is what a caller with no
+    history to hand (the read-only dashboard) can offer.
     """
+    eliminated_ids = eliminated_ids or set()
     counts: dict[str, int] = {}
     for node in all_nodes:
-        if not node.exclusion_group or node.status in _REFUTED_STATUSES:
+        if not node.exclusion_group:
+            continue
+        if node.status in _REFUTED_STATUSES or node.id in eliminated_ids:
             continue
         counts[node.exclusion_group] = counts.get(node.exclusion_group, 0) + 1
     return counts
@@ -77,8 +94,16 @@ def effective_posterior(node: Node, live_counts: dict[str, int]) -> tuple[float,
     The consequence that matters in practice: a question with two candidates
     left outranks an untouched question with four, so the navigator finishes the
     question it has already invested in instead of interleaving all of them at
-    random. It also makes the last surviving candidate dominate, which is the
-    probabilistic shadow of the deduction the engine performs outright.
+    random. That payoff was inert until the count learned to shrink on an
+    EXHAUSTED member — see ``live_group_counts``.
+
+    It deliberately does **not** make a lone survivor certain. Over a closed
+    group there is nothing to select: the engine deduces the last member
+    outright, without a probe. Over an open one the remaining candidate has no
+    stronger claim than any untried node — "the other four learning rates
+    failed" says nothing about the fifth, which is the whole content of
+    ``exclusion_closed=False``. So k=1 yields Beta(1,1), and that is the answer,
+    not a clamp working around one.
     """
     prior_beta = 1.0
     if node.exclusion_group:
@@ -134,6 +159,7 @@ class ThompsonSampler:
         last_group: str | None = None,
         priority_ids: set[str] | None = None,
         all_goals_met: bool = False,
+        eliminated_ids: set[str] | None = None,
     ) -> SelectionResult:
         """Run the full selection procedure on the current frontier.
 
@@ -176,7 +202,7 @@ class ThompsonSampler:
                 frontier_nodes = suspects
 
         # Step 3: draw theta for each frontier node under the closed-world prior.
-        live_counts = live_group_counts(all_nodes)
+        live_counts = live_group_counts(all_nodes, eliminated_ids)
         scored = [(self._draw_theta(node, live_counts), node) for node in frontier_nodes]
 
         # Step 4: lexicographic sort — primary: theta desc, tiebreak: same

@@ -275,7 +275,7 @@ def _paired_moat_comparison(
         return CriterionResult(
             name=name,
             passed=False,
-            metrics={"claim": claim},
+            metrics={"claim": claim, "insufficient_data": True},
             details={"error": f"need {N_SEEDS} paired seeds, found {len(common_seeds)}"},
         )
 
@@ -377,6 +377,9 @@ def _criterion1_moat(
             "gated_on": "criterion_1b_informational_moat",
             "criterion_1a_passed": c1a.passed,
             "criterion_1b_passed": c1b.passed,
+            # Carried up so the decision can tell "scored and failed" from
+            # "could not be scored" — the gating comparison is 1b.
+            "insufficient_data": bool(c1b.metrics.get("insufficient_data")),
         },
         details={
             "rationale": (
@@ -424,7 +427,7 @@ def _criterion2_ts_quality(
         return CriterionResult(
             name="criterion_2_ts_quality",
             passed=False,
-            metrics={},
+            metrics={"insufficient_data": True},
             details={"error": f"need {N_SEEDS} seeds per strategy, found {len(common_seeds)}"},
         )
 
@@ -553,7 +556,11 @@ def _criterion3_revision(
             elif e.get("event_type") == "conflict_resolved":
                 total_culprits += 1
 
-    revision_events = total_upstream_propagations + total_conflicts + total_culprits
+    # A resolution is the *same* conflict later in its life, not a second event.
+    # Adding both made a run that narrowed every conflict report up to twice the
+    # revision activity of one that narrowed none — the number rising with how
+    # well the diagnosis worked rather than with how much revision happened.
+    revision_events = total_upstream_propagations + total_conflicts
 
     # Hard gate: zero re-executions of pruned nodes.
     reexecutions_ok = total_pruned_reexecutions == 0
@@ -786,10 +793,23 @@ def _make_decision(
 ) -> str:
     """Apply the pre-committed decision rule (§6).
 
-    1. If c1 OR c2 fails → STOP.
-    2. If c1+c2 pass but c3 or c4 fails → ITERATE.
-    3. All pass → GO.
+    1. If any gating criterion could not be *scored* → INCONCLUSIVE.
+    2. If c1 OR c2 fails → STOP.
+    3. If c1+c2 pass but c3 or c4 fails → ITERATE.
+    4. All pass → GO.
+
+    The first rule is not a softening of the gate, it is what stops the gate
+    from answering a question it was not asked. Infra-failed episodes are
+    dropped from the paired set on purpose — censoring one would charge an arm
+    for the inference server's bad minute — but that leaves fewer than the
+    pre-registered n, and "fewer than 30 pairs" was then read as "criterion 1
+    failed", which forces STOP. One dropped HTTP connection anywhere in 90
+    episodes became a pre-registered instruction to abandon the project.
+    Insufficient data is a data-availability fact; STOP is a scientific
+    conclusion, and the two must not share a code path.
     """
+    if c1.metrics.get("insufficient_data") or c2.metrics.get("insufficient_data"):
+        return "INCONCLUSIVE"
     if not c1.passed or not c2.passed:
         return "STOP"
     if not c3.passed or not c4.passed:

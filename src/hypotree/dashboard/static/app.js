@@ -122,6 +122,30 @@ createApp({
       return `${scrub.value + 1}/${t.length} · ${tick.node_id} → ${tick.status}`;
     });
 
+    // ---- belief diff -----------------------------------------------------
+
+    // The scrubber already picks an instant; picking a second one turns the
+    // narrative into "what changed between them", which is the question a
+    // standup or a PR description actually asks. Same control, used twice.
+    const sinceTick = ref(null);
+    const since = computed(() => {
+      const t = timeline.value.ticks;
+      if (sinceTick.value === null || !t.length) return null;
+      return t[Math.min(sinceTick.value, t.length - 1)].t;
+    });
+    const sincePct = computed(() => {
+      const max = lastTick.value;
+      return max > 0 && sinceTick.value !== null ? (sinceTick.value / max) * 100 : 0;
+    });
+    const markSince = () => { sinceTick.value = scrub.value; loadNarrative(); };
+    const clearSince = () => { sinceTick.value = null; loadNarrative(); };
+    const inWindow = (bin) => {
+      if (sinceTick.value === null || !activity.value.length) return false;
+      const n = timeline.value.ticks.length || 1;
+      const start = Math.floor((sinceTick.value / n) * activity.value.length);
+      return bin >= start && bin <= binOfScrub.value;
+    };
+
     // ---- activity histogram ---------------------------------------------
 
     // The run's shape is information — where the bursts were, where it stalled —
@@ -172,8 +196,13 @@ createApp({
     }
     async function loadNarrative() {
       // The narrative is pinned to the same instant as the graph, so a rewound
-      // picture is never captioned with conclusions it has not reached.
-      const parts = [q(), at.value ? `at=${encodeURIComponent(at.value)}` : ""].filter(Boolean);
+      // picture is never captioned with conclusions it has not reached. With a
+      // start marker set it becomes a diff over that window instead.
+      const parts = [
+        q(),
+        at.value ? `at=${encodeURIComponent(at.value)}` : "",
+        since.value ? `since=${encodeURIComponent(since.value)}` : "",
+      ].filter(Boolean);
       const r = await api(`/api/learning-path${parts.length ? "?" + parts.join("&") : ""}`);
       narrative.value = r.markdown || "";
     }
@@ -381,6 +410,7 @@ createApp({
 
     return {
       meta, graph, frontier, narrative, timeline, goalId, tab, selected, detail,
+      sinceTick, sincePct, markSince, clearSince, inWindow,
       live, working, scrub, scrubLabel, playing, tip, error, missing,
       lastTick, atLive, goLive, panelWidth, resizing, startResize, zoomBy,
       activity, binOfScrub, cursorPct, stamp, directiveMode, clearSelection, bannerDismissed,

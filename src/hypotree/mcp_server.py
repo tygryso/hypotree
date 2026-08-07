@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import json
 import sys
+from datetime import datetime
 from importlib import resources
 
 from mcp import types
@@ -286,6 +287,48 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="add_edges",
+            description="Wire hypotheses that already exist, without recreating either. "
+            "Use it to grow a graph forward: when a pipeline gains a stage, the goal must "
+            "depend on the NEW last stage, or it reports itself achieved as soon as the "
+            "first stage verifies while the rest sit untested. You do not need to remove "
+            "the old edge — DEPENDENCY is AND and the later stage already depends on the "
+            "earlier one, so adding only tightens the condition. Validated like creation: "
+            "unknown nodes, a goal used as a DEPENDENCY parent, and cycles are refused "
+            "before anything is written, and an edge that already exists is a no-op.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "edges": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "Edges to add. Each runs FROM the hypothesis being "
+                        "assumed TO the one assuming it, so src is the parent.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "src": {
+                                    "type": "string",
+                                    "description": "The hypothesis being assumed (parent).",
+                                },
+                                "dst": {
+                                    "type": "string",
+                                    "description": "The hypothesis that assumes it (child).",
+                                },
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["DEPENDENCY", "ALTERNATIVE", "REFINEMENT"],
+                                    "default": "DEPENDENCY",
+                                },
+                            },
+                            "required": ["src", "dst"],
+                        },
+                    },
+                },
+                "required": ["edges"],
+            },
+        ),
+        types.Tool(
             name="get_next_targets",
             description="Reclaim stale leases and select the next target(s). A claimed "
             "node is reserved for you until you record its result, so ask only for what "
@@ -304,6 +347,7 @@ def _tool_definitions() -> list[types.Tool]:
                     },
                     "lease_ttl_s": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Override the claim TTL in seconds (default 900). "
                         "Raise it for experiments that run for hours or days, or keep it "
                         "short and call renew_claim while the work is still going.",
@@ -339,6 +383,7 @@ def _tool_definitions() -> list[types.Tool]:
                 "properties": {
                     "results": {
                         "type": "array",
+                        "minItems": 1,
                         "description": "Several results at once, applied in the order "
                         "given. Use this whenever you ran more than one experiment: "
                         "reporting k results costs one call instead of k. Each entry "
@@ -366,7 +411,7 @@ def _tool_definitions() -> list[types.Tool]:
                                 "source_ref": {"type": "string"},
                                 "notes": {"type": "string"},
                             },
-                            "required": ["node_id"],
+                            "required": ["node_id", "success"],
                         },
                     },
                     "node_id": {"type": "string"},
@@ -418,9 +463,13 @@ def _tool_definitions() -> list[types.Tool]:
                     },
                     "lease_ttl_s": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "TTL for the fused dispatch, if any.",
                     },
                 },
+                # Enforced on the single-result shape only when `results` is absent;
+                # the dispatch checks both, because a made-up success is a measurement
+                # nobody took and there is no safe default for one.
                 "required": [],
             },
         ),
@@ -603,6 +652,7 @@ def _tool_definitions() -> list[types.Tool]:
                                 "UNTESTED",
                                 "IN_PROGRESS",
                                 "VERIFIED",
+                                "EXHAUSTED",
                                 "INVALIDATED",
                                 "PRUNED",
                                 "BLOCKED",
@@ -662,7 +712,9 @@ def _tool_definitions() -> list[types.Tool]:
             "free, and calling out beliefs that were later withdrawn. Use it to brief "
             "a human, to write a summary, or to re-orient yourself after a context "
             "reset: the other read tools show the current state, this one shows how it "
-            "was arrived at.",
+            "was arrived at. Pass `since` to get a **diff** instead — what changed "
+            "between then and now, which is the answer a standup or a PR description "
+            "wants.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -676,6 +728,17 @@ def _tool_definitions() -> list[types.Tool]:
                         "type": "string",
                         "description": "Narrate one objective only. A workspace pursuing "
                         "several otherwise interleaves their dead ends into one story.",
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "ISO-8601 instant. Report only what settled or was "
+                        "withdrawn since then — 'what changed this week' rather than 'how "
+                        "we got here'. Combine with as_of for a closed window.",
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "ISO-8601 instant. Reconstruct the report as it "
+                        "stood then, so it can be read beside a rewound graph.",
                     },
                 },
             },
@@ -896,13 +959,44 @@ async def _handle_call_tool(
     return [types.TextContent(type="text", text=json.dumps(result, default=str))]
 
 
+def _parse_instant(raw: object, field: str) -> datetime | None:
+    """Parse an ISO-8601 argument, naming the field when it will not parse.
+
+    A `Z` suffix is what a copied JSON timestamp carries and `fromisoformat`
+    rejects it before 3.11, so it is normalised rather than refused.
+    """
+    if raw is None or raw == "":
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(
+            f"{field} must be an ISO-8601 instant such as '2026-08-07T09:00:00Z', got {raw!r}"
+        ) from None
+
+
 def _evidence_report(item: dict) -> EvidenceReport:
     """Build one evidence report from a tool-call payload.
 
     Shared by the single and batch shapes so the two can never drift — the
     `source_ref` field was advertised on the tool for a release while the
     dispatch that was supposed to read it silently dropped it.
+
+    Both required fields are checked here rather than left to the schema. A
+    missing ``success`` used to default to 0.5, which wrote a **real observation
+    nobody made**: the posterior moved, and in the deterministic regime any
+    reading settles a node, so `record_evidence(node_id="X")` — an ordinary LLM
+    truncation — permanently EXHAUSTED a hypothesis and retired its competing
+    answers. Asserting on no evidence is the one thing the belief state may not
+    do, and a default value is the quietest way to do it.
     """
+    node_id = item.get("node_id")
+    if not node_id:
+        raise ValueError(
+            "each result needs node_id: the hypothesis this measurement is about. "
+            "A result is {node_id, success, depth, claim_id?} — claim_id is optional."
+        )
+
     ev: Evidence
     if item.get("evidence_kind", "logical") == "infra":
         ev = InfraError(
@@ -910,15 +1004,22 @@ def _evidence_report(item: dict) -> EvidenceReport:
             message=item.get("message", ""),
         )
     else:
+        if item.get("success") is None:
+            raise ValueError(
+                f"'{node_id}' needs success: the normalized result in [0,1]. There is no "
+                f"default, because a made-up number is indistinguishable from a measurement "
+                f"once it is recorded. If the experiment could not be run, send "
+                f"evidence_kind='infra' instead — that never touches the belief."
+            )
         ev = LogicalEvidence(
-            success=item.get("success", 0.5),
+            success=item["success"],
             depth=item.get("depth", 0),
             metrics=item.get("metrics", {}),
             notes=item.get("notes", ""),
             source_ref=item.get("source_ref"),
         )
     return EvidenceReport(
-        node_id=item["node_id"],
+        node_id=str(node_id),
         evidence=ev,
         claim_id=item.get("claim_id"),
     )
@@ -929,6 +1030,10 @@ def _dispatch(engine: HypoTreeEngine, name: str, arguments: dict) -> object:
     if name == "create_hypotheses":
         results = engine.create_hypotheses(arguments["hypotheses"])
         return [r.model_dump(mode="json") for r in results]
+
+    if name == "add_edges":
+        added = engine.add_edges(arguments["edges"])
+        return [r.model_dump(mode="json") for r in added]
 
     if name == "get_next_targets":
         count = arguments.pop("count", 1)
@@ -1039,7 +1144,10 @@ def _dispatch(engine: HypoTreeEngine, name: str, arguments: dict) -> object:
 
     if name == "generate_learning_path":
         return engine.generate_learning_path(
-            limit=arguments.get("limit", 200), goal_id=arguments.get("goal_id")
+            limit=arguments.get("limit", 200),
+            goal_id=arguments.get("goal_id"),
+            since=_parse_instant(arguments.get("since"), "since"),
+            as_of=_parse_instant(arguments.get("as_of"), "as_of"),
         ).model_dump(mode="json")
 
     if name == "get_workspace_info":

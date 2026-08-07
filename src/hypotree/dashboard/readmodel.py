@@ -157,7 +157,12 @@ def _layer_positions(
 
 
 def _selection_probabilities(
-    frontier: list[Any], all_nodes: list[Any], rng: np.random.Generator
+    frontier: list[Any],
+    all_nodes: list[Any],
+    rng: np.random.Generator,
+    *,
+    eliminated_ids: set[str] | None = None,
+    directives: dict[str, Any] | None = None,
 ) -> dict[str, float]:
     """How likely the navigator is to hand out each frontier node next.
 
@@ -167,15 +172,38 @@ def _selection_probabilities(
     rather than a monotone stand-in like the posterior mean — which matters,
     because the first thing anyone asks about a glowing node is what the
     brightness actually means.
+
+    The directives are applied first, because they are absolute rather than
+    probabilistic: a suspended node is never offered, and if anything is pinned
+    the navigator offers *only* the pinned set. Leaving them out made the panel
+    wrong in the one situation the reader has most reason to check it — straight
+    after using the dashboard's own pin or hold-back button, which is the only
+    way those directives are ever set.
     """
     if not frontier:
         return {}
-    counts = live_group_counts(all_nodes)
-    params = np.array([effective_posterior(n, counts) for n in frontier], dtype=float)
+    directives = directives or {}
+
+    def _mode(node_id: str) -> str:
+        # `get_directives` hands back sqlite3.Row, which indexes but has no .get.
+        row = directives.get(node_id)
+        return "" if row is None else str(row["mode"] or "")
+
+    offered = [n for n in frontier if _mode(n.id) != "suspend"]
+    pinned = [n for n in offered if _mode(n.id) == "pin"]
+    if pinned:
+        offered = pinned
+    if not offered:
+        return {n.id: 0.0 for n in frontier}
+
+    counts = live_group_counts(all_nodes, eliminated_ids)
+    params = np.array([effective_posterior(n, counts) for n in offered], dtype=float)
     # (draws x candidates); argmax per row is one full Thompson selection.
-    draws = rng.beta(params[:, 0], params[:, 1], size=(_SELECT_DRAWS, len(frontier)))
-    wins = np.bincount(draws.argmax(axis=1), minlength=len(frontier))
-    return {n.id: float(w) / _SELECT_DRAWS for n, w in zip(frontier, wins, strict=True)}
+    draws = rng.beta(params[:, 0], params[:, 1], size=(_SELECT_DRAWS, len(offered)))
+    wins = np.bincount(draws.argmax(axis=1), minlength=len(offered))
+    probs = {n.id: 0.0 for n in frontier}
+    probs.update({n.id: float(w) / _SELECT_DRAWS for n, w in zip(offered, wins, strict=True)})
+    return probs
 
 
 class ReadModel:
@@ -316,7 +344,14 @@ class ReadModel:
         p_select: dict[str, float] = {}
         if historical is None:
             frontier = [n for n in self._engine._frontier_nodes() if n.id in known]
-            p_select = _selection_probabilities(frontier, self.store.get_all_nodes(), self._rng)
+            live_nodes = self.store.get_all_nodes()
+            p_select = _selection_probabilities(
+                frontier,
+                live_nodes,
+                self._rng,
+                eliminated_ids=self._engine._eliminated_ids(live_nodes),
+                directives=self.store.get_directives(),
+            )
 
         out_nodes = []
         for node in nodes:
@@ -447,8 +482,14 @@ class ReadModel:
         scope = self._engine._resolve_goal_scope(goal_id)
         nodes = self.store.get_all_nodes()
         frontier = [n for n in self._engine._frontier_nodes() if scope is None or n.id in scope]
-        probs = _selection_probabilities(frontier, nodes, self._rng)
         directives = self.store.get_directives()
+        probs = _selection_probabilities(
+            frontier,
+            nodes,
+            self._rng,
+            eliminated_ids=self._engine._eliminated_ids(nodes),
+            directives=directives,
+        )
         ranked = sorted(frontier, key=lambda n: -probs.get(n.id, 0.0))[: max(k, 0)]
         return {
             "revision": self.revision(),
@@ -467,11 +508,19 @@ class ReadModel:
         }
 
     def learning_path(
-        self, goal_id: str | None = None, limit: int = 200, at: str | None = None
+        self,
+        goal_id: str | None = None,
+        limit: int = 200,
+        at: str | None = None,
+        since: str | None = None,
     ) -> dict[str, Any]:
-        """The narrative, straight from the engine so it cannot drift from the tool."""
+        """The narrative, straight from the engine so it cannot drift from the tool.
+
+        With ``since`` it is a diff instead: what settled or was withdrawn between
+        two points on the same timeline the scrubber already walks.
+        """
         return self._engine.generate_learning_path(
-            limit=limit, goal_id=goal_id, as_of=_parse_at(at)
+            limit=limit, goal_id=goal_id, as_of=_parse_at(at), since=_parse_at(since, "since")
         ).model_dump(mode="json")
 
     def timeline(self, goal_id: str | None = None) -> dict[str, Any]:
@@ -505,15 +554,25 @@ class ReadModel:
         }
 
 
-def _parse_at(at: str | None) -> datetime | None:
+def _parse_at(at: str | None, field: str = "at") -> datetime | None:
     if not at:
         return None
+    raw = at
+    # `+` is the query-string encoding of a space, so a URL carrying an offset
+    # verbatim — `?at=2026-08-07T09:00:00+00:00` — arrives here with a space
+    # where the sign belongs. The browser client encodes it, but a hand-written
+    # URL or a copied timestamp does not, and the endpoint answered 400 for a
+    # perfectly good instant. A space in that position is unambiguous.
+    if len(raw) > 6 and raw[-6] == " " and raw[-3] == ":":
+        raw = raw[:-6] + "+" + raw[-5:]
+    # Python 3.10's parser rejects the `Z` suffix, which is exactly what a
+    # timestamp copied out of a JSON payload carries.
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
     try:
-        # Python 3.10's parser rejects the `Z` suffix, which is exactly what a
-        # timestamp copied out of a JSON payload carries.
-        parsed = datetime.fromisoformat(at[:-1] + "+00:00" if at.endswith("Z") else at)
+        parsed = datetime.fromisoformat(raw)
     except ValueError as exc:
-        raise ValueError(f"`at` must be an ISO-8601 timestamp, got {at!r}") from exc
+        raise ValueError(f"`{field}` must be an ISO-8601 timestamp, got {at!r}") from exc
     # Stored instants are UTC-aware; a hand-typed naive one would raise on the
     # first comparison rather than mean anything different.
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

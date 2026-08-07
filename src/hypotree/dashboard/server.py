@@ -404,7 +404,10 @@ class DashboardServer:
                 return 200, self._read.frontier(goal_id, _int(request.one("k"), 5))
             if path == "/api/learning-path":
                 return 200, self._read.learning_path(
-                    goal_id, _int(request.one("limit"), 200), request.one("at")
+                    goal_id,
+                    _int(request.one("limit"), 200),
+                    request.one("at"),
+                    request.one("since"),
                 )
             if path == "/api/timeline":
                 return 200, self._read.timeline(goal_id)

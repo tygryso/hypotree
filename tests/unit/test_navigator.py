@@ -5,6 +5,7 @@ DONE sentinel, convergence gate, claim consumption, regime-aware transitions.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -521,3 +522,64 @@ def test_tiebreak_never_overrides_a_real_theta_gap(sampler: ThompsonSampler) -> 
         [promising, hopeless], [promising, hopeless], now=now, last_group="axis-1"
     )
     assert result.node_id == "promising"
+
+
+@pytest.mark.unit
+def test_the_group_prior_shrinks_on_a_member_ruled_out_by_its_own_evidence(
+    tmp_path: Path,
+) -> None:
+    """The mechanism was inert on the path the eval actually exercises.
+
+    `live_group_counts` counted only INVALIDATED/PRUNED, but the deterministic
+    regime refutes only on an exact 0.0 and sends everything else to EXHAUSTED.
+    So a five-way question with four candidates measured and rejected still
+    reported k=5, and the survivor's prior mean stayed at 0.2 — *below* an
+    untouched ungrouped node. The navigator deprioritised the one candidate
+    nearly certain to be the answer.
+    """
+    from hypotree.engine import HypoTreeEngine
+    from hypotree.models.evidence import LogicalEvidence
+    from hypotree.navigator.sampler import live_group_counts
+
+    engine = HypoTreeEngine(tmp_path / "prior.db", rng_seed=7)
+    try:
+        for i in range(5):
+            engine.create_hypothesis(
+                f"q={i}", node_id=f"q{i}", exclusion_group="q", exclusion_closed=False
+            )
+        for i in range(3):
+            engine.record_evidence(f"q{i}", LogicalEvidence(success=0.3, depth=1))
+
+        nodes = engine._store.get_all_nodes()
+        assert all(n.status is Status.EXHAUSTED for n in nodes if n.id in {"q0", "q1", "q2"})
+
+        assert live_group_counts(nodes) == {"q": 5}, "status alone cannot see it"
+        eliminated = engine._eliminated_ids(nodes)
+        assert live_group_counts(nodes, eliminated) == {"q": 2}
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_a_member_set_aside_by_the_inference_does_not_shrink_the_prior(
+    tmp_path: Path,
+) -> None:
+    """Nothing was observed about it, so counting it would let one confirmation
+    deduce the rest of its own group from itself — the unsoundness the closed-
+    world work exists to prevent."""
+    from hypotree.engine import HypoTreeEngine
+    from hypotree.models.evidence import LogicalEvidence
+
+    engine = HypoTreeEngine(tmp_path / "inferred.db", rng_seed=7)
+    try:
+        for i in range(3):
+            engine.create_hypothesis(f"g={i}", node_id=f"g{i}", exclusion_group="g")
+        engine.record_evidence("g0", LogicalEvidence(success=1.0, depth=1))
+
+        nodes = engine._store.get_all_nodes()
+        retired = [n for n in nodes if n.id in {"g1", "g2"}]
+        assert all(n.status is Status.EXHAUSTED for n in retired)
+        # Retired by inference, not by measurement — so still live candidates.
+        assert engine._eliminated_ids(nodes) == set()
+    finally:
+        engine.close()

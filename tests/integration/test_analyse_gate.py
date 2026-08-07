@@ -455,11 +455,15 @@ def test_iterate_decision(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
-def test_missing_seeds_fails(tmp_path: Path) -> None:
-    """An incomplete seed set must fail criterion 1 rather than score a subset.
+def test_missing_seeds_is_inconclusive_not_a_stop_verdict(tmp_path: Path) -> None:
+    """An incomplete seed set cannot be scored, and that is not the same as failing.
 
-    Guards against a partially-completed run silently producing a decision from
-    whichever seeds happened to finish.
+    Infra-failed episodes are deliberately dropped from the paired set — censoring
+    one would charge an arm for the inference server's bad minute — which leaves
+    fewer than the pre-registered n. Reading that as "criterion 1 failed" forced
+    STOP, so a single dropped HTTP connection anywhere in 90 episodes became a
+    pre-registered instruction to abandon the project. Insufficient data is a
+    data-availability fact; STOP is a scientific conclusion.
     """
     runs_dir = tmp_path / "runs"
     runs_dir.mkdir()
@@ -491,8 +495,9 @@ def test_missing_seeds_fails(tmp_path: Path) -> None:
 
     result = analyse(runs_dir)
 
-    assert result.decision == "STOP"
+    assert result.decision == "INCONCLUSIVE"
     assert result.criteria["criterion_1_moat"]["passed"] is False
+    assert result.criteria["criterion_1_moat"]["insufficient_data"] is True
 
 
 @pytest.mark.integration
@@ -646,7 +651,10 @@ def test_criterion3_counts_identified_culprits() -> None:
     result = _criterion3_revision({TASK_SEEDS[0]: events})
 
     assert result.metrics["culprits_identified"] == 1
-    assert result.metrics["revision_events"] == 2
+    # A resolution is the same conflict later in its life, not a second event.
+    # Summing both made the headline rise with how *well* the diagnosis worked.
+    assert result.metrics["conflicts_recorded"] == 1
+    assert result.metrics["revision_events"] == 1
 
 
 @pytest.mark.unit

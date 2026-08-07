@@ -705,14 +705,50 @@ def test_schema_versions_are_ordered_as_numbers_not_strings() -> None:
     package instead of the one to keep the file. Only reachable once the counter
     reached two digits, so nothing caught it before v10.
     """
-    from hypotree.store.store import _is_newer_version
+    from hypotree.store.store import _is_newer_version, _is_ordered_version
 
     assert _is_newer_version("11", "10")
     assert not _is_newer_version("9", "10")
     assert not _is_newer_version("3", "10")
-    # A hand-edited stamp cannot be ordered, so it is not newer — the caller's
-    # other branch tells the user to keep the file, which is the right answer.
-    assert not _is_newer_version("wat", "10")
+    # Unorderable stamps are rejected before any comparison. Swallowing the
+    # ValueError here made *both* guards false, which is the defect below.
+    assert _is_ordered_version("10")
+    assert not _is_ordered_version("wat")
+    assert not _is_ordered_version("0.4.0")
+    assert not _is_ordered_version("")
+
+
+@pytest.mark.unit
+def test_an_unorderable_stamp_is_refused_rather_than_migrated_past(tmp_path: Path) -> None:
+    """The failure this replaces was silent, total and permanent.
+
+    `_is_newer_version` returned False for anything `int()` could not parse, and
+    both guards called it — so a stamp like '0.4.0' was neither "newer than this
+    hypotree" nor "older than the chain". Control fell through, `pending` came
+    out empty, every migration was skipped, and the file was then **re-stamped
+    as current**. That last step is what made it unrecoverable: a later open by
+    correct code sees a version needing no work, so the missing columns can never
+    be added.
+    """
+    import sqlite3
+
+    from hypotree.store.store import SchemaVersionError
+
+    db = tmp_path / "hand-edited.db"
+    HypoTreeStore(db).close()
+    con = sqlite3.connect(db)
+    con.execute("UPDATE schema_state SET schema_version='0.4.0' WHERE id=1")
+    con.commit()
+    con.close()
+
+    with pytest.raises(SchemaVersionError, match="not a schema counter"):
+        HypoTreeStore(db)
+
+    # And crucially the stamp is left alone, so the file stays diagnosable.
+    con = sqlite3.connect(db)
+    stamped = con.execute("SELECT schema_version FROM schema_state WHERE id=1").fetchone()[0]
+    con.close()
+    assert stamped == "0.4.0", "a refusal must not rewrite the evidence of what happened"
 
 
 @pytest.mark.unit

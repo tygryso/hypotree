@@ -85,7 +85,7 @@ async def test_stdio_round_trip(server_env: dict[str, str]) -> None:
             done.append("initialize")
 
             tools = await session.list_tools()
-            assert len(tools.tools) == 18
+            assert len(tools.tools) == 19
             done.append("list_tools")
 
             res = await session.call_tool(
@@ -95,6 +95,18 @@ async def test_stdio_round_trip(server_env: dict[str, str]) -> None:
             assert created["node"]["id"] == "n1"
             assert created["created"] is True
             done.append("create_hypotheses")
+
+            # Wiring existing nodes is the forward-growth path, so it has to work
+            # over the real transport rather than only in-process.
+            await session.call_tool(
+                "create_hypotheses", {"hypotheses": [{"statement": "e2e b", "node_id": "n2"}]}
+            )
+            res = await session.call_tool(
+                "add_edges", {"edges": [{"src": "n1", "dst": "n2", "type": "DEPENDENCY"}]}
+            )
+            wired = json.loads(res.content[0].text)[0]
+            assert wired["created"] is True and wired["src"] == "n1"
+            done.append("add_edges")
 
             res = await session.call_tool("get_next_targets", {})
             target = json.loads(res.content[0].text)[0]
@@ -130,6 +142,7 @@ async def test_stdio_round_trip(server_env: dict[str, str]) -> None:
         "initialize",
         "list_tools",
         "create_hypotheses",
+        "add_edges",
         "get_next_targets",
         "record_evidence",
         "render_dag_map",
@@ -273,6 +286,7 @@ def test_tool_definitions_complete() -> None:
     names = {t.name for t in tools}
     expected = {
         "create_hypotheses",
+        "add_edges",
         "get_next_targets",
         "record_evidence",
         "renew_claim",
@@ -745,3 +759,69 @@ def test_get_workspace_info_is_reachable_over_the_tool_surface(
         assert info["resolved_from"] == "env"
     finally:
         engine.close()
+
+
+@pytest.mark.unit
+def test_a_result_with_no_success_is_refused_rather_than_invented() -> None:
+    """A default `success` writes a measurement nobody took.
+
+    `record_evidence(node_id="X")` is an ordinary LLM truncation, and it used to
+    default to 0.5 — which moves the posterior and, in the deterministic regime,
+    settles the node outright as EXHAUSTED and retires its competing answers. The
+    belief state may assert only what was observed or soundly inferred; a default
+    value is the quietest possible way to break that.
+    """
+    from hypotree.mcp_server import _evidence_report
+
+    with pytest.raises(ValueError, match="needs success"):
+        _evidence_report({"node_id": "h1"})
+    # And the refusal names the alternative, rather than a Python key.
+    with pytest.raises(ValueError, match="evidence_kind='infra'"):
+        _evidence_report({"node_id": "h1"})
+    with pytest.raises(ValueError, match="needs node_id"):
+        _evidence_report({"success": 1.0})
+    # An explicit zero is a real measurement and must survive.
+    assert _evidence_report({"node_id": "h1", "success": 0.0}).evidence.success == 0.0
+    # An infra report legitimately carries no success.
+    assert _evidence_report({"node_id": "h1", "evidence_kind": "infra"}).evidence.kind == "infra"
+
+
+@pytest.mark.unit
+def test_the_record_evidence_schema_requires_what_the_dispatch_requires() -> None:
+    """Schema and dispatch drifting apart is how `source_ref` was lost for a release."""
+    from hypotree.mcp_server import _tool_definitions
+
+    tools = {t.name: t for t in _tool_definitions()}
+    item = tools["record_evidence"].inputSchema["properties"]["results"]
+    assert item["minItems"] == 1, "an empty batch is a mistake, not a no-op"
+    assert set(item["items"]["required"]) == {"node_id", "success"}
+
+
+@pytest.mark.unit
+def test_every_lease_ttl_schema_refuses_a_dead_lease() -> None:
+    """A zero-second lease expires the instant it is issued.
+
+    The agent then runs the experiment and cannot file the result. `renew_claim`
+    validated this and the two tools that *issue* leases did not.
+    """
+    from hypotree.mcp_server import _tool_definitions
+
+    tools = {t.name: t for t in _tool_definitions()}
+    for name in ("get_next_targets", "record_evidence", "renew_claim"):
+        schema = tools[name].inputSchema["properties"]["lease_ttl_s"]
+        assert schema.get("minimum") == 1, f"{name} accepts a lease that is dead on arrival"
+
+
+@pytest.mark.unit
+def test_exhausted_can_be_queried_directly() -> None:
+    """It is the status the exclusion inference produces most, and the enum omitted it.
+
+    The SDK enforces `inputSchema`, so `list_nodes(status_filter=["EXHAUSTED"])`
+    was rejected outright — the `view="settled"` workaround bundles three other
+    statuses.
+    """
+    from hypotree.mcp_server import _tool_definitions
+
+    tools = {t.name: t for t in _tool_definitions()}
+    enum = tools["list_nodes"].inputSchema["properties"]["status_filter"]["items"]["enum"]
+    assert "EXHAUSTED" in enum

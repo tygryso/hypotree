@@ -261,13 +261,21 @@
     </button>
     <div class="timebar" :title="'Activity over the run — drag to travel back'">
       <div v-for="(b, i) in activity" :key="i" class="bin"
-           :class="{past: i <= binOfScrub, here: i === binOfScrub}"
+           :class="{past: i <= binOfScrub, here: i === binOfScrub, inwindow: inWindow(i)}"
            :style="{height: b.h + '%'}"></div>
       <div class="cursor" :style="{left: cursorPct + '%'}" v-if="timeline.ticks.length"></div>
+      <div class="cursor since" :style="{left: sincePct + '%'}" v-if="sinceTick !== null"></div>
       <input type="range" min="0" :max="lastTick" v-model.number="scrub"
              :disabled="!timeline.ticks.length" aria-label="Time travel">
     </div>
     <span class="timbar-right">
+      <button @click="markSince()" :disabled="!timeline.ticks.length"
+              :title="'Report only what changed after this point — for a standup or a PR description'">
+        {{ sinceTick === null ? 'Diff from here' : 'Move start' }}
+      </button>
+      <button @click="clearSince()" v-if="sinceTick !== null" title="Back to the full narrative">
+        Clear diff
+      </button>
       <button @click="goLive()" v-if="!atLive">Live</button>
       <span class="tick-label">{{ scrubLabel }}</span>
     </span>

@@ -455,6 +455,9 @@ footer button { padding: 0.3rem 0.6rem; min-width: 2.1rem; margin-left: 0.3rem; 
 }
 .timebar .bin.past { background: #a5b4fc; }
 .timebar .bin.here { background: var(--accent); }
+/* The diff window is the span the narrative is reporting on, so it reads as one
+   block rather than as two independent handles. */
+.timebar .bin.inwindow { background: var(--accent); opacity: 0.55; }
 .timebar input[type="range"] {
   position: absolute; inset: 0; width: 100%; height: 100%;
   margin: 0; opacity: 0; cursor: pointer;
@@ -468,6 +471,8 @@ footer button { padding: 0.3rem 0.6rem; min-width: 2.1rem; margin-left: 0.3rem; 
   content: ""; position: absolute; top: -3px; left: -3px;
   width: 8px; height: 8px; border-radius: 50%; background: var(--navy);
 }
+.timebar .cursor.since { background: var(--accent); }
+.timebar .cursor.since::after { background: var(--accent); }
 .timbar-right {
   width: 250px;
 }

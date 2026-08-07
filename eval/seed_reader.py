@@ -1009,7 +1009,12 @@ def _section_belief_state(logs: list[RunLog]) -> list[str]:
     reported = sum(log.evidence_records for log in b_logs)
     claimed = sum(log.claimed_records for log in b_logs)
     composed = reported - claimed
-    unreported = max(0, targets - claimed)
+    # A lease handed back is not a lost probe. `release_claims` is the documented
+    # response to work you have decided not to run, and the same events were
+    # already reported one row below as "leases released" — so counting them here
+    # too described one action twice, in contradictory terms.
+    released = sum(log.claims_released for log in b_logs)
+    unreported = max(0, targets - claimed - released)
     summary_rows = [
         ["nodes created", str(nodes), "`node_created` events that actually created a node"],
         [

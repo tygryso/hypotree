@@ -28,6 +28,17 @@ class SchemaVersionError(RuntimeError):
     """Raised when the DB schema version does not match the code's expectation."""
 
 
+def _is_ordered_version(version: str) -> bool:
+    """Whether a stamp can be compared at all.
+
+    Schema versions are counters. Anything else — a semver written by a third
+    party, a hand edit, a half-written value from an interrupted stamp — cannot
+    be placed in the chain, and guessing where it belongs is how a database gets
+    silently left at the wrong shape.
+    """
+    return version.strip().isdigit()
+
+
 def _is_newer_version(version: str, current: str) -> bool:
     """Whether a stamp names a release later than this one.
 
@@ -36,14 +47,13 @@ def _is_newer_version(version: str, current: str) -> bool:
     and even '3' as newer than '10' — which sent a user with a corrupt stamp the
     instruction to upgrade the package instead of the one to keep the file.
 
-    A stamp that is not a number cannot be ordered at all, so it is not newer:
-    the caller's other branch tells them to keep the database and open an issue,
-    which is the right answer for a hand-edited or garbage value.
+    Unorderable stamps never reach here; :func:`_is_ordered_version` rejects them
+    up front. Returning False for one made *both* guard branches fall through,
+    so a garbage stamp skipped every migration and then re-stamped the file as
+    current — which is unrecoverable, because the next open sees a version that
+    needs no work.
     """
-    try:
-        return int(version) > int(current)
-    except ValueError:
-        return False
+    return int(version) > int(current)
 
 
 def _app_version() -> str:
@@ -200,6 +210,18 @@ class HypoTreeStore:
         # would put "migrated from 8 to 9" in the history of every new workspace,
         # which is false and would bury the first real one.
         fresh = self._recorded_version() is None
+
+        # Refused before either comparison, because an unorderable stamp made
+        # both of them false: the file then skipped every migration, was left at
+        # whatever shape it happened to have, and — worst of all — was re-stamped
+        # as current, so no later open could ever repair it.
+        if not _is_ordered_version(current):
+            raise SchemaVersionError(
+                f"schema_version={current!r} at {self._db_path} is not a schema counter, "
+                f"so it cannot be placed in the migration chain. Back the file up and "
+                f"open an issue — do not delete it, and do not edit the stamp by hand: "
+                f"the shape of the tables is what decides which version it really is."
+            )
 
         if _is_newer_version(current, SCHEMA_VERSION):
             raise SchemaVersionError(
@@ -1158,6 +1180,19 @@ class HypoTreeStore:
         return self._conn.execute(
             "SELECT * FROM status_history ORDER BY valid_from, node_id"
         ).fetchall()
+
+    def current_status_reasons(self) -> dict[str, str]:
+        """Why every node holds the status it currently holds, in one query.
+
+        The reason on the open interval is what separates a hypothesis that was
+        tested and missed the bar from one merely set aside because a sibling was
+        confirmed — the same status, two entirely different claims. Reading it
+        per node is an N+1 on a path that runs per dispatch.
+        """
+        rows = self._conn.execute(
+            "SELECT node_id, reason FROM status_history WHERE valid_to IS NULL"
+        ).fetchall()
+        return {r["node_id"]: str(r["reason"] or "") for r in rows}
 
     def get_posterior_history(self, node_id: str) -> list[sqlite3.Row]:
         return self._conn.execute(

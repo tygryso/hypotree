@@ -9,8 +9,8 @@
 <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg" alt="Changelog"></a>
-<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-788-brightgreen.svg" alt="Tests: 788"></a>
-<a href="https://github.com/tygryso/hypotree/blob/master/pyproject.toml"><img src="https://img.shields.io/badge/version-0.4.2-blue.svg" alt="Version: 0.4.2"></a>
+<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-814-brightgreen.svg" alt="Tests: 814"></a>
+<a href="https://github.com/tygryso/hypotree/blob/master/pyproject.toml"><img src="https://img.shields.io/badge/version-0.5.0-blue.svg" alt="Version: 0.5.0"></a>
 <a href="https://pypi.org/project/hypotree/"><img src="https://img.shields.io/pypi/v/hypotree.svg" alt="PyPI"></a>
 </p>
 
@@ -167,7 +167,7 @@ What you get:
 
 Everything is vendored (Vue 3, d3 micromodules, marked — 276 KB total). No CDN, no npm, no build step: it works on a plane and in an air-gapped network.
 
-The API is read-only JSON, and every `/api/*` call needs the token:
+The API is JSON and every `/api/*` call needs the token. Everything is a read except one route — pin and suspend are scheduling instructions, and they never touch a posterior:
 
 | Route | What it returns |
 |-------|-----------------|
@@ -175,7 +175,7 @@ The API is read-only JSON, and every `/api/*` call needs the token:
 | `GET /api/graph?goal_id=&at=` | nodes and edges with server-computed layout; `at` reconstructs any past instant |
 | `GET /api/node/<id>` | one node's evidence, provenance and status intervals |
 | `GET /api/frontier?goal_id=&k=` | the top candidates and how likely the navigator is to pick each next |
-| `GET /api/learning-path?goal_id=` | the narrative, same as the MCP tool |
+| `GET /api/learning-path?goal_id=&at=&since=` | the narrative, same as the MCP tool; `since` makes it a diff over a range |
 | `GET /api/timeline?goal_id=` | every status change in order |
 | `GET /api/events` | server-sent revision numbers — the client refetches what it is showing |
 | `POST /api/directive` | pin / suspend / clear (the only write, and only when an engine is attached) |
@@ -184,11 +184,12 @@ The API is read-only JSON, and every `/api/*` call needs the token:
 
 ---
 
-## MCP tools (18)
+## MCP tools (19)
 
 | Tool | What it does |
 |------|-------------|
 | `create_hypotheses` | Create one or many nodes with `parent_ids`, `exclusion_group`, `exclusion_closed`, `is_goal` |
+| `add_edges` | Wire hypotheses that already exist, without recreating either. Takes `edges`, a list of `{src, dst, type}` |
 | `get_next_targets` | Thompson Sampling — returns the next hypothesis to test, under a lease. `goal_id` narrows the search to one objective |
 | `record_evidence` | Record one result — or every result from a turn at once with `results=[…]` — and trigger write-back propagation |
 | `generate_learning_path` | What we learned, in order, and what it cost — separates conclusions an experiment paid for from ones the engine inferred free. `goal_id` narrates one objective |
@@ -289,7 +290,7 @@ belief state in hypotree rather than in the conversation.
 ┌──────────────▼──────────────────────────┐
 │         hypotree MCP Server             │
 │  ┌─────────────────────────────────┐    │
-│  │     Engine (18 tools)           │    │
+│  │     Engine (19 tools)           │    │
 │  │  • Write-back propagation       │    │
 │  │  • Cascading prune              │    │
 │  │  • Exclusion-group inference    │    │
@@ -299,7 +300,7 @@ belief state in hypotree rather than in the conversation.
 └─────────────┼───────────────────────────┘
               │
 ┌─────────────▼───────────────────────────┐
-│   SQLite-WAL (Schema v10, 9 tables)     │
+│   SQLite-WAL (Schema v10, 11 tables)    │
 │   • Bi-temporal history                 │
 │   • Belief state + evidence + conflicts │
 │   • Keyed by workspace_id               │

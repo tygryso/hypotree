@@ -4,6 +4,162 @@ All notable changes to hypotree are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-08-07
+
+### Added
+- **`add_edges` — grow a graph forward without destroying a node to do it.** A graph grows two
+  ways and only one of them was expressible. *Backward* growth discovers a premise underneath
+  something already pinned to the goal and leaves the goal alone. *Forward* growth extends a
+  pipeline and **must** re-pin the goal to the new last stage — a goal is met when its
+  DEPENDENCY parents are VERIFIED, so one still pinned to stage A reports itself achieved the
+  moment stage A verifies while B and C sit untested. The run stops early and calls it a success.
+  - Until now the only way to re-pin was recreating the goal with `if_exists="overwrite"`, a
+    documented **full replace**: omit `target_metric` and the goal silently loses the bar it is
+    measured against. Destroying a node to add an edge to it is not a reasonable price, and the
+    failure it invites is silent.
+  - **Nothing has to be removed.** DEPENDENCY is AND, and a later stage already depends on the
+    earlier one, so a goal wired to both is satisfied exactly when the later one is: the
+    condition is tightened, never loosened. That is why there is no edge removal to get wrong.
+  - Validated exactly as creation is and **all-or-nothing**: unknown endpoints, a goal used as a
+    DEPENDENCY parent (`GoalDependencyError`) and cycles are refused before anything is written.
+    An edge that already exists reports `created=False` rather than raising, so re-sending a plan
+    is safe. Tool count 18 → **19**.
+- **A belief diff over a range: `generate_learning_path(since=…)`.** A belief state's *changes*
+  are more interesting than its state. "Three hypotheses were confirmed and one was withdrawn" is
+  the sentence a standup, a PR description or a review wants, and reconstructing it by diffing two
+  full narratives by eye is what people did instead. Returns `settled_in_window`,
+  `withdrawn_in_window` and `probes_in_window` alongside the lifetime counters, which keep
+  describing the whole history — "what did this cost in total" does not become a different
+  question this week. Combine with `as_of` for a closed window; a window running backwards is
+  refused rather than silently returning nothing, which would read as "nothing changed".
+  - A **withdrawn** belief is the most interesting thing in a window and the easiest to omit, so
+    reversals are counted separately and a window with nothing in it says so in as many words.
+  - **On the dashboard**, the scrubber that already picks an instant now picks two: *Diff from
+    here* marks a start, the window is shaded on the activity histogram, and the narrative beside
+    the graph becomes the diff. Same control, used twice.
+  - Exposed as `since` on the MCP tool and `GET /api/learning-path?since=`.
+- Recorded `artifacts` are read back in `get_evidence_history` and the dashboard provenance
+  panel. Written since the first release and consumed by nothing — an audit trail that cannot
+  produce the log it refers to is not an audit trail, and it is the same defect that was fixed
+  for `context_hash` a year earlier.
+- `status_filter` accepts **`EXHAUSTED`**. It is the status the exclusion inference produces most
+  and the one that could not be queried directly; the SDK enforces `inputSchema`, so the filter
+  was rejected outright and the `view="settled"` workaround bundles three other statuses.
+
+### Fixed
+- **A missing `success` invented a measurement and settled the hypothesis.** `record_evidence`
+  defaulted it to 0.5, so `record_evidence(node_id="X")` — an ordinary LLM truncation, and valid
+  against the schema — wrote a real evidence row, moved the posterior to Beta(1.5, 1.5) and, in
+  the deterministic regime where any reading is conclusive, transitioned the node to
+  **EXHAUSTED** and retired its competing answers. The belief state may assert only what was
+  observed or soundly inferred, and a default value is the quietest possible way to break that.
+  Both fields are now required by the schema *and* by the dispatch, and the refusal names the
+  contract and points at `evidence_kind="infra"` for an experiment that could not be run.
+- **A schema stamp that is not a number skipped every migration and then re-stamped the file as
+  current.** `_is_newer_version` swallowed the `ValueError`, so *both* guards read False: neither
+  "newer than this hypotree" nor "predates the chain" fired, `pending` came out empty, and the
+  database was left at whatever shape it had — then stamped `10`. That last step made it
+  **unrecoverable**: a later open by correct code sees a version needing no work, so the missing
+  columns can never be added. Unorderable stamps are now refused up front, and the refusal leaves
+  the stamp alone so the file stays diagnosable.
+- **The exclusion-group prior was inert on the path the eval exercises.** `live_group_counts`
+  counted only INVALIDATED/PRUNED, but the deterministic regime refutes only on an exact 0.0 and
+  sends everything else to EXHAUSTED. A five-way question with four candidates measured and
+  rejected still reported k=5, so the survivor's prior mean stayed at 0.2 — **below** an
+  untouched ungrouped node. The navigator was deprioritising the one candidate nearly certain to
+  be the answer. It now takes the engine's own definition of *ruled out* (refuted, or EXHAUSTED
+  by its own evidence — the definition the guide states and deduction uses), resolved in one bulk
+  query rather than one status history per node. A member set aside *by the inference* still does
+  not count: nothing was observed about it, and counting it would let one confirmation deduce the
+  rest of its own group from itself.
+- **The dashboard's glow ignored the directive the reader had just set.** `p_select` was a pure
+  argmax over Beta draws, so a suspended node still glowed and a pin did not collapse the
+  frontier — wrong in the one situation the reader has most reason to check it, straight after
+  using the dashboard's own buttons, which are the only way those directives are ever set.
+- **`?at=` rejected a timestamp carrying its own offset.** `+` is the query-string encoding of a
+  space, so `?at=2026-08-07T09:00:00+00:00` arrived with a space where the sign belongs and the
+  endpoint answered 400 for a perfectly good instant. The browser client encodes it and was fine;
+  anyone hand-writing a URL or pasting a timestamp was not, and the time machine has shipped that
+  way since it landed. The refusal also now names the field the caller actually passed.
+- **A lease could be issued dead on arrival.** `lease_ttl_s` carried `minimum: 1` on
+  `renew_claim` and nothing on the two tools that *issue* leases, while `expire_stale_claims`
+  uses `<=` deliberately — so `get_next_targets(lease_ttl_s=0)` handed back a claim that expired
+  the instant it was created. The agent runs the experiment and cannot file the result.
+- **One dropped HTTP connection turned a 90-episode run into a STOP verdict.** Infra-failed
+  episodes are dropped from the paired set on purpose — censoring one would charge an arm for the
+  inference server's bad minute — but that leaves fewer than the pre-registered n, which
+  `_paired_moat_comparison` reported as a *failed* criterion 1, which forces STOP. A
+  data-availability fact was being emitted as a pre-registered instruction to abandon the
+  project. New **`INCONCLUSIVE`** decision; the thresholds themselves are untouched.
+- **Criterion 3 double-counted every conflict that resolved.** `revision_events` summed conflicts
+  *and* culprits, but a resolution is the same conflict later in its life — so the headline rose
+  with how *well* the diagnosis worked, up to 2× for a run that narrowed everything.
+- **`dispatches never reported` counted leases the agent handed back.** `release_claims` is the
+  documented response to work you have decided not to run, and the same events were already
+  reported one row below as "leases released" — so one action appeared twice, in contradictory
+  terms, one of them labelled "work paid for and lost".
+- README: the API is no longer described as read-only two lines above a route table listing a
+  write; the architecture box said 9 tables and there are 11.
+- **Re-attributing a retired sibling was a silent no-op, and buried the answer forever.** When a
+  question has two confirmed answers and the first is withdrawn, the siblings it retired are
+  supposed to be re-attributed to the second. That call passed the status the sibling already
+  held, which `change_status` correctly refuses as a non-transition — so the marker kept naming a
+  node that no longer confirmed anything, and since retraction keys on that marker, **nothing
+  could ever reopen the sibling again**. The question ended with zero live answers and its only
+  untried candidate EXHAUSTED, reported by nothing: `_eliminated_on_its_own_evidence` returns
+  False for it, so not even `dead_question` fired. New `store.reattribute_status` rewrites the
+  justification without opening a second interval at the instant the first closes.
+- **`_cascade_prune` was the one path out of VERIFIED that bypassed the exclusion sync.** Every
+  other route surrenders the authority to keep competing answers retired; the cascade did not, so
+  a pruned confirmation left a question with no live answer and the only untried candidate buried
+  beneath a node nobody believes.
+- **A conflict nobody could swap held its members off the frontier forever.** A member with no
+  exclusion group — or whose group has no live alternative left — can never be cleared, so the
+  conflict never left `_diagnosing_nogoods`. The caller was handed a bare `empty_frontier` with
+  **no rationale at all** while untested hypotheses sat in the store, which is exactly the
+  failure the DONE taxonomy exists to prevent.
+- **Omitting `claim_id` never consumed the node's own lease.** A *wrong* id was already recovered
+  from it; an absent one was not, which is backwards — absent is the documented ordinary path.
+  The lease stayed live for its full TTL, holding a settled node off the frontier and reporting
+  it as dispatched-and-never-reported.
+- **`awaiting_evidence` was checked before every substantive diagnosis**, so one leaked lease
+  masked `awaiting_substitution`, `awaiting_composition`, `dead_question` and `blocked_frontier`
+  alike — telling the caller to record evidence it had already recorded, when recording could not
+  help because nothing was left to record.
+- **`PRUNED` counted as a refutation when narrowing a conflict.** It says an ancestor was
+  refuted, not that this assumption caused the failure — so a conflict closed on collateral
+  damage, released every other member, and then spent the review budget on the wrong question's
+  alternatives.
+- **`_question_is_dead` counted already-recovered conflicts as live.**
+  `_recover_from_interaction` sets `reopened_at` and deliberately never `resolved_at`, so one
+  interaction recovery silenced the dead question for that group for the rest of the workspace's
+  life.
+- **`_eliminate_substitute` called `_deduce_last_member` without `_propagate_dead_question`** —
+  the one elimination path missing the pair, and the call site
+  `_eliminated_on_its_own_evidence` was specifically extended to cover.
+
+### Eval harness
+- **The exclusion-yield baseline described an engine hypotree does not ship.** Yield was scored
+  against `(k-1)/2k`, the blind baseline for an **open** group, while every group in the eval is
+  **closed** — and a closed group retires one more question for free with no ordering skill at
+  all, because the engine confirms the last survivor by elimination. The correct baseline is
+  `(k²-k+2)/2k²`, **44%** at k=5, validated against a 400 000-trial simulation. Re-scored, runs
+  G (45%), K (43%) and L (44%) all sit **at** the baseline: there was never a regression to
+  recover and never a signal to celebrate. The baseline is now summed **per group** rather than
+  taken from the mean size, because it is non-linear in k, and `exclusion_closed` is logged on
+  `node_created` so the reader can tell the two worlds apart.
+
+### Performance
+- **`stale_node_ids` was an N+1** — one evidence query per VERIFIED node, the same shape that was
+  most of the 41× in v0.4.0. Now one `latest_context_hash_by_node` query, asserted by counting
+  round-trips rather than by timing so it cannot pass by accident on a fast machine.
+- **`capture_git_context` spawned two subprocesses per result.** `record_results` calls
+  `_record_one` per report, so an eight-result batch spawned **sixteen** processes, each with a
+  5 s timeout, to learn one commit hash that cannot have moved between them. Resolved once per
+  batch, lazily: a batch whose evidence carries its own context spawns **none**.
+- Dispatch measured at **46 ms at 1200 nodes** and flat in the number of open conflicts.
+
+
 ## [0.4.2] - 2026-08-05
 
 ### Fixed

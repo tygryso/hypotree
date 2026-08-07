@@ -259,6 +259,15 @@ class ActiveClaimSummary(BaseModel):
     expires_in_s: int
 
 
+class AddEdgeResult(BaseModel):
+    """One wiring operation. ``created`` is False when the edge was already there."""
+
+    src: str
+    dst: str
+    type: EdgeType
+    created: bool
+
+
 class CreateHypothesisResult(BaseModel):
     """Return value of create_hypotheses — carries the node + collision info."""
 
@@ -355,6 +364,13 @@ class LearningPathResponse(BaseModel):
     open_conflicts: int
     goals_met: int
     goals_total: int
+    # Populated only when a `since` bound was given. A diff answers "what
+    # changed", which the narrative cannot: the narrative says how we got here,
+    # and reconstructing the delta from two of them is done by eye today.
+    since: datetime | None = None
+    settled_in_window: int = 0
+    withdrawn_in_window: int = 0
+    probes_in_window: int = 0
 
 
 # How a settled node got there, keyed by the marker the engine wrote into the
@@ -1214,6 +1230,7 @@ class HypoTreeEngine:
             last_group=self._last_selected_group,
             priority_ids=set(suspects),
             all_goals_met=bool(goals) and all(self.goal_achieved(g) for g in goals),
+            eliminated_ids=self._eliminated_ids(all_nodes),
         )
 
         if result.status == "DONE":
@@ -1681,6 +1698,94 @@ class HypoTreeEngine:
         """
         live = [c for c in self._store.get_active_claims(now) if c["node_id"] == node_id]
         return live[0] if live else None
+
+    def add_edges(self, edges: list[dict[str, Any]]) -> list[AddEdgeResult]:
+        """Wire existing hypotheses together, without recreating either of them.
+
+        A graph grows two ways and only one of them was expressible. **Backward**
+        — a premise is discovered underneath something already pinned to the goal
+        — leaves the goal alone. **Forward** — a pipeline gains a stage — has to
+        re-pin the goal to the new last step, because a goal is met when its
+        DEPENDENCY parents are VERIFIED, so one still pinned to stage A reports
+        itself achieved the moment stage A verifies while B and C sit untested.
+
+        Until now the only way to re-pin was recreating the goal with
+        ``if_exists="overwrite"``, a documented *full replace*: omit
+        ``target_metric`` and the goal silently loses the bar it is measured
+        against. Destroying a node to add an edge to it is not a reasonable
+        price, and the failure it invites is silent.
+
+        **Adding is enough — nothing has to be removed.** DEPENDENCY is AND, and
+        a later stage already depends on the earlier one, so a goal wired to both
+        stage A and stage B is satisfied exactly when B is: the condition is
+        tightened, never loosened. Leaving the old edge in place is therefore
+        correct rather than merely tolerable, which is why there is no removal
+        here to get wrong.
+
+        Validated the same way creation is, and **all-or-nothing**: unknown
+        endpoints, a goal used as a DEPENDENCY parent, and cycles are all refused
+        before anything is written. An edge that already exists is reported as
+        ``created=False`` rather than raising, so re-sending a plan is safe.
+        """
+        specs: list[tuple[str, str, EdgeType]] = []
+        for i, item in enumerate(edges):
+            unknown = set(item) - {"src", "dst", "type", "edge_type"}
+            if unknown:
+                raise ValueError(
+                    f"edges[{i}] has unknown field(s) {sorted(unknown)}; "
+                    f"an edge is {{src, dst, type}}"
+                )
+            src, dst = item.get("src"), item.get("dst")
+            if not src or not dst:
+                raise ValueError(
+                    f"edges[{i}] needs src and dst. The edge runs from the hypothesis being "
+                    f"assumed to the one assuming it, so src is the parent."
+                )
+            raw_type = item.get("type") or item.get("edge_type") or EdgeType.DEPENDENCY
+            try:
+                edge_type = EdgeType(raw_type)
+            except ValueError:
+                raise ValueError(
+                    f"edges[{i}] type must be one of "
+                    f"{[e.value for e in EdgeType]}, got {raw_type!r}"
+                ) from None
+            specs.append((str(src), str(dst), edge_type))
+
+        # Validate the whole batch first so a rejected call writes nothing.
+        for src, dst, edge_type in specs:
+            for endpoint in (src, dst):
+                if self._store.get_node(endpoint) is None:
+                    raise NodeNotFoundError(f"node not found: {endpoint}")
+            parent = self._store.get_node(src)
+            if parent is not None and parent.is_goal and edge_type == EdgeType.DEPENDENCY:
+                raise GoalDependencyError(
+                    f"'{src}' is a goal, so nothing can depend on it — this edge would "
+                    f"point the wrong way. A goal is *reached when* the work supporting it "
+                    f"is verified, so the work is the goal's parent, not its child. Wire it "
+                    f'the other way: add_edges([{{"src": {json.dumps(dst)}, '
+                    f'"dst": {json.dumps(src)}, "type": "DEPENDENCY"}}])'
+                )
+
+        existing = {(e.src, e.dst) for e in self._store.get_all_edges()}
+        results: list[AddEdgeResult] = []
+        for src, dst, edge_type in specs:
+            if (src, dst) in existing:
+                results.append(AddEdgeResult(src=src, dst=dst, type=edge_type, created=False))
+                continue
+            edge = Edge(src=src, dst=dst, type=edge_type)
+            try:
+                self._graph.add_edge(edge)
+            except CycleError:
+                raise CycleError(f"edge {src} → {dst} would create a cycle") from None
+            self._store.add_edge(edge)
+            existing.add((src, dst))
+            results.append(AddEdgeResult(src=src, dst=dst, type=edge_type, created=True))
+
+        # The parent gate for `dst` has changed, so anything cached about its
+        # eligibility is now stale.
+        for _, dst, _ in specs:
+            self._refresh_node_in_graph(dst)
+        return results
 
     def update_status(
         self, node_id: str, new_status: Status, reason: str = ""
@@ -2307,6 +2412,7 @@ class HypoTreeEngine:
         limit: int = 200,
         goal_id: str | None = None,
         as_of: datetime | None = None,
+        since: datetime | None = None,
     ) -> LearningPathResponse:
         """Narrate what has been settled so far, in order, and how each was settled.
 
@@ -2344,6 +2450,15 @@ class HypoTreeEngine:
         what lets a rewound graph be read beside a narrative that stops in the
         same place. Goal achievement is derived from the live graph and the
         rendered report says so.
+
+        ``since`` turns the report into a **diff**: only what settled or was
+        withdrawn in the window, with counts for the window alone. A belief
+        state's *changes* are more interesting than its state — "three
+        hypotheses were confirmed and one was withdrawn" is the sentence wanted
+        for a standup, a PR description or a review, and reconstructing it by
+        diffing two full narratives by eye is what people do instead. Combine it
+        with ``as_of`` for a closed window; alone it means "since then, up to
+        now".
         """
         self._sync_graph_from_store()
         scope = self._resolve_goal_scope(goal_id)
@@ -2352,6 +2467,13 @@ class HypoTreeEngine:
         # different by it.
         if as_of is not None and as_of.tzinfo is None:
             as_of = as_of.replace(tzinfo=timezone.utc)
+        if since is not None and since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        if since is not None and as_of is not None and since > as_of:
+            raise ValueError(
+                f"since ({since.isoformat()}) is after as_of ({as_of.isoformat()}), "
+                f"which describes an empty window running backwards."
+            )
 
         nodes = {n.id: n for n in self._store.get_all_nodes() if scope is None or n.id in scope}
         # Evidence counts are the authoritative "did this cost an experiment"
@@ -2372,6 +2494,9 @@ class HypoTreeEngine:
             # not reached yet.
             if as_of is not None and settled_at > as_of:
                 continue
+            # The lower bound is applied *after* the reopen/status filtering
+            # below rather than here, so a window still knows which nodes were
+            # already settled when it opened.
             status = Status(row["status"])
             # UNTESTED is the state every node starts in, not a conclusion. It is
             # only interesting when something *returned* a node to it, which the
@@ -2415,11 +2540,39 @@ class HypoTreeEngine:
         free = {nid for nid in settled if nid not in probed}
         probes = sum(counts.get(nid, 0) for nid in nodes)
 
+        # A diff reports the window; the counters above always describe the whole
+        # history, because "what did this cost in total" does not become a
+        # different question when someone asks what changed this week.
+        windowed = steps if since is None else [s for s in steps if s.at >= since]
+        settled_in_window = len({s.node_id for s in windowed if s.status not in _OPEN_STATUSES})
+        withdrawn_in_window = len(
+            {s.node_id for s in windowed if s.origin == "reversed" or s.status in _OPEN_STATUSES}
+        )
+        # `count_evidence_by_node(before)` counts observations recorded *before*
+        # an instant, so the window's own experiments are what the total minus
+        # that leaves.
+        if since is None:
+            probes_in_window = probes
+        else:
+            before = self._store.count_evidence_by_node(since)
+            probes_in_window = probes - sum(before.get(nid, 0) for nid in nodes)
+
         return LearningPathResponse(
             markdown=self._render_learning_path(
-                steps[-limit:], goal_status, conflicts, open_questions, probes, settled, free, as_of
+                windowed[-limit:],
+                goal_status,
+                conflicts,
+                open_questions,
+                probes,
+                settled,
+                free,
+                as_of,
+                since=since,
+                settled_in_window=settled_in_window,
+                withdrawn_in_window=withdrawn_in_window,
+                probes_in_window=probes_in_window,
             ),
-            steps=steps[-limit:],
+            steps=windowed[-limit:],
             probes_spent=probes,
             conclusions=len(settled),
             conclusions_without_a_probe=len(free),
@@ -2427,6 +2580,10 @@ class HypoTreeEngine:
             open_conflicts=len(conflicts),
             goals_met=goal_status.goals_met_count,
             goals_total=goal_status.goals_total_count,
+            since=since,
+            settled_in_window=settled_in_window,
+            withdrawn_in_window=withdrawn_in_window,
+            probes_in_window=probes_in_window,
         )
 
     def _render_learning_path(
@@ -2439,10 +2596,31 @@ class HypoTreeEngine:
         settled: set[str],
         free: set[str],
         as_of: datetime | None = None,
+        since: datetime | None = None,
+        settled_in_window: int = 0,
+        withdrawn_in_window: int = 0,
+        probes_in_window: int = 0,
     ) -> str:
         """Render the learning path as a self-contained markdown briefing."""
-        out: list[str] = ["# What we have learned so far", ""]
-        if as_of is not None:
+        heading = "What changed" if since is not None else "What we have learned so far"
+        out: list[str] = [f"# {heading}", ""]
+        if since is not None:
+            window_end = as_of.isoformat(timespec="seconds") if as_of else "now"
+            out += [
+                f"> **{since.isoformat(timespec='seconds')} → {window_end}**",
+                "",
+            ]
+            if not settled_in_window and not withdrawn_in_window:
+                # An empty window has to read as empty. A diff that reports
+                # activity when nothing was concluded is worse than no diff.
+                out += ["_Nothing was settled or withdrawn in this window._", ""]
+            else:
+                out += [
+                    f"**{settled_in_window} settled**, **{withdrawn_in_window} withdrawn or "
+                    f"reopened**, {probes_in_window} experiment(s) run.",
+                    "",
+                ]
+        if as_of is not None and since is None:
             # Goal achievement is read off the live graph, so say so rather than
             # letting a rewound report imply the objective stood there too.
             out += [
@@ -3588,6 +3766,29 @@ class HypoTreeEngine:
         # that no longer stands.
         self._retract_exclusion(node_id, now)
         return True
+
+    def _eliminated_ids(self, all_nodes: list[Node]) -> set[str]:
+        """Every node ruled out as the answer to its own question, in one query.
+
+        The bulk form of ``_is_eliminated``, for the dispatch path. The per-node
+        version reads one status history each, which is the shape that cost 41x
+        elsewhere, and the navigator needs the answer for every grouped node on
+        every selection.
+        """
+        reasons = self._store.current_status_reasons()
+        eliminated: set[str] = set()
+        for node in all_nodes:
+            if not node.exclusion_group:
+                continue
+            # EXHAUSTED means two opposite things and only the reason separates
+            # them: measured and short of the bar (ruled out) versus set aside
+            # because a sibling was confirmed (nothing observed at all).
+            settled_by_own_evidence = node.status is Status.EXHAUSTED and not reasons.get(
+                node.id, ""
+            ).startswith(EXCLUSION_REASON_PREFIX)
+            if node.status in (Status.INVALIDATED, Status.PRUNED) or settled_by_own_evidence:
+                eliminated.add(node.id)
+        return eliminated
 
     def _is_eliminated(self, node: Node) -> bool:
         """Whether a node has been ruled out as an answer to its own question.

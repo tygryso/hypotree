@@ -23,11 +23,12 @@ refuted or settled).
 
 ---
 
-#### 18 Tools
+#### 19 Tools
 
 | Tool | Purpose |
 |------|---------|
 | `create_hypotheses` | Add one or many nodes + edges. Takes `hypotheses`, a **list** — pass a list of one to create a single hypothesis; there is no separate singular tool. Each item: `statement` (required), `parent_ids`, `edge_type`, `exclusion_group`, `is_goal`, `target_metric`, `node_id`, `if_exists`, `is_parametric`, `evidence_regime`, `param_config`. Parents may be created by the same call **in any order** — items are applied in dependency order, not list order. The whole list is validated first (shape, unknown fields, duplicate ids, missing parents, collisions), so **a rejected call creates nothing**. `if_exists` collision guard: `"error"` (default, raises), `"overwrite"` (full replace, keeps child edges), `"skip"`. Returns a list of `{node, created, reason}` **in input order**. |
+| `add_edges` | Wire hypotheses that already exist, without recreating either. Takes `edges`, a **list** of `{src, dst, type}` — each edge runs **from** the hypothesis being assumed **to** the one assuming it, so `src` is the parent. This is how a graph grows *forward*: when a pipeline gains a stage, the goal must depend on the new last stage or it reports itself achieved as soon as the first one verifies. You do not need to remove the old edge — DEPENDENCY is AND and the later stage already depends on the earlier one, so adding only tightens the condition. Validated like creation and **all-or-nothing**: unknown nodes, a goal used as a DEPENDENCY parent, and cycles are refused before anything is written. An edge that already exists is reported `created=False` rather than raising, so re-sending a plan is safe. |
 | `get_next_targets` | Select and claim the next target(s). **Batch-native**: `count` (default 1) targets are returned as a **list**, each with `node_id`, `claim_id`, `statement` and optionally `min_depth`. `lease_ttl_s` overrides the lease length. `dry_run=True` peeks without claiming (always one target). `goal_id` restricts the search to one objective — that goal, everything it DEPENDS on, and the competing answers to those questions; omit it for the whole workspace. A claimed node is **reserved** until its evidence is recorded — see **Claims & Leases**. Returns a single `{status:"DONE", reason}` entry when nothing can be handed out. |
 | `record_evidence` | Record one result, or many at once, and fire the resulting transitions. **Batch-native**: pass `results`, a **list** of `{node_id, success, depth, claim_id, …}`, to report every experiment from one turn in one call — they are applied **in order**, so a refutation's cascade lands before the next result is read. Pass the single-result fields directly for the `k=1` case. `depth` records the rigour of the test that produced the result (see **Confirmation Depth**). `source_ref` names what was actually run (a path, a URL, a CI run id). Auto-captures git `context_hash` + `git_branch` when unset. Pass `evidence_kind:"infra"` for infrastructure errors (retriable, never invalidates). `count_next_targets` (default **0**) hands back targets under `next_targets`, saving a `get_next_targets` round-trip; it runs **once** after the whole batch. It is a **top-up, not an addition** — the number is how many you want to be *holding* when the call returns, so recording a batch of two leaves you with two, not four. A single result returns `{node, next_targets}`; a batch returns `{recorded, failed, next_targets}`, where `failed` names any report the engine refused rather than discarding the rest. |
 | `renew_claim` | Restart a live lease's clock because the experiment is still running. `claim_id`, optional `lease_ttl_s`. Raises `ClaimError` for a lease that is consumed, expired or unknown — it may already belong to someone else. |
@@ -43,7 +44,7 @@ refuted or settled).
 | `list_nodes` | Filter + search + sort nodes → Markdown table. `status_filter`, `query_filter`, `order_by`, `limit`, `offset`, plus two shortcuts worth preferring: **`view`** (`frontier` \| `settled` \| `verified` \| `revision` \| `stale`) names the question instead of making you assemble a status filter that returns an empty table when you get it subtly wrong; **`stale_only`** keeps only VERIFIED nodes whose newest evidence names a commit that is no longer checked out. A stale node is **not refuted** — nothing has re-established it since the code moved, which is a different and weaker claim. The `Stale` column carries the same signal. See **Search & Ordering** below for wildcard/escape semantics. |
 | `get_evidence_history` | Evidence trail for a node (newest-first). `{id, kind, success, delta_success, monotonicity, context_hash, git_branch, source_ref, notes, recorded_at}`. |
 | `get_active_claims` | Live (unconsumed, unexpired) claims with `expires_in_s`. Use to resume interrupted work. |
-| `generate_learning_path` | What has been settled so far, **in order, and how**. Returns a markdown briefing plus structured `steps`, each marked `observed` (an experiment paid for it), `inferred` (the engine derived it for free) or `reversed` (a belief withdrawn or handed back). Carries `probes_spent`, `conclusions` and `conclusions_without_a_probe`. `limit` (default 200) bounds the narrative; the counters always cover the whole history. `goal_id` narrates one objective only — a workspace pursuing several otherwise interleaves their dead ends into one story. Call it **first** in a new session — something may already be settled — and to brief a human. |
+| `generate_learning_path` | What has been settled so far, **in order, and how**. Returns a markdown briefing plus structured `steps`, each marked `observed` (an experiment paid for it), `inferred` (the engine derived it for free) or `reversed` (a belief withdrawn or handed back). Carries `probes_spent`, `conclusions` and `conclusions_without_a_probe`. `limit` (default 200) bounds the narrative; the counters always cover the whole history. **`since` turns it into a diff** — only what settled or was withdrawn after that instant, with counts for the window alone, which is the answer a standup or a PR description wants. `as_of` reconstructs it as it stood at an instant; pass both for a closed window. `goal_id` narrates one objective only — a workspace pursuing several otherwise interleaves their dead ends into one story. Call it **first** in a new session — something may already be settled — and to brief a human. |
 | `get_workspace_info` | **Which** belief state you are connected to, and how it was chosen. No arguments. Returns `workspace_id`, `source` (`env` \| `config` \| `remote` \| `path` — which of the four layers below produced it), `detail`, `project_path`, `store_root`, `db_path`, `db_exists`, `warnings`, and `dashboard_url` (the live dashboard link with its session token, or `null` if none is running — hand it over when someone asks where to watch). Call it when the graph is unexpectedly empty, or when two clients disagree about what has been established: that is almost always one project resolving to two workspaces. A pure read — it never creates the store, so asking cannot itself be what brings a workspace into being. |
 
 ---
@@ -123,18 +124,20 @@ Pinning to the *last* node is enough; you do not need to list the whole chain.
 `P2c` cannot be tested until `P2b` is verified, which cannot happen until `P2a`
 is, so the chain is enforced transitively.
 
-Re-pinning today means re-creating the goal with `if_exists="overwrite"`, and
-**overwrite is a full replace**: any field you leave out reverts to its default.
-Omit `target_metric` on a re-pin and the goal silently loses its bar. Always
-re-send `is_goal` and `target_metric` with the new `parent_ids`:
+Re-pinning does **not** mean re-creating the goal. Use `add_edges`:
 
 ```
-create_hypotheses(hypotheses=[{
-  "node_id": "goal", "statement": "...", "is_goal": True,
-  "target_metric": 0.85,                 # re-send it, or it becomes null
-  "parent_ids": ["P2c"], "if_exists": "overwrite",
-}])
+add_edges(edges=[{"src": "P2c", "dst": "goal", "type": "DEPENDENCY"}])
 ```
+
+**You do not need to remove the old edge.** DEPENDENCY is AND, and `P2c` already
+depends on `P2b` which depends on `P2a`, so a goal wired to both is satisfied
+exactly when `P2c` is — the condition is tightened, never loosened.
+
+Re-creating the goal with `if_exists="overwrite"` also works but is a **full
+replace**: any field you leave out reverts to its default, so omitting
+`target_metric` silently drops the bar the goal is measured against. Prefer
+`add_edges`.
 
 | Type | Semantics | Mermaid | Child eligible when |
 |------|-----------|---------|---------------------|

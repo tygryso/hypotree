@@ -18,6 +18,7 @@ import subprocess
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 import pytest_asyncio
@@ -31,7 +32,7 @@ from hypotree.dashboard.server import PORT_PROBE_RANGE, DashboardServer, choose_
 from hypotree.engine import HypoTreeEngine
 from hypotree.models.edge import EdgeType
 from hypotree.models.evidence import LogicalEvidence
-from hypotree.store.store import utcnow
+from hypotree.store.store import HypoTreeStore, utcnow
 
 
 def _landscape(db: Path) -> HypoTreeEngine:
@@ -993,3 +994,90 @@ def test_the_shipped_javascript_parses() -> None:
         [node, "--check", str(static / "app.js")], capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.unit
+def test_the_glow_reflects_the_directive_the_reader_just_set(tmp_path: Path) -> None:
+    """`p_select` was a pure argmax over Beta draws, ignoring pin and suspend.
+
+    So the panel was wrong in the one situation the reader has most reason to
+    check it — straight after using the dashboard's own buttons, which are the
+    only way those directives are ever set. A suspended node is never offered,
+    and if anything is pinned the navigator offers only the pinned set.
+    """
+    db = tmp_path / "glow.db"
+    engine = _landscape(db)
+    engine.close()
+
+    read = ReadModel(db)
+    try:
+        baseline = read.frontier(k=10)["candidates"]
+        assert sum(c["p_select"] for c in baseline) == pytest.approx(1.0, abs=1e-6)
+        assert all(c["p_select"] > 0 for c in baseline)
+
+        store = HypoTreeStore(db)
+        try:
+            store.set_directive("a0", "suspend", "on hold", "human")
+        finally:
+            store.close()
+        read._cache.clear()
+        suspended = {c["node_id"]: c["p_select"] for c in read.frontier(k=10)["candidates"]}
+        assert suspended.get("a0") == 0.0, "a suspended node is never dispatched"
+        assert sum(suspended.values()) == pytest.approx(1.0, abs=1e-6)
+
+        store = HypoTreeStore(db)
+        try:
+            store.clear_directive("a0")
+            store.set_directive("b1", "pin", "look here", "human")
+        finally:
+            store.close()
+        read._cache.clear()
+        pinned = {c["node_id"]: c["p_select"] for c in read.frontier(k=10)["candidates"]}
+        assert pinned["b1"] == pytest.approx(1.0), "a pin collapses the frontier to itself"
+        assert all(p == 0.0 for nid, p in pinned.items() if nid != "b1")
+    finally:
+        read.close()
+
+
+@pytest.mark.unit
+def test_a_timestamp_carrying_its_offset_through_a_url_still_parses(tmp_path: Path) -> None:
+    """`+` is the query-string encoding of a space.
+
+    So a URL carrying an offset verbatim — `?at=2026-08-07T09:00:00+00:00` —
+    arrives with a space where the sign belongs, and the endpoint answered 400
+    for a perfectly good instant. The browser client encodes it and was fine;
+    anyone hand-writing a URL or pasting a timestamp was not, and the time
+    machine has shipped that way since it landed.
+    """
+    from hypotree.dashboard.readmodel import _parse_at
+
+    iso = "2026-08-07T09:00:00+00:00"
+    expected = _parse_at(iso)
+    assert _parse_at(iso.replace("+00:00", " 00:00")) == expected
+    assert _parse_at(iso.replace("+00:00", "Z")) == expected
+    # A naive instant is read as UTC rather than raising on the first compare.
+    assert _parse_at("2026-08-07T09:00:00") == expected
+    # And the refusal names the field the caller actually passed.
+    with pytest.raises(ValueError, match="`since` must be"):
+        _parse_at("last tuesday", "since")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_the_narrative_endpoint_serves_a_diff(server: DashboardServer) -> None:
+    """The scrubber already picks an instant; a second one turns it into a diff."""
+    t = server.token
+    status, full = await _request(server.port, f"/api/learning-path?t={t}")
+    assert status == 200 and isinstance(full, dict)
+    assert full["markdown"].startswith("# What we have learned so far")
+    assert full["since"] is None
+
+    future = (utcnow() + timedelta(hours=1)).isoformat()
+    status, quiet = await _request(server.port, f"/api/learning-path?t={t}&since={quote(future)}")
+    assert status == 200 and isinstance(quiet, dict)
+    assert quiet["markdown"].startswith("# What changed")
+    assert quiet["settled_in_window"] == 0
+    assert "Nothing was settled or withdrawn" in quiet["markdown"]
+
+    status, _ = await _request(server.port, f"/api/learning-path?t={t}&since=nonsense")
+    assert status == 400, "an unparseable bound is refused, not silently ignored"
