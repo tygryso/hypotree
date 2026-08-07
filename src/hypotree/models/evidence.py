@@ -32,6 +32,11 @@ class LogicalEvidence(BaseModel):
     # audit trail that says "0.85, from pytest run #4412" are different
     # artifacts, and only the caller knows which artifact exists.
     source_ref: str | None = None
+    # Wall-clock seconds the experiment took. Optional and never inferred: it is
+    # what makes cost *observed* rather than declared, and a caller asked to
+    # estimate cost guesses once and never revises. None means unknown, which is
+    # not the same as free.
+    duration_s: float | None = Field(default=None, ge=0.0)
     claim_id: str | None = None
     notes: str = ""
     delta_success: float | None = None

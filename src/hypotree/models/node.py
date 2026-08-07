@@ -49,6 +49,24 @@ class Node(BaseModel):
     # what every group written before this field meant.
     exclusion_closed: bool = True
 
+    # Roughly what testing this costs, in seconds, before anything has been
+    # timed. A *prior*, superseded by the first real observation — the doctrine
+    # is that cost is estimated from what was actually measured, and a caller
+    # asked to guess guesses once and never revises.
+    #
+    # It exists because the observed model is blind exactly where the saving is.
+    # A question is settled once, so the answers competing to settle it have no
+    # history at the moment the navigator must choose between them, and the
+    # sibling-median fallback hands every one of them the identical number.
+    # Ordering *across* questions saves nothing (every question must be settled
+    # anyway); ordering *within* one saves the expensive answer entirely, because
+    # the last survivor of a closed question is deduced rather than probed.
+    #
+    # Safe to consume unmeasured in a way an accuracy prior is not: cost changes
+    # only what is *tried next* and never what the belief state *asserts*, so a
+    # wrong estimate costs a worse order and is corrected by the first timing.
+    estimated_cost: float | None = Field(default=None, gt=0.0)
+
     # Depth (rigour / scale / context) of the observation that confirmed this
     # node, or None if it was never confirmed. Recorded because a confirmation
     # is only as strong as the test that produced it: a composition that fails

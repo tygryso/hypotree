@@ -5,6 +5,7 @@ tables, claim lifecycle, schema_version fail-fast, normalized identity.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,8 +18,25 @@ from hypotree.models.evidence import InfraError, LogicalEvidence
 from hypotree.models.node import Node
 from hypotree.models.status import Status, utcnow
 from hypotree.store.identity import _normalize_remote, store_root, workspace_id
-from hypotree.store.schema import SCHEMA_VERSION
+from hypotree.store.schema import MIGRATIONS, SCHEMA_VERSION
 from hypotree.store.store import HypoTreeStore, SchemaVersionError, _dt_to_str
+
+_ADD_COLUMN_RE = re.compile(r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)", re.IGNORECASE)
+
+
+def _head_added_column() -> tuple[str, str]:
+    """The (table, column) the newest migration step adds.
+
+    Read out of the chain so a new step retargets this automatically. Naming the
+    column would leave the head-repair test quietly exercising a frozen step the
+    moment anything is appended, which is the failure mode where a test keeps
+    passing and stops testing.
+    """
+    for statement in reversed(MIGRATIONS[-1][1]):
+        match = _ADD_COLUMN_RE.search(statement)
+        if match:
+            return match.group(1), match.group(2)
+    raise AssertionError("the head migration adds no column; this test needs updating")
 
 
 @pytest.fixture
@@ -670,9 +688,16 @@ def test_migration_is_recorded_in_the_audit_log(tmp_path: Path) -> None:
         store.close()
 
     # Every step of the chain is logged separately, so the audit trail says which
-    # upgrades ran rather than only where the database ended up.
+    # upgrades ran rather than only where the database ended up. Derived from the
+    # chain rather than written out, so adding a migration does not require
+    # editing an assertion that was never about the number of steps.
+    from hypotree.store.schema import BASELINE_VERSION, MIGRATIONS
+
+    versions = [BASELINE_VERSION, *(v for v, _ in MIGRATIONS)]
+    expected = [{"from": a, "to": b} for a, b in zip(versions, versions[1:], strict=False)]
     migrated = [json.loads(r["payload"]) for r in rows if r["type"] == "SchemaMigrated"]
-    assert migrated == [{"from": "8", "to": "9"}, {"from": "9", "to": SCHEMA_VERSION}]
+    assert migrated == expected
+    assert migrated[-1]["to"] == SCHEMA_VERSION
 
 
 @pytest.mark.unit
@@ -857,7 +882,8 @@ def test_a_database_stamped_with_the_head_version_is_repaired_not_trusted(
 
     The head of the chain is the only step that can gain statements after a
     database has been stamped with it; every earlier step is frozen history. So
-    the head is re-applied on open, idempotently.
+    the head is re-applied on open, idempotently — and only the head, which is
+    why a released step must never be edited in place.
     """
     db = tmp_path / "head.db"
     store = HypoTreeStore(db)
@@ -865,8 +891,13 @@ def test_a_database_stamped_with_the_head_version_is_repaired_not_trusted(
     store.add_node(node)
     store.close()
 
+    # Derived from the chain rather than named, so adding a migration does not
+    # silently retarget this test at a step that is no longer the head — which
+    # would leave it passing while testing nothing.
+    head_table, head_column = _head_added_column()
+
     conn = sqlite3.connect(db)
-    conn.execute("ALTER TABLE nodes DROP COLUMN exclusion_closed")
+    conn.execute(f"ALTER TABLE {head_table} DROP COLUMN {head_column}")
     conn.commit()
     conn.close()
 
@@ -874,9 +905,8 @@ def test_a_database_stamped_with_the_head_version_is_repaired_not_trusted(
     try:
         loaded = store.get_all_nodes()
         assert [n.id for n in loaded] == ["n1"]
-        # Back-filled to closed, which is what every group written before the
-        # column already meant.
-        assert loaded[0].exclusion_closed is True
+        columns = {r[1] for r in store._conn.execute(f"PRAGMA table_info({head_table})")}
+        assert head_column in columns, "the head step must be re-applied on open"
     finally:
         store.close()
 

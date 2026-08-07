@@ -459,6 +459,7 @@ class ReadModel:
                     "context_hash": r["context_hash"],
                     "git_branch": r["git_branch"],
                     "source_ref": r["source_ref"],
+                    "duration_s": r["duration_s"],
                     "artifacts": json.loads(r["artifacts"] or "[]"),
                     "notes": r["notes"],
                     "recorded_at": r["recorded_at"],

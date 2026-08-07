@@ -252,6 +252,18 @@ def _hypothesis_item_schema() -> dict:
                 "only the last-one-standing deduction is withheld.",
             },
             "param_config": {"type": "object"},
+            "estimated_cost": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Roughly what testing this will cost, in seconds. A hint for "
+                "ordering, never a claim about the hypothesis: it changes what gets tried "
+                "next and never what the belief state asserts, and the first real "
+                "`duration_s` supersedes it. Worth giving when the competing answers to one "
+                "question differ in cost \u2014 a 30-second unit test against an overnight "
+                "fine-tune \u2014 because the last answer standing is deduced rather than "
+                "probed, so putting the expensive one last means never paying for it. Omit "
+                "it when they all cost about the same; ordering is then free of it anyway.",
+            },
             "node_id": {"type": "string"},
             "if_exists": {
                 "type": "string",
@@ -409,6 +421,7 @@ def _tool_definitions() -> list[types.Tool]:
                                 "message": {"type": "string"},
                                 "metrics": {"type": "object"},
                                 "source_ref": {"type": "string"},
+                                "duration_s": {"type": "number", "minimum": 0},
                                 "notes": {"type": "string"},
                             },
                             "required": ["node_id", "success"],
@@ -449,6 +462,16 @@ def _tool_definitions() -> list[types.Tool]:
                         ),
                     },
                     "notes": {"type": "string"},
+                    "duration_s": {
+                        "type": "number",
+                        "minimum": 0,
+                        "description": (
+                            "How long the experiment took, in seconds. Optional, and worth "
+                            "sending whenever your probes differ in cost: it is what lets the "
+                            "navigator rank by value per unit cost rather than treating a "
+                            "three-day run and a one-second check as interchangeable."
+                        ),
+                    },
                     "count_next_targets": {
                         "type": "integer",
                         "default": 0,
@@ -755,17 +778,22 @@ def _tool_definitions() -> list[types.Tool]:
     ]
 
 
-async def _run_main(dashboard_port: int | None) -> None:
+async def _run_main(dashboard_port: int | None, cost_aware: bool = False) -> None:
     """Wire the engine into an MCP stdio server and run it.
 
     ``dashboard_port`` of ``None`` starts no dashboard. Anything else is the
     *first* port tried, not the one bound: a second workspace on the same
     machine must not fail to start because the first took 7331.
+
+    ``cost_aware`` ranks candidates by value per unit *observed* cost. Off by
+    default: with it off every cost ratio is exactly 1.0 and selection is
+    identical to a build that has never heard of cost, which is the only honest
+    way to add a term to an acquisition function a frozen gate has scored.
     """
     project_path = resolve_project_path()
     db_path = store_root(project_path) / "state.db"
 
-    engine = HypoTreeEngine(db_path, project_path=project_path)
+    engine = HypoTreeEngine(db_path, project_path=project_path, cost_aware=cost_aware)
     write_lock = asyncio.Lock()
     app = Server("hypotree", instructions=SERVER_INSTRUCTIONS)
 
@@ -1017,6 +1045,7 @@ def _evidence_report(item: dict) -> EvidenceReport:
             metrics=item.get("metrics", {}),
             notes=item.get("notes", ""),
             source_ref=item.get("source_ref"),
+            duration_s=item.get("duration_s"),
         )
     return EvidenceReport(
         node_id=str(node_id),
@@ -1195,7 +1224,7 @@ def main() -> None:
         return
 
     try:
-        port, dashboard, mcp = _parse_serve_args(args)
+        port, dashboard, mcp, cost_aware = _parse_serve_args(args)
     except ValueError as exc:
         print(f"hypotree: {exc}\n", file=sys.stderr)
         print(_cli_help(), file=sys.stderr)
@@ -1208,14 +1237,14 @@ def main() -> None:
         with contextlib.suppress(KeyboardInterrupt):
             asyncio.run(_run_viewer(port))
         return
-    asyncio.run(_run_main(dashboard_port=port if dashboard else None))
+    asyncio.run(_run_main(dashboard_port=port if dashboard else None, cost_aware=cost_aware))
 
 
-def _parse_serve_args(args: list[str]) -> tuple[int, bool, bool]:
-    """Resolve the serving flags into (first port to try, dashboard?, mcp?).
+def _parse_serve_args(args: list[str]) -> tuple[int, bool, bool, bool]:
+    """Resolve the serving flags into (first port to try, dashboard?, mcp?, cost-aware?).
 
     Hand-rolled rather than argparse because this entry point must stay
-    import-cheap: it is spawned per MCP session, and the three flags here do not
+    import-cheap: it is spawned per MCP session, and the flags here do not
     justify the import.
     """
     from hypotree.dashboard.server import DEFAULT_PORT
@@ -1223,11 +1252,14 @@ def _parse_serve_args(args: list[str]) -> tuple[int, bool, bool]:
     port = DEFAULT_PORT
     dashboard = True
     mcp = True
+    cost_aware = False
     rest = list(args)
     while rest:
         arg = rest.pop(0)
         if arg == "--no-dashboard":
             dashboard = False
+        elif arg == "--cost-aware":
+            cost_aware = True
         elif arg == "--no-mcp":
             mcp = False
         elif arg == "--dashboard-port":
@@ -1238,7 +1270,7 @@ def _parse_serve_args(args: list[str]) -> tuple[int, bool, bool]:
             port = _port(arg.split("=", 1)[1])
         else:
             raise ValueError(f"unknown option {arg!r}")
-    return port, dashboard, mcp
+    return port, dashboard, mcp, cost_aware
 
 
 def _port(raw: str) -> int:
@@ -1272,6 +1304,13 @@ Usage:
                        no MCP server. Read-only, so it is safe to point at a
                        workspace an agent is actively writing. This is the
                        try-before-you-wire path.
+  hypotree --cost-aware
+                       Rank candidates by expected value per unit *observed*
+                       cost, from the `duration_s` your results report. Use it
+                       when your experiments differ in cost by more than they
+                       differ in promise — a fine-tune against a unit test.
+                       Without it, and without any recorded duration, selection
+                       is exactly as it is today.
   hypotree --info      Print the resolved workspace, store path and warnings.
   hypotree --version   Print the version.
   hypotree --help      Show this message.

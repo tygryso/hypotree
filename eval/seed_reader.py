@@ -147,6 +147,13 @@ class RunLog:
     exclusion_declared: bool = False
     targets_selected: int = 0
     settled_reselects: int = 0
+    # Results that arrived for a question the exclusion inference had already
+    # closed. The dispatch-side counter above cannot see these: the navigator
+    # never offered them, the agent probed them itself. An agent that sweeps a
+    # whole question before recording any of it loses the entire exclusion
+    # saving for that question, and every other health metric reads clean.
+    redundant_probes: int = 0
+    contradicting_probes: int = 0
     redispatched: int = 0
     claims_released: int = 0
     # Probe results the agent held when its context was wiped. Before these were
@@ -422,6 +429,16 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
                 # the agent assembled itself, which the navigator never handed
                 # out — counting them against dispatches measures nothing.
                 log.claimed_records += 1
+            # A result whose node was EXHAUSTED *before* it landed answered a
+            # question the exclusion inference had already closed. Agreeing with
+            # the inference means the probe bought nothing; contradicting it
+            # means the question has two confirmed answers, which is the decoy
+            # and the most valuable finding available.
+            if str(ev.get("old_status")) == "EXHAUSTED":
+                if str(ev.get("new_status")) == "VERIFIED":
+                    log.contradicting_probes += 1
+                else:
+                    log.redundant_probes += 1
             outstanding.discard(str(ev.get("node_id", "")))
 
         elif kind == "goal_evidence_refused":
@@ -982,13 +999,30 @@ def _exclusion_yield_lines(logs: list[RunLog]) -> list[str]:
     else:
         verdict = "at the baseline — the ordering is carrying no signal"
     world = "closed" if closed_share == 1.0 else f"{_pct(closed_share)} closed"
-    return [
+    redundant = sum(log.redundant_probes for log in b_logs)
+    lines = [
         f"**Exclusion yield (arm B): {_pct(yield_)}** of premise questions were settled "
         f"without a probe ({exclusions} retired free, {premise} probed). With a mean group "
         f"of {k:.1f} answers ({world}), blind ordering already yields {_pct(baseline)} — so "
         f"this run is **{verdict}**. This is the only lever on premise cost: every question "
         f"is settled exactly once, so a probe saved here is a probe saved outright.",
     ]
+    if redundant:
+        # The baseline assumes each question is settled once. A probe spent on a
+        # question the inference had already closed inflates the denominator, so
+        # the yield falls below chance without the ordering being at fault —
+        # which is a different problem with a different fix, and reporting them
+        # in one number sends the reader after the wrong one.
+        adjusted = exclusions / (settled - redundant) if settled > redundant else yield_
+        lines.append(
+            f"{redundant} of those probes landed on questions the inference had **already "
+            f"closed**, which the baseline does not model: it assumes each question is "
+            f"settled once. Excluding them the yield is {_pct(adjusted)}. A yield below "
+            f"chance with redundant probes present is a *recording-discipline* problem — "
+            f"the agent probing a whole question before reporting any of it — not an "
+            f"ordering one, and the two have different fixes."
+        )
+    return lines
 
 
 def _section_belief_state(logs: list[RunLog]) -> list[str]:
@@ -1060,6 +1094,21 @@ def _section_belief_state(logs: list[RunLog]) -> list[str]:
             str(sum(log.probes_carried for log in b_logs)),
             "probed but not yet recorded when the reset landed — handed forward rather "
             "than destroyed, which is what the flat-transcript arm gets for free",
+        ],
+        [
+            "probes on an already-answered question",
+            str(sum(log.redundant_probes for log in b_logs)),
+            "the exclusion inference had closed the question before this result landed, "
+            "and the result agreed — so the probe bought nothing. Invisible to every "
+            "dispatch-side counter, because the agent probed it itself: sweeping a whole "
+            "question before recording any of it forfeits the entire exclusion saving",
+        ],
+        [
+            "probes that contradicted the inference",
+            str(sum(log.contradicting_probes for log in b_logs)),
+            "the same situation with the opposite result — a second confirmed answer to "
+            "one question, which is the decoy and the most valuable finding available. "
+            "These are worth spending and must not be read as waste",
         ],
         [
             "targets already settled",

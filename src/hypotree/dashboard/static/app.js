@@ -179,6 +179,16 @@ createApp({
       return isNaN(d) ? String(iso).slice(0, 19).replace("T", " ") : d.toLocaleString();
     };
 
+    // What an experiment cost, in the unit a reader thinks in. Seconds for a
+    // unit test, days for a fine-tune — the whole point is that they differ.
+    const cost = (s) => {
+      if (s === null || s === undefined) return "";
+      if (s < 90) return `${s < 1 ? s.toFixed(2) : Math.round(s)}s`;
+      if (s < 5400) return `${(s / 60).toFixed(1)}m`;
+      if (s < 172800) return `${(s / 3600).toFixed(1)}h`;
+      return `${(s / 86400).toFixed(1)}d`;
+    };
+
     const q = () => (goalId.value ? `goal_id=${encodeURIComponent(goalId.value)}` : "");
 
     async function loadMeta() {
@@ -410,7 +420,7 @@ createApp({
 
     return {
       meta, graph, frontier, narrative, timeline, goalId, tab, selected, detail,
-      sinceTick, sincePct, markSince, clearSince, inWindow,
+      sinceTick, sincePct, markSince, clearSince, inWindow, cost,
       live, working, scrub, scrubLabel, playing, tip, error, missing,
       lastTick, atLive, goLive, panelWidth, resizing, startResize, zoomBy,
       activity, binOfScrub, cursorPct, stamp, directiveMode, clearSelection, bannerDismissed,

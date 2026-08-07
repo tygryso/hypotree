@@ -543,6 +543,11 @@ def test_recorded_artifacts_are_read_back(tmp_path: Path) -> None:
 
     An audit trail that cannot produce the log it refers to is not an audit
     trail — the same defect that was fixed for `context_hash` and left here.
+
+    Stored in POSIX form whichever platform wrote it: a belief state is shared
+    across machines, so `\\tmp\\run.log` and `/tmp/run.log` must not be two
+    records of the same artifact. Asserting the literal is what caught this —
+    the test failed on Windows because the *store* was platform-dependent.
     """
     engine = HypoTreeEngine(tmp_path / "artifacts.db", rng_seed=7)
     try:
@@ -555,5 +560,11 @@ def test_recorded_artifacts_are_read_back(tmp_path: Path) -> None:
         )
         history = engine.get_evidence_history("n")
         assert history[0].artifacts == ["/tmp/run.log", "/tmp/plot.png"]
+
+        # A path with the local separator normalises to the same stored form.
+        engine.record_evidence(
+            "n", LogicalEvidence(success=1.0, depth=1, artifacts=[Path("runs") / "out.json"])
+        )
+        assert engine.get_evidence_history("n")[0].artifacts == ["runs/out.json"]
     finally:
         engine.close()

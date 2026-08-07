@@ -13,6 +13,7 @@ is intentionally weak in v0; the discounted-Beta fix lands in a later phase.
 
 from __future__ import annotations
 
+import statistics
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -114,6 +115,88 @@ def effective_posterior(node: Node, live_counts: dict[str, int]) -> tuple[float,
     return node.alpha, node.beta + (prior_beta - 1.0)
 
 
+# How far a single node's cost may pull it from the workspace median. Four orders
+# of magnitude is the real spread — a unit test against a fine-tune — and beyond
+# that the ratio stops carrying information and starts expressing an outlier.
+_COST_CLAMP = 1e4
+
+# How long a node may be deferred for being expensive before cost stops counting
+# against it at all. One hour: long enough that cost genuinely orders a working
+# session, short enough that a gating premise cannot be starved past the point
+# anyone would notice. Set to 0 to disable the guard and rank on raw cost.
+COST_PATIENCE_S = 3600.0
+
+
+def relative_costs(
+    node_ids: list[str],
+    observed: dict[str, float],
+    group_of: dict[str, str] | None = None,
+    declared: dict[str, float] | None = None,
+) -> dict[str, float]:
+    """What each probe costs, relative to the workspace median.
+
+    Nothing in the engine knew that experiments cost different amounts. Thompson
+    Sampling ranks a three-GPU-day question exactly as it ranks a one-second one,
+    because the posterior is the only thing it reads — and every metric in every
+    gate to date is counted in *probes*, which is defensible only because the
+    eval oracle answers in milliseconds. In real R&D the spread is four orders of
+    magnitude inside one project, and a navigator indifferent to that will
+    confidently spend the week's compute answering the cheapest question last.
+
+    **Precedence: this node's own timings, then the caller's estimate, then the
+    median of its exclusion-group siblings, then the workspace median.** A node
+    with nothing to go on costs **1.0**, the median, so a workspace that reports
+    neither a duration nor an estimate ranks exactly as it did before this
+    existed. That equivalence is the property worth protecting.
+
+    The estimate sits above the sibling median rather than below it because the
+    sibling fallback is blind precisely where the saving is. Competing answers to
+    one question are settled *once*, so at the moment the navigator chooses
+    between them none has been timed and every one inherits the identical
+    number — no order, no saving. And within a question is the only place cost
+    can be saved at all: ordering across questions changes nothing, since every
+    question must be settled either way, whereas the last survivor of a closed
+    question is *deduced* rather than probed, so whichever answer is left
+    unprobed is never paid for. Ordering cheap-first puts the expensive answer in
+    that free slot.
+
+    Consuming an unmeasured estimate is safe here in a way an accuracy prior is
+    not: cost changes only what is tried next, never what the belief state
+    asserts, so the worst a bad guess can do is produce a worse order — and the
+    first real timing overrides it.
+    """
+    declared = declared or {}
+    if not observed and not declared:
+        return {nid: 1.0 for nid in node_ids}
+    # The median is the scale everything is expressed against, so it is taken
+    # over both sources: a workspace that has only ever declared costs still
+    # needs a denominator, and one that has timed everything is unaffected
+    # because observations override declarations node by node below.
+    scale = {**declared, **observed}
+    median = statistics.median(scale.values())
+    if median <= 0:
+        return {nid: 1.0 for nid in node_ids}
+
+    group_of = group_of or {}
+    by_group: dict[str, list[float]] = {}
+    for nid, cost in observed.items():
+        group = group_of.get(nid)
+        if group:
+            by_group.setdefault(group, []).append(cost)
+
+    costs: dict[str, float] = {}
+    for nid in node_ids:
+        seconds = observed.get(nid)
+        if seconds is None:
+            seconds = declared.get(nid)
+        if seconds is None:
+            siblings = by_group.get(group_of.get(nid, ""), [])
+            seconds = statistics.median(siblings) if siblings else median
+        ratio = seconds / median if seconds > 0 else 1.0
+        costs[nid] = min(max(ratio, 1.0 / _COST_CLAMP), _COST_CLAMP)
+    return costs
+
+
 @dataclass
 class SelectionResult:
     """The return value of select(): either a node selection or a DONE sentinel."""
@@ -142,6 +225,7 @@ class ThompsonSampler:
         verify_threshold: float = VERIFY_THRESHOLD,
         epsilon_low: float = EPSILON_LOW,
         lease_ttl_s: int = DEFAULT_LEASE_TTL_S,
+        cost_patience_s: float = COST_PATIENCE_S,
     ) -> None:
         self._rng = rng
         self._epsilon_tie = epsilon_tie
@@ -150,6 +234,7 @@ class ThompsonSampler:
         self._verify_threshold = verify_threshold
         self._epsilon_low = epsilon_low
         self._lease_ttl_s = lease_ttl_s
+        self._cost_patience_s = cost_patience_s
 
     def select(
         self,
@@ -160,6 +245,7 @@ class ThompsonSampler:
         priority_ids: set[str] | None = None,
         all_goals_met: bool = False,
         eliminated_ids: set[str] | None = None,
+        costs: dict[str, float] | None = None,
     ) -> SelectionResult:
         """Run the full selection procedure on the current frontier.
 
@@ -203,27 +289,77 @@ class ThompsonSampler:
 
         # Step 3: draw theta for each frontier node under the closed-world prior.
         live_counts = live_group_counts(all_nodes, eliminated_ids)
-        scored = [(self._draw_theta(node, live_counts), node) for node in frontier_nodes]
+        thetas = {node.id: self._draw_theta(node, live_counts) for node in frontier_nodes}
 
-        # Step 4: lexicographic sort — primary: theta desc, tiebreak: same
+        # Rank on expected value **per unit cost**. With no costs supplied every
+        # ratio is exactly 1.0, so the ordering, the RNG consumption and the
+        # epsilon tiebreak are identical to what they were before cost existed —
+        # which is the property that makes this safe to turn on by default only
+        # once it has been measured.
+        costs = costs or {}
+        scored = [
+            (thetas[node.id] / self._effective_cost(costs.get(node.id, 1.0), node, now), node)
+            for node in frontier_nodes
+        ]
+
+        # Step 4: lexicographic sort — primary: score desc, tiebreak: same
         # exclusion group as the last pick, then stalest.
         # Report the theta that actually drove the pick — do NOT draw again,
         # which would waste RNG state and misreport the selection rationale.
-        best_theta, best = self._pick_best(scored, now, last_group)
+        _, best = self._pick_best(scored, now, last_group)
+        best_theta = thetas[best.id]
         ci = credible_interval(best.alpha, best.beta)
+
+        cost = costs.get(best.id, 1.0)
+        rationale = f"theta={best_theta:.4f}"
+        if cost != 1.0:
+            effective = self._effective_cost(cost, best, now)
+            rationale += f", cost={cost:.3g}x median, value/cost={best_theta / effective:.4f}"
+            if abs(effective - cost) > 1e-9:
+                rationale += f" (cost weight decayed to {effective:.3g}x after waiting)"
 
         return SelectionResult(
             status="SELECTED",
             node_id=best.id,
             claim_id=uuid.uuid4().hex,
             credible_interval=ci,
-            rationale=f"theta={best_theta:.4f}",
+            rationale=rationale,
         )
 
     def _draw_theta(self, node: Node, live_counts: dict[str, int] | None = None) -> float:
         """Draw one sample from the node's closed-world posterior."""
         alpha, beta = effective_posterior(node, live_counts or {})
         return float(self._rng.beta(alpha, beta))
+
+    def _effective_cost(self, cost: float, node: Node, now: datetime) -> float:
+        """The cost divisor, with its weight decayed by how long the node has waited.
+
+        Dividing by cost defers an expensive node whenever a cheaper one keeps
+        looking marginally better — and a premise that gates the whole graph
+        still has to be run. Nothing else fixes this: the cheap candidates are
+        genuinely better value each time they are compared, so the expensive one
+        loses every comparison it is ever in, forever, and the search stalls one
+        probe short of its goal with the navigator confidently doing arithmetic.
+
+        The weight therefore decays with waiting time: at zero wait the full
+        ratio applies, at ``cost_patience_s`` it is exactly 1.0 and the node is
+        ranked on posterior alone as if cost had never existed. Interpolating the
+        *exponent* rather than the ratio keeps it monotone and scale-free — a
+        100x node and a 2x node relax at the same rate relative to their own
+        penalty, instead of the expensive one taking fifty times as long to be
+        forgiven for being expensive.
+
+        Waiting time is the right signal and needs no new state: ``updated_at``
+        is the last time anything happened to this node, so for one that has sat
+        untouched it is exactly how long it has been passed over. This is the
+        same quantity the epsilon tiebreak already uses for anti-starvation, put
+        to the same purpose one level up.
+        """
+        if cost == 1.0 or self._cost_patience_s <= 0:
+            return cost
+        waited = max(0.0, (now - node.updated_at).total_seconds())
+        damping = min(1.0, waited / self._cost_patience_s)
+        return float(cost ** (1.0 - damping))
 
     def _pick_best(
         self,

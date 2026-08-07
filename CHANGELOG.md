@@ -46,7 +46,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the one that could not be queried directly; the SDK enforces `inputSchema`, so the filter
   was rejected outright and the `view="settled"` workaround bundles three other statuses.
 
+- **Cost-aware selection: rank by value per unit of what a probe actually cost.** Selection
+  weighed every candidate purely on how much it would settle, which is right only while all
+  probes cost the same. They do not: a three-day fine-tune and a one-second unit test were
+  ranked as if interchangeable, so the cheap decisive check waited behind the expensive one.
+  - `record_evidence` accepts **`duration_s`**, the wall-clock seconds the experiment took.
+    The engine reads back the mean per node and converts the frontier into **median-relative**
+    ratios — 4.0 means "four times the typical probe here" — then scores `value / cost`.
+    Relative, because absolute seconds do not compare across workspaces, and a median is not
+    moved by the one overnight run that would drag a mean.
+  - A node nobody has timed inherits its **exclusion-group siblings'** median before falling
+    back to the workspace median: the answers to one question are usually tested the same way,
+    so the closest available evidence is the sibling's, not the global average.
+  - **`estimated_cost` on `create_hypotheses`**, because the observed model was blind exactly
+    where the saving is. A question is settled *once*, so at the moment the navigator chooses
+    between its competing answers none of them has been timed, and the sibling fallback handed
+    every one of them the identical number. And within a question is the only place cost can be
+    saved at all: ordering across questions changes nothing, since every question must be settled
+    either way, whereas **the last answer standing is deduced rather than probed** — so whichever
+    one is never reached is never paid for. Ordering cheap-first puts the expensive answer in that
+    free slot. Precedence is observations, then the estimate, then siblings, then the workspace
+    median. Safe to consume unmeasured in a way an accuracy prior is not: cost moves only what is
+    tried next, never what the belief state asserts, and the first real `duration_s` overrides it.
+  - **An expensive premise can be deferred but never starved.** Dividing by cost defers a slow
+    node whenever a cheaper one keeps looking marginally better — and the cheap candidates are
+    genuinely better value at *every* comparison, so the expensive one loses every comparison it
+    is ever in, forever, and a premise that gates the whole graph never runs. The cost weight now
+    decays with waiting time: full effect at zero wait, exactly neutral after `COST_PATIENCE_S`
+    (one hour). The *exponent* decays rather than the ratio, so a 100x node and a 2x node relax at
+    the same rate instead of the expensive one being punished twice for being expensive.
+  - **Off by default** (`hypotree --cost-aware`). With it off, every ratio is exactly 1.0 and
+    ranking is bit-identical to a build with no cost term at all — the only honest way to add a
+    term to an acquisition function that a frozen gate has already scored. Recording
+    `duration_s` is always safe; it is stored and displayed either way, and the dashboard now
+    shows how long each result took beside it.
+  - **And it is now measured.** The phase shipped with a falsifier nobody could run: every
+    criterion in the harness counts *probes*, which is defensible only because the oracle answers
+    in uniform milliseconds — so a probe is the unit of cost by construction, `θ/c` and `θ` induce
+    the same order, and the claimed 20% saving was not merely unmet but unobservable. A falsifier
+    that cannot fire is not a falsifier. `eval/cost_gate.py` plays every seed twice against a
+    cost-weighted tariff, once with the navigator allowed to see it and once not: **cost falls
+    77.3%** against a 20% threshold, **probes rise 1.5%** against a 10% ceiling, 30/30 seeds
+    cheaper and 30/30 still solved, capturing **94.2%** of the achievable saving. Both halves come
+    from one mechanism, which is what makes it a single claim rather than two coincidences. The
+    tariff is assigned independently of which answer is correct — verified at 19% against a 20%
+    chance baseline — so the arm is not being credited for finding the answer sooner.
+- **A probe on a question the inference had already closed now says so.** `record_evidence`
+  returns a **`redundant`** note when the result lands on a node the exclusion inference had
+  retired. Run M spent eight probes this way: the agent tested all five members of an axis and
+  reported all five in one batch, so every retirement fired after the probes were already
+  spent. The saving exists only while the alternatives are unprobed, and nothing in the system
+  said so — the existing counters watch dispatches, and these were self-initiated.
+  - The note distinguishes the two cases. A **contradiction** (the retired node comes back
+    VERIFIED) is two confirmed answers to one question and was worth the spend; anything else
+    is waste, and the message names the rule that avoids it.
+  - The eval report counts both separately, and the exclusion-yield paragraph now excludes
+    redundant probes from its denominator: the blind baseline assumes each question is settled
+    once, so a yield below chance with redundant probes present is a recording-discipline
+    problem and not an ordering one. Two problems, two fixes, and reporting them as one number
+    sends the reader after the wrong one.
+
 ### Fixed
+- **Artifact paths recorded on Windows did not match the same paths recorded on Linux.**
+  `record_evidence` stored `str(Path(p))`, so `/tmp/run.log` became `\tmp\run.log` on Windows
+  and the same artifact read back as two different records. A belief state is shared — synced,
+  committed, opened from CI — so paths are now normalised to POSIX separators on write.
 - **A missing `success` invented a measurement and settled the hypothesis.** `record_evidence`
   defaulted it to 0.5, so `record_evidence(node_id="X")` — an ordinary LLM truncation, and valid
   against the schema — wrote a real evidence row, moved the posterior to Beta(1.5, 1.5) and, in

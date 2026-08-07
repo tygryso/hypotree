@@ -1,12 +1,13 @@
 #!/bin/bash
 #
-# Phase-4 evaluation gate runner.
+# Evaluation gate runner.
 #
 #   0. sync + lint + format + test
 #   1. generate the held-out landscapes + briefings
 #   2. pre-flight: assert the analytic difficulty calibration holds
 #   2b. pre-flight: assert the ENGINE can solve every seed with no LLM at all
 #   2c. pre-flight: assert an under-declared question is DIAGNOSED, not mis-answered
+#   2d. pre-flight: score the cost falsifier on a cost-weighted tariff
 #   3. criterion 2 — TS-quality ablation (no LLM)
 #   4. criteria 1/3/4 — three paired arms on every seed
 #   5. score the frozen gate → GO / STOP / ITERATE
@@ -253,8 +254,8 @@ uv run python -m eval.runner.engine_selfplay
 #     Every axis carries its winning value, so a fully-declared question always
 #     confirms and the assumption behind deduction-by-elimination is never
 #     actually tested. Withholding one winner is the only way this landscape can
-#     test it: the engine then refutes the four candidates that remain and, before
-#     P8b-CLOSED, confirmed the survivor by elimination with no observation of its
+#     test it: the engine then refutes the four candidates that remain and, 
+#     confirmed the survivor by elimination with no observation of its
 #     own and ended `empty_frontier` with the goal unmet.
 #
 #     Gated on the DIAGNOSIS, not on a solve. The winning value was never offered,
@@ -281,12 +282,32 @@ if share < 0.80:
     sys.exit(
         f"closed-world check FAILED: only {share:.0%} of under-declared questions were "
         f"diagnosed (want >= 80%). A deduction over an incomplete list is being defended "
-        f"instead of withdrawn — see P8b-CLOSED."
+        f"instead of withdrawn."
     )
 print("  (a wrong answer reported as an empty frontier is not a result)")
 PY
 
-# 3. Criterion 2 — TS-quality ablation (no LLM needed)
+# 2d. Pre-flight — does knowing what a probe costs actually pay?
+#     Shipped with a falsifier nobody could run: every criterion in this
+#     harness counts PROBES, which is only defensible because the oracle answers
+#     in uniform milliseconds — so a probe is the unit of cost by construction,
+#     theta/cost and theta induce the same order, and the claimed saving was not
+#     merely unmet but unobservable. This plays every seed twice against a
+#     cost-weighted tariff, once with the navigator allowed to see it and once
+#     not, and scores the pre-registered thresholds.
+#
+#     It runs here rather than in the gate because it answers a question about
+#     the NAVIGATOR, and an LLM picks its own probe order — a run with a model in
+#     the loop would measure the model's thrift instead.
+#
+#     Non-fatal by design: cost-awareness is off by default, so a regression here
+#     cannot affect the run about to be spent. It is reported loudly and the
+#     evaluation continues.
+if ! uv run python -m eval.cost_gate; then
+  echo "WARNING: the cost falsifier did not hold. Cost-aware selection is" >&2
+  echo "         off by default, so this does not affect the run below — but the" >&2
+  echo "         mechanism no longer does what it claims." >&2
+fi
 uv run python -m eval.runner.ablation_navigator eval/ --run-id "${RUN_ID}"
 
 # 4. Criteria 1/3/4 — every arm on every seed.

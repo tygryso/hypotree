@@ -703,20 +703,23 @@ def test_an_unknown_flag_exits_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.e2e
-def test_the_serving_flags_resolve_to_a_port_and_two_switches() -> None:
+def test_the_serving_flags_resolve_to_a_port_and_three_switches() -> None:
     """The dashboard is on by default, and turning both halves off is refused.
 
     Default-on is the point: it was behind a flag while it was unproven and the
-    people it was built for never saw it.
+    people it was built for never saw it. Cost-awareness is the opposite case —
+    off until measured, because it adds a term to an acquisition function a
+    frozen gate has already scored.
     """
     from hypotree.dashboard.server import DEFAULT_PORT
     from hypotree.mcp_server import _parse_serve_args
 
-    assert _parse_serve_args([]) == (DEFAULT_PORT, True, True)
-    assert _parse_serve_args(["--dashboard-port", "9001"]) == (9001, True, True)
-    assert _parse_serve_args(["--dashboard-port=9001"]) == (9001, True, True)
-    assert _parse_serve_args(["--no-dashboard"]) == (DEFAULT_PORT, False, True)
-    assert _parse_serve_args(["--no-mcp"]) == (DEFAULT_PORT, True, False)
+    assert _parse_serve_args([]) == (DEFAULT_PORT, True, True, False)
+    assert _parse_serve_args(["--dashboard-port", "9001"]) == (9001, True, True, False)
+    assert _parse_serve_args(["--dashboard-port=9001"]) == (9001, True, True, False)
+    assert _parse_serve_args(["--no-dashboard"]) == (DEFAULT_PORT, False, True, False)
+    assert _parse_serve_args(["--no-mcp"]) == (DEFAULT_PORT, True, False, False)
+    assert _parse_serve_args(["--cost-aware"]) == (DEFAULT_PORT, True, True, True)
 
     for bad in (
         ["--bogus"],

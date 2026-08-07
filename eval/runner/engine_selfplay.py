@@ -34,7 +34,13 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from eval.environment.landscape_scoring import score_config
+from eval.environment.landscape_scoring import (
+    axis_value_costs,
+    optimal_strategy_cost,
+    probe_cost,
+    reference_strategy_cost,
+    score_config,
+)
 from eval.runner.config import TASK_SEEDS
 from hypotree.engine import HypoTreeEngine
 from hypotree.models.evidence import LogicalEvidence
@@ -63,22 +69,38 @@ class SelfPlayResult:
     reference: int
     solved: bool
     end_reason: str
+    cost: float = 0.0
+    reference_cost: float = 0.0
+    optimal_cost: float = 0.0
 
     @property
     def ratio(self) -> float:
         return self.probes / self.reference if self.reference else 0.0
+
+    @property
+    def cost_ratio(self) -> float:
+        """Total cost as a fraction of the cost-blind reference sweep."""
+        return self.cost / self.reference_cost if self.reference_cost else 0.0
 
 
 def _load(seed: int) -> dict:
     return json.loads((LANDSCAPE_DIR / f"landscape_seed_{seed}.json").read_text(encoding="utf-8"))
 
 
-def solve_seed(seed: int, rng_seed: int = 7, omit_winner_on: str | None = None) -> SelfPlayResult:
+def solve_seed(
+    seed: int,
+    rng_seed: int = 7,
+    omit_winner_on: str | None = None,
+    cost_aware: bool = False,
+) -> SelfPlayResult:
     """Drive one episode with a caller that does exactly what it is told.
 
     The caller has no strategy of its own on purpose. Every decision — what to
     probe, at what depth, what to compose — comes from the navigator, so the
-    result measures the engine and nothing else.
+    result measures the engine and nothing else. That is exactly what makes it
+    the right instrument for the cost question: an LLM picks its own order, so a
+    run with one in the loop would measure the agent's thrift rather than the
+    navigator's.
 
     ``omit_winner_on`` leaves the winning value off one axis's declared
     candidates, which is the only way this landscape can produce a question that
@@ -86,10 +108,19 @@ def solve_seed(seed: int, rng_seed: int = 7, omit_winner_on: str | None = None) 
     fully-declared question always confirms. Under-declaring is not a contrived
     case — it is an agent thinking of three values where there were five — and it
     is the situation the dead-question rule exists for.
+
+    ``cost_aware`` ranks candidates by value per unit cost. Both arms pay the
+    same tariff and record the same durations; they differ only in whether the
+    navigator is allowed to look at them.
     """
     land = _load(seed)
     with tempfile.TemporaryDirectory() as tmp:
-        engine = HypoTreeEngine(Path(tmp) / "state.db", rng_seed=rng_seed, project_path=Path(tmp))
+        engine = HypoTreeEngine(
+            Path(tmp) / "state.db",
+            rng_seed=rng_seed,
+            project_path=Path(tmp),
+            cost_aware=cost_aware,
+        )
         try:
             return _drive(engine, land, seed, omit_winner_on)
         finally:
@@ -100,9 +131,21 @@ def _drive(
     engine: HypoTreeEngine, land: dict, seed: int, omit_winner_on: str | None = None
 ) -> SelfPlayResult:
     withheld = land["winning_values"][omit_winner_on] if omit_winner_on else None
+    tariff = axis_value_costs(seed)
     engine.create_hypotheses(
         [
-            {"statement": f"{axis}={value}", "node_id": f"{axis}_{value}", "exclusion_group": axis}
+            {
+                "statement": f"{axis}={value}",
+                "node_id": f"{axis}_{value}",
+                "exclusion_group": axis,
+                # What the caller expects this probe to take. Declared because a
+                # question is settled once: none of these has been timed at the
+                # moment the navigator has to choose between them, so without an
+                # estimate every one of them looks identical and cost cannot
+                # order anything. The estimate is superseded by the first real
+                # timing, and it moves only what is tried next.
+                "estimated_cost": tariff[axis][value],
+            }
             for axis in land["axes"]
             for value in land["axis_values"][axis]
             if not (axis == omit_winner_on and value == withheld)
@@ -112,6 +155,19 @@ def _drive(
     target = float(land["target_metric"])
     probes = 0
     composed = 0
+    spent = 0.0
+
+    def finish(solved: bool, reason: str) -> SelfPlayResult:
+        return SelfPlayResult(
+            seed,
+            probes,
+            reference,
+            solved,
+            reason,
+            cost=spent,
+            reference_cost=reference_strategy_cost(seed),
+            optimal_cost=optimal_strategy_cost(seed),
+        )
 
     for _ in range(MAX_TURNS):
         response = engine.get_next_targets(count=1)[0]
@@ -119,9 +175,15 @@ def _drive(
         if response.status == "SELECTED":
             depth = max(1, response.min_depth or 1)
             probes += 1
+            duration = probe_cost(response.statement, seed)
+            spent += duration
             engine.record_evidence(
                 response.node_id,  # type: ignore[arg-type]
-                LogicalEvidence(success=score_config(response.statement, seed, depth), depth=depth),
+                LogicalEvidence(
+                    success=score_config(response.statement, seed, depth),
+                    depth=depth,
+                    duration_s=duration,
+                ),
                 claim_id=response.claim_id,
             )
             continue
@@ -129,7 +191,7 @@ def _drive(
         if response.reason in ("awaiting_composition", "awaiting_substitution"):
             match = _PARENTS_RE.search(response.rationale)
             if match is None:
-                return SelfPlayResult(seed, probes, reference, False, "advice_without_parents")
+                return finish(False, "advice_without_parents")
             parents = [p.strip().strip("'") for p in match.group(1).split(",")]
             composed += 1
             node_id = f"composition_{composed}"
@@ -149,23 +211,29 @@ def _drive(
             )
             depth = max(2, response.min_depth or 2)
             probes += 1
+            duration = probe_cost(statement, seed)
+            spent += duration
             success = score_config(statement, seed, depth)
-            engine.record_evidence(node_id, LogicalEvidence(success=success, depth=depth))
+            engine.record_evidence(
+                node_id, LogicalEvidence(success=success, depth=depth, duration_s=duration)
+            )
             if success >= target:
-                return SelfPlayResult(seed, probes, reference, True, "solved")
+                return finish(True, "solved")
             continue
 
         # Any other DONE reason ends the episode. `empty_frontier` is the one
         # that matters: it means the engine believes the search is over, and
         # arriving here without having solved anything is the defect.
-        return SelfPlayResult(seed, probes, reference, False, response.reason)
+        return finish(False, response.reason)
 
-    return SelfPlayResult(seed, probes, reference, False, "turn_cap")
+    return finish(False, "turn_cap")
 
 
-def run_selfplay(seeds: list[int] | tuple[int, ...] = TASK_SEEDS) -> list[SelfPlayResult]:
+def run_selfplay(
+    seeds: list[int] | tuple[int, ...] = TASK_SEEDS, cost_aware: bool = False
+) -> list[SelfPlayResult]:
     """Play every seed and return the results in seed order."""
-    return [solve_seed(seed) for seed in seeds]
+    return [solve_seed(seed, cost_aware=cost_aware) for seed in seeds]
 
 
 def check(results: list[SelfPlayResult]) -> list[str]:

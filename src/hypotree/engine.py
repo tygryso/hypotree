@@ -32,6 +32,7 @@ from hypotree.navigator.convergence import credible_interval
 from hypotree.navigator.sampler import (
     DEFAULT_LEASE_TTL_S,
     ThompsonSampler,
+    relative_costs,
 )
 from hypotree.store.identity import capture_git_context
 from hypotree.store.store import HypoTreeStore
@@ -291,6 +292,15 @@ class RecordEvidenceResult(BaseModel):
 
     node: Node
     next_targets: list[TargetResponse] = []
+    # Set when the result arrived for a question the belief state had already
+    # settled by inference. It is not an error — the measurement is kept, and a
+    # result that *contradicts* the inference is the most valuable thing in the
+    # run — but a result that merely agrees with it is a probe that need not have
+    # been spent, and nothing told the caller so. An agent that probes a whole
+    # question before recording any of it gets no exclusion benefit at all, and
+    # in one evaluation run that cost half a probe per episode with every
+    # existing metric reading clean.
+    redundant: str | None = None
 
 
 class EvidenceReport(BaseModel):
@@ -470,6 +480,7 @@ class HypoTreeEngine:
         lease_ttl_s: int = DEFAULT_LEASE_TTL_S,
         project_path: Path | str | None = None,
         read_only: bool = False,
+        cost_aware: bool = False,
     ) -> None:
         self._store = HypoTreeStore(db_path, read_only=read_only)
         self._graph = HypoTreeGraph()
@@ -477,6 +488,11 @@ class HypoTreeEngine:
             np.random.default_rng(rng_seed),
             lease_ttl_s=lease_ttl_s,
         )
+        # Off until measured. With it off every cost ratio is exactly 1.0, so
+        # selection is byte-identical to a build that has never heard of cost —
+        # which is the only honest way to add a second term to an acquisition
+        # function that a pre-registered gate has already scored.
+        self._cost_aware = cost_aware
         self._lease_ttl_s = lease_ttl_s
         self._project_path = Path(project_path) if project_path else Path.cwd()
         # Exclusion group of the most recent dispatch, used to break selection
@@ -819,6 +835,7 @@ class HypoTreeEngine:
         param_config: dict[str, Any] | None = None,
         exclusion_group: str | None = None,
         exclusion_closed: bool = True,
+        estimated_cost: float | None = None,
         node_id: str | None = None,
         if_exists: str = "error",
     ) -> CreateHypothesisResult:
@@ -882,6 +899,7 @@ class HypoTreeEngine:
             param_config=param_config,
             exclusion_group=exclusion_group,
             exclusion_closed=exclusion_closed,
+            estimated_cost=estimated_cost,
         )
         self._store.add_node(node)
 
@@ -1231,6 +1249,7 @@ class HypoTreeEngine:
             priority_ids=set(suspects),
             all_goals_met=bool(goals) and all(self.goal_achieved(g) for g in goals),
             eliminated_ids=self._eliminated_ids(all_nodes),
+            costs=self._probe_costs(frontier, all_nodes) if self._cost_aware else None,
         )
 
         if result.status == "DONE":
@@ -1479,9 +1498,11 @@ class HypoTreeEngine:
         """
         if count_next_targets < 0:
             raise ValueError(f"count_next_targets must be >= 0, got {count_next_targets}")
-        node = self._record_one(node_id, evidence, claim_id)
+        node, redundant = self._record_one(node_id, evidence, claim_id)
         return RecordEvidenceResult(
-            node=node, next_targets=self._top_up(count_next_targets, lease_ttl_s)
+            node=node,
+            redundant=redundant,
+            next_targets=self._top_up(count_next_targets, lease_ttl_s),
         )
 
     def record_results(
@@ -1523,11 +1544,13 @@ class HypoTreeEngine:
         git = _GitContextOnce(self._project_path)
         for report in reports:
             try:
-                node = self._record_one(report.node_id, report.evidence, report.claim_id, git=git)
+                node, redundant = self._record_one(
+                    report.node_id, report.evidence, report.claim_id, git=git
+                )
             except (NodeNotFoundError, GoalEvidenceError, ClaimError) as exc:
                 failed.append(FailedRecord(node_id=report.node_id, error=str(exc)))
                 continue
-            recorded.append(RecordEvidenceResult(node=node))
+            recorded.append(RecordEvidenceResult(node=node, redundant=redundant))
         return BatchRecordResult(
             recorded=recorded,
             failed=failed,
@@ -1548,13 +1571,16 @@ class HypoTreeEngine:
         claim_id: str | None = None,
         *,
         git: _GitContextOnce | None = None,
-    ) -> Node:
+    ) -> tuple[Node, str | None]:
         """Validate + consume claim, update posterior, apply transitions.
 
         Auto-captures git context_hash + git_branch from the working tree when
         the evidence does not carry them (best-effort; None outside a git repo).
 
         Evidence against a goal is refused — see ``GoalEvidenceError``.
+
+        Returns the updated node and, when the result arrived for a question the
+        belief state had already settled, a note saying so.
         """
         # A blank claim id is a caller reaching for the field it was told to omit,
         # not a claim. Rejecting it threw away a probe that had already been paid
@@ -1564,6 +1590,11 @@ class HypoTreeEngine:
         node = self._store.get_node(node_id)
         if node is None:
             raise NodeNotFoundError(f"Node not found: {node_id}")
+
+        # Captured before anything is applied: a node the exclusion inference
+        # closed is EXHAUSTED without ever having been observed, and after the
+        # record its status may be anything at all.
+        was_inferred_shut = node.status is Status.EXHAUSTED and not self._is_eliminated(node)
 
         # A goal is an objective, not a claim, and the engine already refuses to
         # invalidate or exhaust one — so the only thing evidence against a goal
@@ -1685,7 +1716,33 @@ class HypoTreeEngine:
         self._refresh_node_in_graph(node_id)
         updated = self._store.get_node(node_id)
         assert updated is not None
-        return updated
+        return updated, self._redundancy_note(node_id, was_inferred_shut, updated)
+
+    def _redundancy_note(self, node_id: str, was_inferred_shut: bool, updated: Node) -> str | None:
+        """Whether this result answered a question the belief state had closed.
+
+        Not an error, and the measurement is always kept: a result that
+        *contradicts* the inference is the most valuable thing in a run, because
+        it means the question has two confirmed answers. One that merely agrees
+        with it is a probe that need not have been spent — and nothing said so,
+        which is how an agent that sweeps a whole question before recording any
+        of it loses the entire exclusion benefit for that question while every
+        health metric reads clean.
+        """
+        if not was_inferred_shut:
+            return None
+        if updated.status is Status.VERIFIED:
+            return (
+                f"'{node_id}' had been retired because a sibling was confirmed, and this "
+                f"result confirms it too — so that question has two confirmed answers and "
+                f"one of them does not survive composition. This probe was worth spending."
+            )
+        return (
+            f"'{node_id}' was already ruled out by the exclusion inference before this "
+            f"result arrived, and the result agrees. Recording it changed nothing. Record "
+            f"each result before probing the next answer to the same question — confirming "
+            f"one retires the rest for free, and probing them first spends that saving."
+        )
 
     def _recoverable_claim(self, node_id: str, now: datetime) -> Any | None:
         """The lease an unknown claim id was almost certainly meant to name.
@@ -3766,6 +3823,21 @@ class HypoTreeEngine:
         # that no longer stands.
         self._retract_exclusion(node_id, now)
         return True
+
+    def _probe_costs(self, frontier: list[Node], all_nodes: list[Node]) -> dict[str, float]:
+        """What each candidate on the frontier costs to probe, relative to the median.
+
+        Observations first, the caller's estimate only where nothing has been
+        timed — see ``relative_costs``. ``all_nodes`` is passed in already
+        fetched because the caller has just read it: this runs per dispatch, and
+        re-reading the workspace here is the shape that cost 41x elsewhere.
+        """
+        observed = self._store.mean_duration_by_node()
+        declared = {n.id: n.estimated_cost for n in all_nodes if n.estimated_cost is not None}
+        if not observed and not declared:
+            return {}
+        groups = {n.id: n.exclusion_group for n in all_nodes if n.exclusion_group}
+        return relative_costs([n.id for n in frontier], observed, groups, declared)
 
     def _eliminated_ids(self, all_nodes: list[Node]) -> set[str]:
         """Every node ruled out as the answer to its own question, in one query.

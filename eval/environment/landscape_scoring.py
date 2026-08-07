@@ -115,6 +115,34 @@ EVIDENCE_REGIME = "deterministic"
 # the analytic difficulty guarantee in reference_strategy_probes().
 _WINNING_INDEX_POOL: tuple[int, ...] = tuple(range(1, VALUES_PER_AXIS))
 
+# What each probe costs, in seconds. Every gate to date counts *probes*, which is
+# only defensible because this oracle answers in uniform milliseconds — so a
+# probe is the unit of cost by construction, and a navigator that ranks by value
+# per unit cost induces exactly the same order as one that ignores cost. That
+# makes cost-aware selection unmeasurable here, not neutral.
+#
+# These tiers are assigned to the five values of each axis by a seeded shuffle.
+# Heavy-tailed on purpose: real R&D spreads four orders of magnitude inside one
+# project (a unit test, a fine-tune, a wet-lab run), and a mechanism that only
+# pays on a uniform spread is not the mechanism anyone needs.
+#
+# The saving this exposes is specific and is the whole point. Probe *count* is
+# invariant under reordering — the winner's position within a question is
+# uniform, so any order settles it in the same expected number of probes, which
+# is why three consecutive audits found exclusion yield pinned at chance. Probe
+# *cost* is not invariant, because the last survivor of a closed question is
+# deduced for free: whichever answer is left unprobed is never paid for. So
+# ordering cheap-first pushes the expensive answer into the free slot, and the
+# expected cost falls while the expected probe count does not move at all.
+_COST_TIERS: tuple[float, ...] = (0.5, 1.0, 2.0, 8.0, 40.0)
+
+# The cost of assembling and probing a full combination. Flat, and deliberately
+# mid-range: the combination is not a lever — every episode must build one — so
+# giving it a cost that varied would add noise to the measurement without adding
+# a decision. Charging nothing would flatter the cost-aware arm by making the one
+# probe it cannot avoid free.
+COMBINATION_COST = 4.0
+
 
 def stable_hash(text: str) -> float:
     """Deterministic float in [0,1) from a string via SHA-256."""
@@ -136,6 +164,43 @@ def winning_values(seed: int) -> dict[str, str]:
 def axis_values() -> dict[str, list[str]]:
     """The full menu of candidate values for every axis (the search space)."""
     return {axis: [f"v{v}" for v in range(VALUES_PER_AXIS)] for axis in AXES}
+
+
+def axis_value_costs(seed: int) -> dict[str, dict[str, float]]:
+    """Seconds each premise probe costs, per axis and value.
+
+    The tiers are permuted independently per (seed, axis), so which answer is
+    expensive is uncorrelated with which answer is *right*. That independence is
+    what makes the measurement honest: if the cheap answer were usually the
+    winner, a cost-aware navigator would look good for finding the answer sooner
+    rather than for deferring the expensive probe into the free deduction slot,
+    and those are different claims.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for axis in AXES:
+        values = [f"v{v}" for v in range(VALUES_PER_AXIS)]
+        # Fisher-Yates driven by the seeded hash: a deterministic permutation
+        # that does not depend on Python's own RNG or its iteration order.
+        tiers = list(_COST_TIERS)
+        for i in range(len(tiers) - 1, 0, -1):
+            j = int(stable_hash(f"{seed}:{axis}:cost:{i}") * (i + 1))
+            tiers[i], tiers[j] = tiers[j], tiers[i]
+        out[axis] = dict(zip(values, tiers, strict=True))
+    return out
+
+
+def probe_cost(config: str, seed: int) -> float:
+    """What probing this configuration costs, in seconds.
+
+    A premise probe costs whatever its axis-value costs; anything naming more
+    than one axis is a combination and costs a flat ``COMBINATION_COST``.
+    """
+    parsed = parse_config(config)
+    known = {a: v for a, v in parsed.items() if a in AXES}
+    if len(known) == 1:
+        axis, value = next(iter(known.items()))
+        return axis_value_costs(seed)[axis].get(value, COMBINATION_COST)
+    return COMBINATION_COST
 
 
 def decoy_axis(seed: int) -> str:
@@ -334,3 +399,54 @@ def min_reference_probes() -> int:
     only ever add probes, never remove them, so this remains a true lower bound.
     """
     return 2 * len(AXES) + 1
+
+
+def _sweep_cost(seed: int, order: str) -> float:
+    """Cost of settling every axis by sweeping its values in a given order.
+
+    ``order`` is ``"declared"`` (v0, v1, …, the order the briefing lists them) or
+    ``"cheap"`` (ascending cost). Both stop at the first confirmation and both
+    leave the last survivor unprobed, because a closed question deduces it — so
+    the two differ *only* in which answers end up in that free slot, which is
+    exactly the quantity cost-aware selection is claimed to exploit.
+
+    Probe count is identical between the two in expectation, so a difference here
+    is a difference in cost and in nothing else.
+    """
+    costs = axis_value_costs(seed)
+    confirming = confirming_values(seed)
+    total = 0.0
+    for axis in AXES:
+        values = [f"v{v}" for v in range(VALUES_PER_AXIS)]
+        if order == "cheap":
+            values.sort(key=lambda v: (costs[axis][v], v))
+        for i, value in enumerate(values):
+            if i == VALUES_PER_AXIS - 1:
+                break  # deduced by elimination: never probed, never paid for
+            total += costs[axis][value]
+            if value in confirming[axis]:
+                break
+    return total + COMBINATION_COST
+
+
+def reference_strategy_cost(seed: int) -> float:
+    """Cost of the canonical strategy — the cost-blind baseline.
+
+    The canonical strategy sweeps each axis in declared order, which is what any
+    navigator that cannot see cost does on average, because the declared order
+    carries no cost information.
+    """
+    return _sweep_cost(seed, "declared")
+
+
+def optimal_strategy_cost(seed: int) -> float:
+    """Cost of sweeping every axis cheapest-answer-first — the achievable floor.
+
+    Not the *theoretical* floor: an oracle knowing which answer is right would
+    probe only that one. This is the floor for a navigator that knows what each
+    probe costs and nothing else about which is correct, which is precisely what
+    `P8d-COST` gives it. Reporting the measured arm against this rather than
+    against zero is what separates "the mechanism works" from "the mechanism is
+    perfect", and only the first is being claimed.
+    """
+    return _sweep_cost(seed, "cheap")

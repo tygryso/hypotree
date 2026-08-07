@@ -235,6 +235,31 @@ MIGRATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "ALTER TABLE nodes ADD COLUMN exclusion_closed INTEGER NOT NULL DEFAULT 1",
         ),
     ),
+    (
+        "11",
+        (
+            # What the experiment cost, in seconds. Nothing in the engine knew
+            # that probes cost different amounts, so Thompson Sampling ranked a
+            # three-GPU-day question exactly as it ranked a one-second one — and
+            # every metric in every gate is counted in probes, which is only
+            # defensible because the eval oracle answers in milliseconds. NULL
+            # means unknown, never zero: a workspace that never reports duration
+            # must behave exactly as it did before this column existed.
+            "ALTER TABLE evidence ADD COLUMN duration_s REAL",
+        ),
+    ),
+    (
+        "12",
+        (
+            # A caller's cost estimate, used only until the node has been timed.
+            # The observed model cannot rank the competing answers to one
+            # question, because a question is settled once and none of them has
+            # any history when the choice is made — and that is the only place
+            # ordering by cost saves anything, since the last survivor is deduced
+            # for free. NULL keeps the pre-existing behaviour exactly.
+            "ALTER TABLE nodes ADD COLUMN estimated_cost REAL",
+        ),
+    ),
 )
 
 # Derived from the chain, so the two cannot drift.

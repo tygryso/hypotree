@@ -150,6 +150,7 @@ hypotree                        # MCP server + dashboard on 127.0.0.1:7331
 hypotree --dashboard-port 8080  # start probing from a port you choose
 hypotree --no-dashboard         # MCP server only, no socket opened
 hypotree --no-mcp               # dashboard alone, against an existing belief state
+hypotree --cost-aware           # rank by value per unit of probe cost (77% cheaper, +1.5% probes)
 ```
 
 It binds `127.0.0.1` only and mints a session token at startup; the URL, token included, goes to stderr (stdout is the JSON-RPC channel). Ask the agent for it instead — `get_workspace_info` returns `dashboard_url`, and so does the `hypotree://dashboard` resource. If no port in the range is free the MCP server still starts and says so: a viewer must never be able to take the server down.
@@ -191,7 +192,7 @@ The API is JSON and every `/api/*` call needs the token. Everything is a read ex
 | `create_hypotheses` | Create one or many nodes with `parent_ids`, `exclusion_group`, `exclusion_closed`, `is_goal` |
 | `add_edges` | Wire hypotheses that already exist, without recreating either. Takes `edges`, a list of `{src, dst, type}` |
 | `get_next_targets` | Thompson Sampling — returns the next hypothesis to test, under a lease. `goal_id` narrows the search to one objective |
-| `record_evidence` | Record one result — or every result from a turn at once with `results=[…]` — and trigger write-back propagation |
+| `record_evidence` | Record one result — or every result from a turn at once with `results=[…]` — and trigger write-back propagation. Optional `duration_s` feeds cost-aware ranking |
 | `generate_learning_path` | What we learned, in order, and what it cost — separates conclusions an experiment paid for from ones the engine inferred free. `goal_id` narrates one objective |
 | `get_workspace_info` | Which belief state you are connected to and which layer chose it — start here when the graph is unexpectedly empty |
 | `update_status` | Manually set node status (rarely needed — the engine does it) |
@@ -327,6 +328,9 @@ Hypotree is validated by a **pre-registered adversarial benchmark** using *qwen3
 ```bash
 # Pre-flight: confirm the engine solves every seed (no GPU)
 uv run python -m eval.runner.engine_selfplay
+
+# Pre-flight: score the cost-aware falsifier on a cost-weighted tariff (no GPU)
+uv run python -m eval.cost_gate
 
 # Full gate: 30 seeds × 3 arms
 ./eval.sh --run-iteration <X> --llm-model <model>

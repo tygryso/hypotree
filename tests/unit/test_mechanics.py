@@ -17,6 +17,7 @@ import pytest
 from hypotree.engine import (
     MAX_REVIEW_DISPATCHES,
     ClaimError,
+    EvidenceReport,
     GoalDependencyError,
     GoalEvidenceError,
     HypoTreeEngine,
@@ -937,3 +938,78 @@ def test_a_settled_question_frees_its_group_again(engine: HypoTreeEngine) -> Non
     engine.record_evidence(first.node_id, LogicalEvidence(success=1.0), claim_id=first.claim_id)
     sibling = next(n for n in ("c1", "c2") if n != first.node_id)
     assert engine._store.get_node(sibling).status == Status.EXHAUSTED
+
+
+@pytest.mark.unit
+def test_a_result_for_an_already_answered_question_says_so(tmp_path: Path) -> None:
+    """The exclusion inference only saves a probe if you record before probing again.
+
+    An agent that sweeps a whole question and then reports all five answers gets
+    no exclusion benefit at all for that question — the inference fires after
+    every probe is already spent. One evaluation run lost half a probe per
+    episode to exactly that while every health metric read clean, because
+    nothing in the response said the result had changed nothing.
+    """
+    engine = HypoTreeEngine(tmp_path / "redundant.db", rng_seed=7)
+    try:
+        for i in range(3):
+            engine.create_hypothesis(f"c={i}", node_id=f"c{i}", exclusion_group="c")
+
+        # Confirming c0 retires c1 and c2 without a probe.
+        first = engine.record_evidence("c0", LogicalEvidence(success=1.0, depth=1))
+        assert first.redundant is None, "the result that settled the question is not redundant"
+        assert engine._store.get_node("c1").status is Status.EXHAUSTED
+
+        # Probing c1 anyway confirms what the engine already inferred.
+        late = engine.record_evidence("c1", LogicalEvidence(success=0.0, depth=1))
+        assert late.redundant is not None
+        assert "already ruled out" in late.redundant
+        assert "before probing the next" in late.redundant
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_a_result_that_contradicts_the_inference_is_called_out_as_worth_it(
+    tmp_path: Path,
+) -> None:
+    """Two confirmed answers to one question is the most valuable thing in a run.
+
+    It means one of the confirmations does not survive composition — the decoy
+    case — so this probe must not be reported in the same words as a wasted one.
+    """
+    engine = HypoTreeEngine(tmp_path / "contradiction.db", rng_seed=7)
+    try:
+        for i in range(3):
+            engine.create_hypothesis(f"c={i}", node_id=f"c{i}", exclusion_group="c")
+        engine.record_evidence("c0", LogicalEvidence(success=1.0, depth=1))
+
+        second = engine.record_evidence("c1", LogicalEvidence(success=1.0, depth=1))
+        assert second.redundant is not None
+        assert "two confirmed answers" in second.redundant
+        assert "worth spending" in second.redundant
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_a_batch_reports_redundancy_per_result(tmp_path: Path) -> None:
+    """The sweep is a batch, so the signal has to survive the batch path."""
+    engine = HypoTreeEngine(tmp_path / "sweep.db", rng_seed=7)
+    try:
+        for i in range(4):
+            engine.create_hypothesis(f"c={i}", node_id=f"c{i}", exclusion_group="c")
+        batch = engine.record_results(
+            [
+                EvidenceReport(node_id="c0", evidence=LogicalEvidence(success=0.0, depth=1)),
+                EvidenceReport(node_id="c1", evidence=LogicalEvidence(success=1.0, depth=1)),
+                EvidenceReport(node_id="c2", evidence=LogicalEvidence(success=0.0, depth=1)),
+                EvidenceReport(node_id="c3", evidence=LogicalEvidence(success=0.0, depth=1)),
+            ]
+        )
+        notes = [r.redundant for r in batch.recorded]
+        assert notes[0] is None and notes[1] is None, "these two settled the question"
+        # c2 and c3 were retired by c1's confirmation before their results landed.
+        assert notes[2] is not None and "already ruled out" in notes[2]
+    finally:
+        engine.close()

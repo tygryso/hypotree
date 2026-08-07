@@ -84,10 +84,15 @@ def _evidence_to_row(node_id: str, ev: Evidence) -> dict:
             "success": ev.success,
             "depth": ev.depth,
             "metrics": json.dumps(ev.metrics),
-            "artifacts": json.dumps([str(p) for p in ev.artifacts]),
+            # POSIX form, whichever platform wrote it. A belief state is shared
+            # across machines and agents, so `\tmp\run.log` and `/tmp/run.log`
+            # must not be two different records of the same artifact — and
+            # Windows opens forward slashes perfectly well.
+            "artifacts": json.dumps([Path(p).as_posix() for p in ev.artifacts]),
             "context_hash": ev.context_hash,
             "git_branch": ev.git_branch,
             "source_ref": ev.source_ref,
+            "duration_s": ev.duration_s,
             "claim_id": ev.claim_id,
             "notes": ev.notes,
             "delta_success": ev.delta_success,
@@ -373,8 +378,8 @@ class HypoTreeStore:
                 alpha, beta, evidence_count,
                 active_claim_id, claimed_at, infra_retry_count,
                 created_at, first_dispatched_at, first_evidence_at,
-                verified_at, invalidated_at, pruned_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                verified_at, invalidated_at, pruned_at, updated_at, estimated_cost
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 node.id,
                 node.statement,
@@ -400,6 +405,7 @@ class HypoTreeStore:
                 _dt_to_str(node.invalidated_at),
                 _dt_to_str(node.pruned_at),
                 _dt_to_str(node.updated_at),
+                node.estimated_cost,
             ),
         )
 
@@ -505,6 +511,7 @@ class HypoTreeStore:
             exclusion_group=row["exclusion_group"],
             exclusion_closed=bool(row["exclusion_closed"]),
             confirmed_depth=row["confirmed_depth"],
+            estimated_cost=row["estimated_cost"],
             alpha=row["alpha"],
             beta=row["beta"],
             evidence_count=row["evidence_count"],
@@ -1193,6 +1200,20 @@ class HypoTreeStore:
             "SELECT node_id, reason FROM status_history WHERE valid_to IS NULL"
         ).fetchall()
         return {r["node_id"]: str(r["reason"] or "") for r in rows}
+
+    def mean_duration_by_node(self) -> dict[str, float]:
+        """Mean observed cost per node, in one query.
+
+        Only logical observations with a recorded duration count: an infra error
+        is not an experiment, and a NULL is unknown rather than free. Nodes with
+        no timed observation are simply absent, which is what lets the caller
+        fall back to a sibling or workspace estimate instead of inventing one.
+        """
+        rows = self._conn.execute(
+            "SELECT node_id, AVG(duration_s) AS mean_s FROM evidence "
+            "WHERE kind='logical' AND duration_s IS NOT NULL GROUP BY node_id"
+        ).fetchall()
+        return {r["node_id"]: float(r["mean_s"]) for r in rows if r["mean_s"] is not None}
 
     def get_posterior_history(self, node_id: str) -> list[sqlite3.Row]:
         return self._conn.execute(

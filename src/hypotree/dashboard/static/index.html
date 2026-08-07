@@ -99,6 +99,9 @@
                   <td>
                     {{ e.success === null ? 'infra' : e.success.toFixed(2) }}
                     at depth {{ e.depth }}
+                    <template v-if="e.duration_s !== null && e.duration_s !== undefined">
+                      &middot; took {{ cost(e.duration_s) }}
+                    </template>
                     <div class="st" v-if="e.source_ref || e.git_branch">
                       {{ e.source_ref || '' }}
                       <template v-if="e.git_branch">
