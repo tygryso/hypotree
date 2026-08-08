@@ -43,6 +43,7 @@
       <div class="tabs">
         <button :class="{on: tab === 'path'}" @click="tab = 'path'">Learning path</button>
         <button :class="{on: tab === 'frontier'}" @click="tab = 'frontier'">Frontier</button>
+        <button :class="{on: tab === 'doubt'}" @click="tab = 'doubt'">What would change my mind</button>
       </div>
 
       <div class="panel">
@@ -154,7 +155,7 @@
         </template>
 
         <!-- Tab B — what the navigator is about to do -->
-        <template v-else>
+        <template v-else-if="tab === 'frontier'">
           <h2>Most likely next</h2>
           <div class="empty" v-if="!frontier.length">
             Nothing is waiting &mdash; every question in scope is answered.
@@ -176,6 +177,33 @@
           <table class="metrics">
             <tr v-for="(v, k) in graph.stats" :key="k"><td>{{ k }}</td><td>{{ v }}</td></tr>
           </table>
+        </template>
+
+        <!-- Tab C — the question a reviewer actually asks -->
+        <template v-else>
+          <h2>What would change my mind</h2>
+          <p class="doubt-lede">
+            The cheapest experiments that would <em>overturn</em> what this goal
+            concludes, weakest evidence first. A belief confirmed by elimination
+            ranks top however confident the engine is &mdash; nothing measured it.
+          </p>
+          <div class="empty" v-if="!doubt.length">
+            Nothing is holding a conclusion up on thin evidence. Either every belief
+            here was tested at the depth it is relied on, or there is no goal wired
+            to anything yet.
+          </div>
+          <div class="doubt" v-for="d in doubt" :key="d.node_id" @click="pick({id: d.node_id})">
+            <div class="row">
+              <span class="frag" :style="{opacity: 0.35 + d.fragility * 0.65}">
+                {{ (d.fragility * 100).toFixed(0) }}%
+              </span>
+              <span>{{ d.statement || d.node_id }}</span>
+            </div>
+            <div class="weak">{{ d.weakest_link }}</div>
+            <div class="try">{{ d.experiment }}<template v-if="d.estimated_cost">
+              &middot; {{ d.estimated_cost.toFixed(1) }}&times; median cost</template></div>
+            <div class="st">{{ d.what_it_would_flip }}</div>
+          </div>
         </template>
       </div>
       <div class="resizer" @pointerdown="startResize" title="Drag to widen the panel"></div>

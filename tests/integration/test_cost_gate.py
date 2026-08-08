@@ -1,6 +1,6 @@
-"""Tests for the cost-weighted landscape and the `P8d-COST` falsifier that scores it.
+"""Tests for the cost-weighted landscape and the falsifier that scores it.
 
-`P8d-COST` shipped with a falsifier nobody could run: every gate counts *probes*,
+Cost-aware selection shipped with a falsifier nobody could run: every gate counts *probes*,
 which is defensible only because the oracle answers in uniform milliseconds — so
 `theta/cost` and `theta` induce the same order and the claimed saving was not
 merely unmet but unobservable. These tests protect the instrument that fixed
@@ -68,7 +68,7 @@ def test_being_expensive_says_nothing_about_being_right() -> None:
     If the cheap answer were usually the winner, the cost-aware arm would look
     good for finding the answer sooner rather than for deferring the expensive
     probe into the free deduction slot — a different claim, and not the one
-    `P8d-COST` makes.
+    cost-aware selection makes.
     """
     dearest = 0
     total = 0

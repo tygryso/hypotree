@@ -474,8 +474,8 @@ def test_overwriting_a_goal_without_its_metric_drops_the_bar(tmp_path: Path) -> 
 
     Re-pinning is the common reason to overwrite a goal, and a re-pin that omits
     `target_metric` silently leaves a goal with no bar to miss. Pinned as the
-    current contract so P8i.2 has something to change deliberately rather than by
-    accident.
+    current contract, so that softening it later is a deliberate change rather
+    than an accident.
     """
     engine = HypoTreeEngine(tmp_path / "bar.db", rng_seed=7)
     try:

@@ -287,6 +287,29 @@ table.metrics td:last-child { text-align: right; font-variant-numeric: tabular-n
   border-radius: 999px; transition: width var(--t);
 }
 
+/* What would change my mind. Deliberately warmer than the frontier card: one
+   panel says what happens next, this one says what would undo it. */
+.doubt-lede { color: var(--ink-dim); font-size: 0.82rem; margin: 0 0 0.7rem; line-height: 1.5; }
+.doubt {
+  background: var(--surface); border: 1px solid var(--line);
+  border-left: 3px solid var(--warn, #b4762b);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 0.6rem 0.7rem; margin-bottom: 0.55rem; cursor: pointer;
+  transition: box-shadow var(--t), border-color var(--t);
+}
+.doubt:hover { box-shadow: var(--shadow-lift); border-color: var(--line-strong); }
+.doubt .row { display: flex; gap: 0.55rem; align-items: baseline; }
+.doubt .frag {
+  font-family: var(--mono); font-size: 0.8rem; font-weight: 600;
+  color: var(--warn, #b4762b); min-width: 2.6rem; font-variant-numeric: tabular-nums;
+}
+.doubt .weak { color: var(--ink-2); font-size: 0.8rem; margin-top: 0.3rem; }
+.doubt .try {
+  font-family: var(--mono); font-size: 0.74rem; color: var(--accent);
+  margin-top: 0.35rem; word-break: break-word;
+}
+.doubt .st { margin-top: 0.3rem; }
+
 .empty { text-align: center; color: var(--ink-dim); font-size: 0.86rem; padding: 1.4rem 1rem; }
 .empty h2 { color: var(--ink-2); letter-spacing: 0; font-size: 0.95rem; text-transform: none; }
 .empty code {

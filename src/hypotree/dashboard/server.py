@@ -402,6 +402,8 @@ class DashboardServer:
                 return (200, detail) if detail is not None else (404, {"error": "no such node"})
             if path == "/api/frontier":
                 return 200, self._read.frontier(goal_id, _int(request.one("k"), 5))
+            if path == "/api/counterfactual":
+                return 200, self._read.counterfactual(goal_id, _int(request.one("k"), 5))
             if path == "/api/learning-path":
                 return 200, self._read.learning_path(
                     goal_id,

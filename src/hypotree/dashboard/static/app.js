@@ -55,6 +55,7 @@ createApp({
     const meta = ref(null);
     const graph = reactive({ nodes: [], edges: [], stats: {}, unwired_goal: null, goal_wiring: null });
     const frontier = ref([]);
+    const doubt = ref([]);
     const narrative = ref("");
     const timeline = ref({ ticks: [], from: null, to: null });
 
@@ -220,9 +221,14 @@ createApp({
       const query = q();
       frontier.value = (await api(`/api/frontier?k=5${query ? "&" + query : ""}`)).candidates;
     }
+    async function loadDoubt() {
+      const query = q();
+      doubt.value = (await api(`/api/counterfactual?k=5${query ? "&" + query : ""}`)).beliefs;
+    }
     async function loadPanels() {
       const query = q();
       await loadFrontier();
+      await loadDoubt();
       await loadNarrative();
       const wasLive = atLive.value;
       timeline.value = await api(`/api/timeline${query ? "?" + query : ""}`);
@@ -419,7 +425,7 @@ createApp({
         : `<pre>${(src || "").replace(/[<>&]/g, "")}</pre>`;
 
     return {
-      meta, graph, frontier, narrative, timeline, goalId, tab, selected, detail,
+      meta, graph, frontier, doubt, narrative, timeline, goalId, tab, selected, detail,
       sinceTick, sincePct, markSince, clearSince, inWindow, cost,
       live, working, scrub, scrubLabel, playing, tip, error, missing,
       lastTick, atLive, goLive, panelWidth, resizing, startResize, zoomBy,

@@ -85,7 +85,7 @@ async def test_stdio_round_trip(server_env: dict[str, str]) -> None:
             done.append("initialize")
 
             tools = await session.list_tools()
-            assert len(tools.tools) == 19
+            assert len(tools.tools) == 20
             done.append("list_tools")
 
             res = await session.call_tool(
@@ -297,6 +297,7 @@ def test_tool_definitions_complete() -> None:
         "get_goal_status",
         "get_conflicts",
         "suggest_discriminating_experiment",
+        "what_would_change_my_mind",
         "get_dag_context",
         "render_dag_map",
         "list_nodes",
@@ -719,7 +720,7 @@ def test_the_serving_flags_resolve_to_a_port_and_three_switches() -> None:
     assert _parse_serve_args(["--dashboard-port=9001"]) == (9001, True, True, False)
     assert _parse_serve_args(["--no-dashboard"]) == (DEFAULT_PORT, False, True, False)
     assert _parse_serve_args(["--no-mcp"]) == (DEFAULT_PORT, True, False, False)
-    assert _parse_serve_args(["--cost-aware"]) == (DEFAULT_PORT, True, True, True)
+    assert _parse_serve_args(["--experimental-cost-aware"]) == (DEFAULT_PORT, True, True, True)
 
     for bad in (
         ["--bogus"],

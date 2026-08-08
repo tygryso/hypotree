@@ -445,7 +445,7 @@ def optimal_strategy_cost(seed: int) -> float:
     Not the *theoretical* floor: an oracle knowing which answer is right would
     probe only that one. This is the floor for a navigator that knows what each
     probe costs and nothing else about which is correct, which is precisely what
-    `P8d-COST` gives it. Reporting the measured arm against this rather than
+    cost-aware selection gives it. Reporting the measured arm against this rather than
     against zero is what separates "the mechanism works" from "the mechanism is
     perfect", and only the first is being claimed.
     """

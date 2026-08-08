@@ -153,6 +153,8 @@ class RunLog:
     # whole question before recording any of it loses the entire exclusion
     # saving for that question, and every other health metric reads clean.
     redundant_probes: int = 0
+    withheld_notices: int = 0
+    withheld_answers: int = 0
     contradicting_probes: int = 0
     redispatched: int = 0
     claims_released: int = 0
@@ -399,6 +401,14 @@ def _build_run_log(path: Path, events: list[dict[str, Any]]) -> RunLog:
                     log.done_reasons[str(ev["reason"])] += 1
             else:
                 log.targets_selected += 1
+                # How often the navigator told the caller it was holding a
+                # competing answer back. A short batch reads as an exhausted
+                # frontier without it, and the caller fills the gap with the
+                # very sibling being protected.
+                held = int(ev.get("same_question_withheld") or 0)
+                if held:
+                    log.withheld_notices += 1
+                    log.withheld_answers += held
                 node_id = str(ev["node_id"])
                 if node_id in outstanding:
                     log.redispatched += 1
@@ -1102,6 +1112,16 @@ def _section_belief_state(logs: list[RunLog]) -> list[str]:
             "and the result agreed — so the probe bought nothing. Invisible to every "
             "dispatch-side counter, because the agent probed it itself: sweeping a whole "
             "question before recording any of it forfeits the entire exclusion saving",
+        ],
+        [
+            "dispatches that named a withheld answer",
+            f"{sum(log.withheld_notices for log in b_logs)} "
+            f"({sum(log.withheld_answers for log in b_logs)} answers)",
+            "the navigator handed out one target and said it was holding this many "
+            "competing answers back until the result comes in. Reported because a short "
+            "batch otherwise reads as an exhausted frontier, and the caller fills the gap "
+            "with the sibling the rule was protecting — which is where every self-initiated "
+            "redundant probe in the previous two runs came from",
         ],
         [
             "probes that contradicted the inference",

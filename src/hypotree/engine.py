@@ -166,6 +166,36 @@ class TargetResponse(BaseModel):
     # confirmation was obtained too shallowly to support what failed on top of
     # it, so repeating that shallow test would settle nothing.
     min_depth: int | None = None
+    # How many competing answers to this target's own question were held back
+    # from the same batch. Reported because the caller cannot see it and will
+    # otherwise fill the gap itself: asking for two targets and receiving one
+    # looks like an exhausted frontier, and the obvious candidate for the empty
+    # slot is the sibling being deliberately withheld — which is the one probe
+    # this result is most likely to make unnecessary.
+    same_question_withheld: int = 0
+
+
+class CounterfactualEntry(BaseModel):
+    """One belief a goal rests on, and the experiment that would overturn it.
+
+    Ranked by *fragility* rather than by how much the engine likes the belief:
+    the question being answered is "what would it take to be wrong", so the
+    interesting node is the one holding up a conclusion on the least evidence,
+    not the one with the lowest posterior.
+    """
+
+    node_id: str
+    statement: str
+    current_belief: str
+    # Why this belief is the weak point, in the caller's words rather than a
+    # score: "never observed", "confirmed at depth 1 under a depth-2 result".
+    weakest_link: str
+    # 0.0 (unshakeable) to 1.0 (nothing behind it at all). Ordering key, and
+    # reported so two entries close together are visibly close together.
+    fragility: float
+    experiment: str
+    estimated_cost: float | None = None
+    what_it_would_flip: str
 
 
 class GoalStatusEntry(BaseModel):
@@ -1129,7 +1159,52 @@ class HypoTreeEngine:
                 node = self._store.get_node(response.node_id)
                 if node is not None and node.exclusion_group:
                     claimed_groups.add(node.exclusion_group)
+        if responses and len(responses) < count:
+            self._explain_short_batch(responses, claimed_groups, scope)
         return responses
+
+    def _explain_short_batch(
+        self, responses: list[TargetResponse], claimed_groups: set[str], scope: set[str] | None
+    ) -> None:
+        """Say why a batch came up short when competing answers are the reason.
+
+        A caller that asks for two targets and gets one reads that as an
+        exhausted frontier. It is usually the opposite: the second pick was
+        withheld because it answers a question already in this batch, and the
+        first result will very likely settle it for free. Silence here is what
+        makes the caller spend that probe anyway — every redundant probe observed
+        in evaluation was self-initiated, and the commonest shape is exactly this
+        gap being filled with the sibling the navigator was protecting.
+
+        Only counts answers that are genuinely still open, so a batch shortened
+        because the work really has run out says nothing and stays quiet.
+        """
+        if not claimed_groups:
+            return
+        dispatched = {r.node_id for r in responses}
+        withheld: dict[str, int] = {}
+        for node in self._store.get_all_nodes():
+            if (
+                node.exclusion_group in claimed_groups
+                and node.id not in dispatched
+                and self._graph._is_frontier_status(node.status)  # noqa: SLF001
+                and (scope is None or node.id in scope)
+            ):
+                withheld[node.exclusion_group] = withheld.get(node.exclusion_group, 0) + 1
+        if not withheld:
+            return
+        for response in responses:
+            node = self._store.get_node(response.node_id) if response.node_id else None
+            group = node.exclusion_group if node else None
+            held = withheld.get(group or "", 0)
+            if not held:
+                continue
+            response.same_question_withheld = held
+            response.rationale += (
+                f". {held} competing answer(s) to this same question are being held back "
+                f"until this result is recorded — do not probe them now: this result may "
+                f"settle every one of them for free"
+            )
 
     def _goal_scope(self, goal_id: str) -> set[str]:
         """The nodes that form the case for one goal.
@@ -2464,6 +2539,168 @@ class HypoTreeEngine:
             )
         return summaries
 
+    def what_would_change_my_mind(
+        self, goal_id: str | None = None, limit: int = 5
+    ) -> list[CounterfactualEntry]:
+        """The cheapest experiments that would overturn what a goal currently concludes.
+
+        Not "here is what I believe" but "here is what it would take to be
+        wrong" — which is the question a reviewer actually asks, and the one a
+        status report cannot answer. It turns the belief state from a record
+        into an instrument, and it needs nothing new: the dependency structure
+        says which confirmations the goal rests on, the status history says
+        which of them were never observed at all, ``confirmed_depth`` says which
+        were established too shallowly to support what was built on them, and
+        the cost model prices the answer.
+
+        Ranked by **fragility**, not by posterior. A deduced belief sits at the
+        top however confident the engine is about it, because confidence with no
+        observation behind it is exactly the thing worth attacking first — and
+        it is also the cheapest thing in the graph to overturn, since one probe
+        settles what no probe has ever touched.
+
+        Read-only: no dispatch, no lease, no mutation. Asking what would change
+        your mind must not change it.
+        """
+        goals = [n for n in self._store.get_all_nodes() if n.is_goal]
+        if goal_id is not None:
+            goals = [g for g in goals if g.id == goal_id]
+            if not goals:
+                raise NodeNotFoundError(f"no goal node with id {goal_id!r}")
+
+        costs = self._counterfactual_costs()
+        entries: list[CounterfactualEntry] = []
+        seen: set[str] = set()
+        for goal in goals:
+            for node in self._load_bearing(goal):
+                if node.id in seen:
+                    continue
+                seen.add(node.id)
+                entry = self._counterfactual_for(node, goal, costs)
+                if entry is not None:
+                    entries.append(entry)
+
+        entries.sort(key=lambda e: (-e.fragility, e.estimated_cost or 0.0, e.node_id))
+        return entries[:limit]
+
+    def _load_bearing(self, goal: Node) -> list[Node]:
+        """The confirmed beliefs whose withdrawal would un-achieve this goal.
+
+        The DEPENDENCY ancestry, and only the confirmed part of it: a node that
+        is not VERIFIED is not currently holding anything up, so there is
+        nothing about it to overturn. Walks the ancestry rather than the direct
+        parents because a goal rests on its premises transitively — the belief
+        most worth attacking is usually several edges down, where a single
+        cheap premise carries an entire pipeline.
+        """
+        support: list[Node] = []
+        seen: set[str] = set()
+        stack = list(self._graph.parents(goal.id, EdgeType.DEPENDENCY))
+        while stack:
+            nid = stack.pop()
+            if nid in seen:
+                continue
+            seen.add(nid)
+            node = self._store.get_node(nid)
+            if node is None:
+                continue
+            if node.status is Status.VERIFIED:
+                support.append(node)
+            stack.extend(self._graph.parents(nid, EdgeType.DEPENDENCY))
+        return support
+
+    def _counterfactual_costs(self) -> dict[str, float]:
+        """Relative probe costs for pricing, or an empty map when nothing is known.
+
+        Reuses the navigator's own cost model so the price quoted here is the
+        price selection would act on. Empty when the workspace has neither timed
+        nor estimated anything, in which case the entries simply carry no cost —
+        an invented number would be worse than none.
+        """
+        all_nodes = self._store.get_all_nodes()
+        observed = self._store.mean_duration_by_node()
+        declared = {n.id: n.estimated_cost for n in all_nodes if n.estimated_cost is not None}
+        if not observed and not declared:
+            return {}
+        groups = {n.id: n.exclusion_group for n in all_nodes if n.exclusion_group}
+        return relative_costs([n.id for n in all_nodes], observed, groups, declared)
+
+    def _counterfactual_for(
+        self, node: Node, goal: Node, costs: dict[str, float]
+    ) -> CounterfactualEntry | None:
+        """Price the flip for one load-bearing belief, or decline to invent one.
+
+        Three ways a confirmation can be weak, in descending order of how little
+        stands behind it. A belief with none of them is genuinely well supported
+        and is left out rather than padded into the list — a panel that always
+        finds something to say is one nobody reads twice.
+        """
+        deepest_dependent = self._deepest_dependent_depth(node)
+        confirmed_depth = node.confirmed_depth or 0
+
+        if node.evidence_count == 0 and self._is_deduced(node):
+            fragility = 1.0
+            weakest = "never observed — confirmed by elimination, so no experiment tested it"
+            experiment = f"probe {node.statement!r} directly"
+            flip = (
+                "if it fails, the question it answers was missing a candidate and "
+                f"{goal.id!r} rests on a value nothing ever measured"
+            )
+        elif node.evidence_count == 0:
+            fragility = 0.9
+            weakest = "confirmed without any recorded observation of its own"
+            experiment = f"probe {node.statement!r} directly"
+            flip = f"{goal.id!r} would lose a premise that was never measured"
+        elif deepest_dependent > confirmed_depth:
+            fragility = 0.7
+            weakest = (
+                f"confirmed at depth {confirmed_depth}, but something tested at depth "
+                f"{deepest_dependent} was built on it"
+            )
+            experiment = f"re-test {node.statement!r} at depth {deepest_dependent}"
+            flip = (
+                "a confirmation supports no claim tested deeper than itself, so this "
+                f"one may not survive the depth {goal.id!r} is judged at"
+            )
+        elif node.evidence_count == 1:
+            fragility = 0.4
+            weakest = "rests on a single observation"
+            experiment = f"repeat {node.statement!r} at depth {max(1, confirmed_depth)}"
+            flip = f"a second disagreeing result would put {goal.id!r} back in question"
+        else:
+            return None
+
+        mean = node.alpha / (node.alpha + node.beta)
+        belief = f"VERIFIED, posterior mean {mean:.2f} over {node.evidence_count} observation(s)"
+        return CounterfactualEntry(
+            node_id=node.id,
+            statement=node.statement,
+            current_belief=belief,
+            weakest_link=weakest,
+            fragility=fragility,
+            experiment=experiment,
+            estimated_cost=costs.get(node.id),
+            what_it_would_flip=flip,
+        )
+
+    def _deepest_dependent_depth(self, node: Node) -> int:
+        """The deepest confirmation depth of anything resting on this node.
+
+        A premise is only as good as the deepest test that assumed it. This is
+        the same reasoning conflict blame already uses, pointed forward instead
+        of backward.
+        """
+        deepest = 0
+        for child_id in self._graph.children(node.id):
+            # Only DEPENDENCY children *assume* this node; a REFINEMENT or
+            # ALTERNATIVE child tested deeply says nothing about it.
+            if node.id not in self._graph.parents(child_id, EdgeType.DEPENDENCY):
+                continue
+            child = self._store.get_node(child_id)
+            if child is not None and child.confirmed_depth:
+                deepest = max(deepest, child.confirmed_depth)
+        return deepest
+
     def generate_learning_path(
         self,
         limit: int = 200,
@@ -3756,7 +3993,7 @@ class HypoTreeEngine:
 
         ``members`` is accepted already-fetched because every caller has just
         read them: this runs on each elimination, and a second lookup per member
-        is the shape of cost P7-PERF removed elsewhere.
+        is the per-node query shape that made dispatch quadratic once already.
         """
         if members is None:
             members = self._store.get_nodes_in_exclusion_group(group)

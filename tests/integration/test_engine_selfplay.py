@@ -56,7 +56,8 @@ def test_an_under_declared_question_is_named_rather_than_answered_wrongly() -> N
     elimination then confirms the survivor with **no observation of its own**: a
     free confirmation of a value that is wrong.
 
-    Before P8b that stood, and the run ended `empty_frontier` with the goal unmet
+    Before the closed-world guard that stood, and the run ended `empty_frontier`
+    with the goal unmet
     — the least actionable sentence available, and the caller was never told that
     the question it asked was incomplete. The engine now withdraws the deduction
     when the assembly built on it falls short, which empties the question and

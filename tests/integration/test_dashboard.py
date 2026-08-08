@@ -508,6 +508,9 @@ async def test_the_read_endpoints_answer(server: DashboardServer) -> None:
     assert status == 200 and isinstance(frontier, dict)
     assert len(frontier["candidates"]) == 2
 
+    status, doubt = await _request(server.port, f"/api/counterfactual?t={t}&k=3")
+    assert status == 200 and isinstance(doubt, dict) and "beliefs" in doubt
+
     status, path = await _request(server.port, f"/api/learning-path?t={t}")
     assert status == 200 and isinstance(path, dict) and "steps" in path
 

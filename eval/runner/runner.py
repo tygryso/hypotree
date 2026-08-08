@@ -781,6 +781,7 @@ def _log_targets(engine: HypoTreeEngine, logger: RunLogger, targets: list[Target
             target.status,
             exclusion_group=node.exclusion_group if node else None,
             reason=target.reason or None,
+            same_question_withheld=target.same_question_withheld,
         )
 
 
@@ -1385,6 +1386,7 @@ class RunLogger:
         status: str,
         exclusion_group: str | None = None,
         reason: str | None = None,
+        same_question_withheld: int = 0,
     ) -> None:
         self._write(
             "target_selected",
@@ -1393,6 +1395,7 @@ class RunLogger:
             status=status,
             exclusion_group=exclusion_group,
             reason=reason,
+            same_question_withheld=same_question_withheld,
         )
 
     def log_evidence_recorded(

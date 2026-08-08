@@ -1,6 +1,6 @@
-"""The falsifier for `P8d-COST`, scored: does knowing what a probe costs pay?
+"""The cost-aware selection falsifier, scored: does knowing what a probe costs pay?
 
-`P8d-COST` shipped with a falsifier nobody could run. Every gate this project has
+Cost-aware selection shipped with a falsifier nobody could run. Every gate this project has
 ever scored counts *probes*, which is defensible only because the landscape
 oracle answers in uniform milliseconds — so a probe **is** the unit of cost by
 construction, `theta/cost` and `theta` induce exactly the same order, and the
@@ -54,8 +54,8 @@ from eval.runner.engine_selfplay import SelfPlayResult, solve_seed
 # project has had to relearn twice: deciding what counts as a pass after seeing
 # the number is not a measurement.
 #
-# Cost must fall by at least this much. 20% is the figure `P8d-COST` committed to
-# when the phase was written, carried over unchanged rather than tuned to
+# Cost must fall by at least this much. 20% was committed to before the
+# mechanism was built, and is carried over unchanged rather than tuned to
 # whatever the implementation turned out to deliver.
 MIN_COST_REDUCTION = 0.20
 
@@ -209,7 +209,7 @@ def _render(report: dict[str, object]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="eval.cost_gate",
-        description="Score the P8d-COST falsifier on the cost-weighted landscape.",
+        description="Score the cost-aware selection falsifier on the cost-weighted landscape.",
     )
     parser.add_argument(
         "--seeds",
@@ -228,14 +228,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(report, indent=2))
     else:
-        print("P8d-COST falsifier — cost-weighted landscape, engine self-play")
+        print("Cost-aware selection falsifier — cost-weighted landscape, engine self-play")
         print(_render(report))
         print()
         print(f"  decision: {report['decision']}")
 
     if report["decision"] != "CONFIRMED":
         print(
-            "P8d-COST FALSIFIED: cost-aware selection did not pay on its own landscape.",
+            "FALSIFIED: cost-aware selection did not pay on its own landscape.",
             file=sys.stderr,
         )
         return 1

@@ -508,6 +508,20 @@ class ReadModel:
             ],
         }
 
+    def counterfactual(self, goal_id: str | None = None, k: int = 5) -> dict[str, Any]:
+        """What it would take for the current conclusion to be wrong.
+
+        The panel a reviewer reads before the graph: a belief state that can
+        only show what it thinks is a report, and one that can name the
+        experiment that would overturn it is an instrument.
+        """
+        self._engine._sync_graph_from_store()  # noqa: SLF001
+        entries = self._engine.what_would_change_my_mind(goal_id, limit=max(k, 0))
+        return {
+            "revision": self.revision(),
+            "beliefs": [e.model_dump() for e in entries],
+        }
+
     def learning_path(
         self,
         goal_id: str | None = None,

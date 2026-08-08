@@ -46,6 +46,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the one that could not be queried directly; the SDK enforces `inputSchema`, so the filter
   was rejected outright and the `view="settled"` workaround bundles three other statuses.
 
+- **`what_would_change_my_mind` — name the experiment that would overturn the conclusion.** Tool
+  count 19 → **20**. For any goal, the beliefs holding it up on the least evidence, and the
+  cheapest experiment that would flip each. Not *what do you believe* but *what would it take to
+  be wrong*, which is the question a reviewer asks and a status report cannot answer.
+  - Ranked by **fragility, not by posterior**, and the two disagree on purpose. A belief confirmed
+    by elimination carries a confident posterior and **no observation at all**, so it ranks first
+    however sure the engine is — and it is simultaneously the cheapest thing in the graph to
+    settle, because one probe touches what no probe has ever touched. Then confirmations
+    established shallower than the depth something was built on them at, then single observations.
+  - Read-only: no lease, no dispatch, no mutation. Asking what would change your mind must not
+    change it, and a test pins that it does not.
+  - **An empty list is a finding**, not a failure — nothing is resting on thin evidence — and the
+    response says so. A panel that always finds something to say is one nobody reads twice.
+  - On the dashboard as a third panel beside the learning path and the frontier, and over the API
+    as `GET /api/counterfactual`.
+- **A short batch now says a competing answer is being held back.** `get_next_targets` has always
+  refused to dispatch two answers to one question — confirming one retires the rest, so handing out
+  both spends a probe the inference would have saved. It did that **silently**, and a caller that
+  asks for two targets and gets one reads it as an exhausted frontier. Two full evaluation runs say
+  what happens next: every redundant probe in both was `claimed=False` — self-initiated — and the
+  commonest shape is the caller filling the empty slot with the exact sibling the rule was
+  protecting. The response now carries `same_question_withheld` and says so in the `rationale`.
+  Silent on a full batch, and silent when the batch was short because the work genuinely ran out.
+
+### Changed
+- **`--cost-aware` is now `--experimental-cost-aware`.** The mechanism is measured (77% less cost
+  for 1.5% more probes) but only against a scripted caller on a synthetic tariff, which justifies
+  the mechanism and not the default. The name now says which of those is true. It is expected to
+  become the default in a later minor release once a run with a live model has scored it, and the
+  flag disappears at that point; recording `duration_s` and `estimated_cost` is useful either way.
+
 - **Cost-aware selection: rank by value per unit of what a probe actually cost.** Selection
   weighed every candidate purely on how much it would settle, which is right only while all
   probes cost the same. They do not: a three-day fine-tune and a one-second unit test were

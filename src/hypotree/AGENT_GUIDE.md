@@ -23,7 +23,7 @@ refuted or settled).
 
 ---
 
-#### 19 Tools
+#### 20 Tools
 
 | Tool | Purpose |
 |------|---------|
@@ -39,6 +39,7 @@ refuted or settled).
 | `get_goal_status` | Goal nodes + `goals_met_count`, `goals_total_count`, `frontier_size`, `total_nodes`, `status_breakdown`. `goal_id` reports on one objective and counts only the nodes forming its case. |
 | `get_conflicts` | Recorded conflict sets — groups of assumptions that cannot all hold. Each entry carries member statements, which members have been `cleared_by_substitution` (swapped out with the failure persisting), which were `skipped_no_substitute` (no competing answer left to swap in, so they have never been interrogated), and a `resolve_by` naming the swap that would clear the next one. `open_only=True` (default) hides conflicts already pinned on a culprit. |
 | `suggest_discriminating_experiment` | Propose the single most informative next experiment. While a conflict is still being narrowed it names the one **swap** that clears an assumption (`action:"substitute"`, with `node_id`, `replace_with`, `parent_ids`, `min_depth`); once every assumption has been swapped out and it still failed, it proposes a different **combination** (`action:"recombine"`). `{status: "SUGGESTED"\|"NO_CONFLICTS"\|"EXHAUSTED", …}`. |
+| `what_would_change_my_mind` | Name the cheapest experiments that would **overturn** what a goal currently concludes, ranked by how little evidence holds each belief up. Not *what do you believe* but *what would it take to be wrong* — the question a reviewer asks and a status report cannot answer. A belief confirmed **by elimination ranks first however confident the posterior is**: nothing ever measured it, which makes it simultaneously the weakest link and the cheapest thing in the graph to settle. Then beliefs confirmed shallower than the depth something was built on them at, then those resting on a single observation. `goal_id` restricts it to one objective; `limit` (default 5) caps the list. Read-only — no lease, no dispatch, nothing changes. An **empty list is a finding**: nothing is holding that conclusion up on thin evidence. |
 | `get_dag_context` | Bounded subgraph with credible intervals. `node_id`, `max_depth=2`, `max_children=10`. |
 | `render_dag_map` | Mermaid text. Edge styling: `DEPENDENCY` solid `-->`, `ALTERNATIVE` dashed `-.->`, `REFINEMENT` thick `==>`. `hide_statuses` drops matching nodes. |
 | `list_nodes` | Filter + search + sort nodes → Markdown table. `status_filter`, `query_filter`, `order_by`, `limit`, `offset`, plus two shortcuts worth preferring: **`view`** (`frontier` \| `settled` \| `verified` \| `revision` \| `stale`) names the question instead of making you assemble a status filter that returns an empty table when you get it subtly wrong; **`stale_only`** keeps only VERIFIED nodes whose newest evidence names a commit that is no longer checked out. A stale node is **not refuted** — nothing has re-established it since the code moved, which is a different and weaker claim. The `Stale` column carries the same signal. See **Search & Ordering** below for wildcard/escape semantics. |
@@ -323,6 +324,14 @@ competing answers to one question, so the first result would have retired the
 second — asking both at once spends a probe the inference would have saved. Large
 batches are therefore not the win they look like: the longer you hold a lease,
 the longer its answer cannot settle anything else.
+
+**So asking for two and getting one is normal, and it is not an empty frontier.**
+The target you did get carries `same_question_withheld` — how many competing
+answers were held back — and says so in its `rationale`. **Do not fill the gap by
+probing one of them yourself.** That is the single commonest way to waste a probe
+with this engine: recording the target you were given very often settles every
+one of the ones you were not, for free. Probe what you were handed, record it,
+then ask again.
 
 ---
 

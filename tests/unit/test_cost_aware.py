@@ -314,7 +314,7 @@ def test_a_workspace_with_neither_signal_is_untouched() -> None:
 
 @pytest.mark.unit
 def test_an_expensive_node_is_deferred_but_never_starved() -> None:
-    """P8d.4: dividing by cost defers a slow node *forever* without this guard.
+    """Dividing by cost defers a slow node *forever* without this guard.
 
     The cheap candidates are genuinely better value at every comparison, so an
     expensive one loses every comparison it is ever in — and a premise that gates

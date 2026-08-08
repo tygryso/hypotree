@@ -1013,3 +1013,61 @@ def test_a_batch_reports_redundancy_per_result(tmp_path: Path) -> None:
         assert notes[2] is not None and "already ruled out" in notes[2]
     finally:
         engine.close()
+
+
+@pytest.mark.unit
+def test_a_short_batch_says_a_competing_answer_is_being_withheld(tmp_path: Path) -> None:
+    """A caller asking for two and getting one reads that as an exhausted frontier.
+
+    It is usually the opposite: the second pick answers a question already in the
+    batch, and the first result will very likely settle it for free. Silence here
+    is what makes the caller spend that probe anyway. Every redundant probe seen
+    in evaluation was self-initiated, and the commonest shape is exactly this gap
+    being filled with the sibling the navigator was protecting.
+    """
+    engine = HypoTreeEngine(tmp_path / "short.db", rng_seed=7, project_path=tmp_path)
+    try:
+        engine.create_hypotheses(
+            [{"statement": f"c={i}", "node_id": f"c{i}", "exclusion_group": "c"} for i in range(5)]
+        )
+        targets = engine.get_next_targets(count=2)
+        assert len(targets) == 1, "two answers to one question are never dispatched together"
+        assert targets[0].same_question_withheld == 4
+        assert "held back" in targets[0].rationale
+        assert "do not probe them now" in targets[0].rationale
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_a_full_batch_says_nothing_about_withholding(tmp_path: Path) -> None:
+    """The note must fire on the case it explains and stay quiet otherwise."""
+    engine = HypoTreeEngine(tmp_path / "full.db", rng_seed=7, project_path=tmp_path)
+    try:
+        engine.create_hypotheses(
+            [{"statement": f"c={i}", "node_id": f"c{i}", "exclusion_group": "c"} for i in range(3)]
+            + [
+                {"statement": f"m={i}", "node_id": f"m{i}", "exclusion_group": "m"}
+                for i in range(3)
+            ]
+        )
+        targets = engine.get_next_targets(count=2)
+        assert len(targets) == 2, "two different questions may share a batch"
+        assert all(t.same_question_withheld == 0 for t in targets)
+        assert all("held back" not in t.rationale for t in targets)
+    finally:
+        engine.close()
+
+
+@pytest.mark.unit
+def test_a_batch_short_because_the_work_ran_out_stays_quiet(tmp_path: Path) -> None:
+    """Nothing withheld, nothing to explain — an invented note would mislead."""
+    engine = HypoTreeEngine(tmp_path / "out.db", rng_seed=7, project_path=tmp_path)
+    try:
+        engine.create_hypotheses([{"statement": "only", "node_id": "only", "exclusion_group": "g"}])
+        targets = engine.get_next_targets(count=3)
+        assert len(targets) == 1
+        assert targets[0].same_question_withheld == 0
+        assert "held back" not in targets[0].rationale
+    finally:
+        engine.close()

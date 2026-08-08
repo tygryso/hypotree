@@ -606,6 +606,31 @@ def _tool_definitions() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="what_would_change_my_mind",
+            description="Name the cheapest experiments that would OVERTURN what a goal "
+            "currently concludes, ranked by how little evidence holds each belief up. "
+            "Answers the question a reviewer actually asks — not what do you believe, but "
+            "what would it take to be wrong. A belief confirmed by elimination ranks first "
+            "however confident the engine is: nothing ever measured it, which makes it both "
+            "the weakest link and the cheapest thing in the graph to settle. Read-only — it "
+            "issues no lease and changes nothing.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal_id": {
+                        "type": "string",
+                        "description": "Restrict to one objective. Omit for every goal.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 5,
+                        "description": "How many beliefs to return, most fragile first.",
+                    },
+                },
+            },
+        ),
+        types.Tool(
             name="suggest_discriminating_experiment",
             description="Propose the single most informative next experiment: re-test a "
             "conflict suspect at depth while any remains, otherwise the closest "
@@ -1127,6 +1152,22 @@ def _dispatch(engine: HypoTreeEngine, name: str, arguments: dict) -> object:
     if name == "suggest_discriminating_experiment":
         return engine.suggest_discriminating_experiment()
 
+    if name == "what_would_change_my_mind":
+        entries = engine.what_would_change_my_mind(
+            goal_id=arguments.get("goal_id"),
+            limit=int(arguments.get("limit", 5)),
+        )
+        return {
+            "beliefs": [e.model_dump() for e in entries],
+            # Said explicitly, because an empty list here is a finding rather
+            # than a failure and reads as a bug without it.
+            "note": (
+                "nothing is holding this conclusion up on thin evidence"
+                if not entries
+                else "ordered by fragility: the first is the belief with least behind it"
+            ),
+        }
+
     if name == "get_dag_context":
         resp = engine.get_dag_context(
             arguments.get("node_id"),
@@ -1258,7 +1299,7 @@ def _parse_serve_args(args: list[str]) -> tuple[int, bool, bool, bool]:
         arg = rest.pop(0)
         if arg == "--no-dashboard":
             dashboard = False
-        elif arg == "--cost-aware":
+        elif arg == "--experimental-cost-aware":
             cost_aware = True
         elif arg == "--no-mcp":
             mcp = False
@@ -1304,13 +1345,18 @@ Usage:
                        no MCP server. Read-only, so it is safe to point at a
                        workspace an agent is actively writing. This is the
                        try-before-you-wire path.
-  hypotree --cost-aware
-                       Rank candidates by expected value per unit *observed*
-                       cost, from the `duration_s` your results report. Use it
-                       when your experiments differ in cost by more than they
-                       differ in promise — a fine-tune against a unit test.
-                       Without it, and without any recorded duration, selection
-                       is exactly as it is today.
+  hypotree --experimental-cost-aware
+                       EXPERIMENTAL, off by default. Rank candidates by expected
+                       value per unit cost rather than by promise alone, from
+                       the `duration_s` your results report and the
+                       `estimated_cost` you declare. Use it when your
+                       experiments differ in cost by more than they differ in
+                       promise — a fine-tune against a unit test. Measured at
+                       77% less total cost for 1.5% more probes on a
+                       cost-weighted benchmark, but only against a scripted
+                       caller; it is expected to become the default once a
+                       full evaluation with a live model has scored it.
+                       Without it selection is exactly as it is today.
   hypotree --info      Print the resolved workspace, store path and warnings.
   hypotree --version   Print the version.
   hypotree --help      Show this message.

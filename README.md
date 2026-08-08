@@ -9,7 +9,7 @@
 <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg" alt="Changelog"></a>
-<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-814-brightgreen.svg" alt="Tests: 814"></a>
+<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-861-brightgreen.svg" alt="Tests: 861"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/pyproject.toml"><img src="https://img.shields.io/badge/version-0.5.0-blue.svg" alt="Version: 0.5.0"></a>
 <a href="https://pypi.org/project/hypotree/"><img src="https://img.shields.io/pypi/v/hypotree.svg" alt="PyPI"></a>
 </p>
@@ -32,6 +32,43 @@ Current agent memory is passive: vector stores and scratchpads accumulate facts 
 - **Conflict resolution via differential ablation** — when an integration test fails but every component passes alone, the engine rebuilds the failing combination one swap at a time to pinpoint the culprit.
 - **A derivation trail, not just a state** — `generate_learning_path` narrates what was settled, in order, separating what an experiment paid for from what the engine inferred for free, and calling out beliefs that were later withdrawn.
 - **Persistent across sessions, models, agents, users, and projects** — the belief state is a SQLite database, not a context window.
+
+---
+
+## Features
+
+### Key features
+
+Everything here is on by default and covered by the pre-registered benchmark.
+
+| Feature | What it is for |
+|---|---|
+| **Write-back belief revision** | An experiment that fails does not just get logged — the engine walks the dependency edges and retracts what rested on it. This is the thing passive memory cannot do. |
+| **Cascading prune** | Invalidating a premise transitions its whole subtree to `PRUNED` in one transaction. No tokens are ever spent re-reading a dead branch. |
+| **Exclusion-group inference** | Declare competing answers to one question; confirming one retires the rest without probing them. In the benchmark this is where most of the saving comes from — **342 questions closed for free** in the latest run. |
+| **Deduction by elimination** | Rule out all but one candidate and the survivor is confirmed with no probe at all. |
+| **Backward pruning over a dead question** | The dual: when *every* candidate answer is ruled out on its own evidence, nothing that assumes one of them can be satisfied, and the navigator names the question that ran out instead of reporting an empty frontier. |
+| **A declared closed-world assumption** | Both inferences above are sound only if your list of answers is complete. `exclusion_closed=False` says it is not — "which learning rate?" always admits another — and the engine withholds them. A deduction later found to rest on an incomplete list is **withdrawn, not defended**. |
+| **Conflict sets and differential ablation** | When components pass alone but fail together, the engine records what cannot all hold and narrows it by rebuilding the combination one swap at a time. Each swap is decisive; *m* assumptions cost at most *m* probes. |
+| **Confirmation depth** | "It passed the unit test" and "it works in production" are different claims. A confirmation supports nothing tested deeper than itself, and blame lands only on assumptions confirmed shallower than the failure. |
+| **What would change my mind** | For any goal, the cheapest experiments that would **overturn** its current conclusion, weakest evidence first. A belief confirmed by elimination ranks top however confident the posterior is — nothing ever measured it. Available as a tool, and as a dashboard panel. |
+| **Learning-path diff** | `generate_learning_path(since=…)` reports what *changed* over a window — confirmed, withdrawn, newly questioned — which is the sentence a standup or a PR description wants. `as_of` reconstructs any past instant; pass both for a closed window. |
+| **Thompson Sampling navigation** | Beta sampling over the open frontier: bounded worst-case regret and no catastrophic lock-in. Seeded, so a run is reproducible. |
+| **Goal scoping** | `goal_id` on dispatch, status and narrative restricts everything to one objective, its dependency ancestry, and the competing answers to those questions. |
+| **Bi-temporal history** | Every status and posterior change is stored as an interval, so "what did we believe on Tuesday" is a `WHERE` clause — and the dashboard scrubber is that query with a handle on it. |
+| **Live read-only dashboard** | Runs beside the MCP server by default. Watch the graph grow, replay any instant, read the narrative typeset. Nothing on it writes evidence. |
+| **Leases for long-running work** | A dispatched node is reserved until you report it. `renew_claim` for a multi-day experiment, `release_claims` to hand work back rather than fabricate a result. |
+| **Batch-native everywhere** | `create_hypotheses`, `get_next_targets`, `record_evidence` and `update_status` all take lists, and recording can fuse the next dispatch into the same round-trip. |
+
+### Experimental features
+
+Off by default, and staying off until a full evaluation with a live model has scored them. Behaviour with the flag absent is bit-identical to a build that has never heard of the feature.
+
+| Feature | Status |
+|---|---|
+| **Cost-aware selection** (`--experimental-cost-aware`) | Ranks candidates by expected value **per unit cost** instead of by promise alone, using the `duration_s` your results report and the `estimated_cost` you declare. On a cost-weighted benchmark it cuts total cost to goal by **77%** for **1.5%** more probes, solving every seed — but that was measured against a scripted caller on a synthetic tariff, which justifies the mechanism and not the default. **Expected to become the default in a later minor release (0.6.0 or above)** once a run with a live model has scored it; the flag disappears at that point. Recording `duration_s` and `estimated_cost` is always safe and always useful — both are stored and displayed whether or not the flag is on. |
+
+Why the saving exists, since it is not obvious: the last surviving answer to a closed question is *deduced rather than probed*, so whichever answer you never reach is never paid for. Ordering cheapest-first puts the expensive answer in that free slot. Probe **count** barely moves — the winner's position is uniform, so any order settles a question in the same expected number of probes — while probe **cost** falls a long way.
 
 ---
 
@@ -146,11 +183,11 @@ generate_learning_path()
 Additionally, you can start the server with these flags:
 
 ```bash
-hypotree                        # MCP server + dashboard on 127.0.0.1:7331
-hypotree --dashboard-port 8080  # start probing from a port you choose
-hypotree --no-dashboard         # MCP server only, no socket opened
-hypotree --no-mcp               # dashboard alone, against an existing belief state
-hypotree --cost-aware           # rank by value per unit of probe cost (77% cheaper, +1.5% probes)
+hypotree                            # MCP server + dashboard on 127.0.0.1:7331
+hypotree --dashboard-port 8080      # start probing from a port you choose
+hypotree --no-dashboard             # MCP server only, no socket opened
+hypotree --no-mcp                   # dashboard alone, against an existing belief state
+hypotree --experimental-cost-aware  # rank by value per unit of probe cost (see Experimental features)
 ```
 
 It binds `127.0.0.1` only and mints a session token at startup; the URL, token included, goes to stderr (stdout is the JSON-RPC channel). Ask the agent for it instead — `get_workspace_info` returns `dashboard_url`, and so does the `hypotree://dashboard` resource. If no port in the range is free the MCP server still starts and says so: a viewer must never be able to take the server down.
@@ -176,6 +213,7 @@ The API is JSON and every `/api/*` call needs the token. Everything is a read ex
 | `GET /api/graph?goal_id=&at=` | nodes and edges with server-computed layout; `at` reconstructs any past instant |
 | `GET /api/node/<id>` | one node's evidence, provenance and status intervals |
 | `GET /api/frontier?goal_id=&k=` | the top candidates and how likely the navigator is to pick each next |
+| `GET /api/counterfactual?goal_id=&k=` | the beliefs holding a conclusion up on the least evidence, and what would overturn each |
 | `GET /api/learning-path?goal_id=&at=&since=` | the narrative, same as the MCP tool; `since` makes it a diff over a range |
 | `GET /api/timeline?goal_id=` | every status change in order |
 | `GET /api/events` | server-sent revision numbers — the client refetches what it is showing |
@@ -185,7 +223,7 @@ The API is JSON and every `/api/*` call needs the token. Everything is a read ex
 
 ---
 
-## MCP tools (19)
+## MCP tools (20)
 
 | Tool | What it does |
 |------|-------------|
@@ -201,6 +239,7 @@ The API is JSON and every `/api/*` call needs the token. Everything is a read ex
 | `get_goal_status` | Check whether the goal node is met. `goal_id` scopes the counts to one objective's subgraph |
 | `get_conflicts` | List unresolved conflicts (integration failures) |
 | `suggest_discriminating_experiment` | For a conflict, suggest the swap that separates the culprits |
+| `what_would_change_my_mind` | Name the cheapest experiments that would **overturn** a goal's current conclusion, weakest evidence first |
 | `list_nodes` | List/filter nodes by status, depth, or exclusion group |
 | `get_evidence_history` | Full evidence trail for a node |
 | `get_active_claims` | List nodes with active leases |
@@ -291,7 +330,7 @@ belief state in hypotree rather than in the conversation.
 ┌──────────────▼──────────────────────────┐
 │         hypotree MCP Server             │
 │  ┌─────────────────────────────────┐    │
-│  │     Engine (19 tools)           │    │
+│  │     Engine (20 tools)           │    │
 │  │  • Write-back propagation       │    │
 │  │  • Cascading prune              │    │
 │  │  • Exclusion-group inference    │    │
