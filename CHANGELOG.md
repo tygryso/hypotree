@@ -4,7 +4,7 @@ All notable changes to hypotree are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.5.0] - 2026-08-07
+## [0.5.0] - 2026-08-08
 
 ### Added
 - **`add_edges` — grow a graph forward without destroying a node to do it.** A graph grows two

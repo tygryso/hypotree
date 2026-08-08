@@ -340,7 +340,7 @@ belief state in hypotree rather than in the conversation.
 └─────────────┼───────────────────────────┘
               │
 ┌─────────────▼───────────────────────────┐
-│   SQLite-WAL (Schema v10, 11 tables)    │
+│   SQLite-WAL                            │
 │   • Bi-temporal history                 │
 │   • Belief state + evidence + conflicts │
 │   • Keyed by workspace_id               │
