@@ -10,7 +10,7 @@
 <a href="https://github.com/tygryso/hypotree/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg" alt="Changelog"></a>
 <a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-861-brightgreen.svg" alt="Tests: 861"></a>
-<a href="https://github.com/tygryso/hypotree/blob/master/pyproject.toml"><img src="https://img.shields.io/badge/version-0.5.0-blue.svg" alt="Version: 0.5.0"></a>
+<a href="https://github.com/tygryso/hypotree/blob/master/pyproject.toml"><img src="https://img.shields.io/badge/version-0.6.0-blue.svg" alt="Version: 0.6.0"></a>
 <a href="https://pypi.org/project/hypotree/"><img src="https://img.shields.io/pypi/v/hypotree.svg" alt="PyPI"></a>
 </p>
 
@@ -137,6 +137,28 @@ Or run directly:
 uvx hypotree
 ```
 
+### 1b. Or embed it in a Python agent — no MCP client
+
+If your agent is Python, it does not need a transport to reach the belief state. `HypoTreeToolset` hands you OpenAI function-calling schemas and executes calls by name:
+
+```python
+from hypotree import HypoTreeToolset
+
+with HypoTreeToolset("beliefs.db", preset="essential") as ht:
+    tools = ht.tools()                  # drop straight into your `tools=` argument
+    result = ht.call("get_next_targets", {"count": 1})   # returns a JSON string
+```
+
+Both paths project the same schemas through the same dispatch, so the embedded surface and the MCP surface cannot drift apart.
+
+Three things worth knowing:
+
+- **`preset="essential"`** exposes the six tools that run the loop instead of all twenty. Most clients re-send every schema on every turn, and an agent that already carries its own forty tools cannot also carry twenty of ours.
+- **`ht.mutating_tool_names`** is the set that changes the belief state — what to put behind an approval or reasoning gate. `get_next_targets` is in it: it reads like a query and it issues leases, so it writes.
+- **`ht.call` never raises.** A bad node id or a malformed argument dict comes back as `{"error": ...}`, because those are recoverable by the model that caused them and killing the session over one is not.
+
+Pass `read_only=True` for a reviewer or an untrusted sub-agent: it exposes the eleven sensors and refuses every write, including by name if the model asks for one it was not given.
+
 ### 2. Create hypotheses
 
 The agent creates a tree with `parent_ids` wiring combinations to their premises and `exclusion_group` declaring competing answers to one question:
@@ -223,20 +245,22 @@ The API is JSON and every `/api/*` call needs the token. Everything is a read ex
 
 ---
 
-## MCP tools (20)
+## Tools (20)
+
+Exposed over MCP, and in OpenAI function-calling form via `hypotree.openai_tools()` — one set of schemas, two projections. The six marked **·** make up `preset="essential"`, the smallest surface that can still run the loop.
 
 | Tool | What it does |
 |------|-------------|
-| `create_hypotheses` | Create one or many nodes with `parent_ids`, `exclusion_group`, `exclusion_closed`, `is_goal` |
-| `add_edges` | Wire hypotheses that already exist, without recreating either. Takes `edges`, a list of `{src, dst, type}` |
-| `get_next_targets` | Thompson Sampling — returns the next hypothesis to test, under a lease. `goal_id` narrows the search to one objective |
-| `record_evidence` | Record one result — or every result from a turn at once with `results=[…]` — and trigger write-back propagation. Optional `duration_s` feeds cost-aware ranking |
-| `generate_learning_path` | What we learned, in order, and what it cost — separates conclusions an experiment paid for from ones the engine inferred free. `goal_id` narrates one objective |
+| `create_hypotheses` **·** | Create one or many nodes with `parent_ids`, `exclusion_group`, `exclusion_closed`, `is_goal` |
+| `add_edges` **·** | Wire hypotheses that already exist, without recreating either. Takes `edges`, a list of `{src, dst, type}` |
+| `get_next_targets` **·** | Thompson Sampling — returns the next hypothesis to test, under a lease. `goal_id` narrows the search to one objective |
+| `record_evidence` **·** | Record one result — or every result from a turn at once with `results=[…]` — and trigger write-back propagation. Optional `duration_s` feeds cost-aware ranking |
+| `generate_learning_path` **·** | What we learned, in order, and what it cost — separates conclusions an experiment paid for from ones the engine inferred free. `goal_id` narrates one objective |
 | `get_workspace_info` | Which belief state you are connected to and which layer chose it — start here when the graph is unexpectedly empty |
 | `update_status` | Manually set node status (rarely needed — the engine does it) |
 | `get_dag_context` | Get a subgraph view for the agent's context window |
 | `render_dag_map` | Mermaid.js diagram of the current belief state |
-| `get_goal_status` | Check whether the goal node is met. `goal_id` scopes the counts to one objective's subgraph |
+| `get_goal_status` **·** | Check whether the goal node is met. `goal_id` scopes the counts to one objective's subgraph |
 | `get_conflicts` | List unresolved conflicts (integration failures) |
 | `suggest_discriminating_experiment` | For a conflict, suggest the swap that separates the culprits |
 | `what_would_change_my_mind` | Name the cheapest experiments that would **overturn** a goal's current conclusion, weakest evidence first |
@@ -273,6 +297,42 @@ Three MCP **resources**, pulled on demand rather than carried in context:
 | `hypotree://guide` | The full agent contract — every tool, the status lifecycle, exclusion groups, leases, confirmation depth, conflict sets, and the rules. ~23 KB, so it belongs nowhere near a system prompt |
 | `hypotree://state` | The current belief state as a narrative: what was established, how, and what it cost |
 | `hypotree://dashboard` | Where a human can watch this belief state move, token included — so the agent can answer "send me the link" without you going near a terminal |
+
+---
+
+## Python API
+
+For agents written in Python, MCP is a process boundary and a JSON round-trip between two objects in the same interpreter. Import them instead:
+
+```python
+from hypotree import HypoTreeToolset, HypoTreeEngine, openai_tools
+```
+
+| What | Why you'd reach for it |
+|------|------------------------|
+| `HypoTreeToolset(db_path, …)` | The whole surface: `.tools()` for schemas, `.call(name, args)` for execution, context-manager lifecycle |
+| `HypoTreeToolset.from_engine(engine)` | Add the tool surface to an engine you already hold. Does not take over its lifecycle |
+| `openai_tools(preset=…, include=…, exclude=…, read_only=…)` | Just the schemas, if you route calls yourself |
+| `HypoTreeEngine(db_path, …)` | Typed Pydantic results instead of JSON strings |
+
+Selection is composable — start from a preset and narrow:
+
+```python
+openai_tools(preset="essential")                 # the 6 that run the loop
+openai_tools(read_only=True)                      # the 11 sensors, no writes
+openai_tools(preset="essential", exclude=["add_edges"])
+```
+
+Every tool also carries the metadata a host needs and no JSON schema can express:
+
+```python
+from hypotree import TOOL_SPECS
+
+{s.name for s in TOOL_SPECS if s.mutates}     # gate these
+{s.name for s in TOOL_SPECS if s.essential}   # ship these when context is tight
+```
+
+Testing an integration costs nothing: the engine runs against a temporary SQLite file in milliseconds, so the full create → dispatch → record → conclude loop is a unit test, not an inference bill.
 
 ---
 
@@ -322,30 +382,34 @@ belief state in hypotree rather than in the conversation.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│           MCP Client (agent)            │
-│   Cursor / Cline / Claude Desktop       │
-└──────────────┬──────────────────────────┘
-               │  MCP protocol (stdio/HTTP)
-┌──────────────▼──────────────────────────┐
-│         hypotree MCP Server             │
-│  ┌─────────────────────────────────┐    │
-│  │     Engine (20 tools)           │    │
-│  │  • Write-back propagation       │    │
-│  │  • Cascading prune              │    │
-│  │  • Exclusion-group inference    │    │
-│  │  • Differential ablation        │    │
-│  │  • Thompson Sampling navigator  │    │
-│  └──────────┬──────────────────────┘    │
-└─────────────┼───────────────────────────┘
-              │
-┌─────────────▼───────────────────────────┐
-│   SQLite-WAL                            │
-│   • Bi-temporal history                 │
-│   • Belief state + evidence + conflicts │
-│   • Keyed by workspace_id               │
-└─────────────────────────────────────────┘
+┌──────────────────────────┐   ┌──────────────────────────┐
+│     MCP Client (agent)   │   │   Python agent (in-proc) │
+│  Cursor / Cline / Claude │   │   HypoTreeToolset        │
+└────────────┬─────────────┘   └────────────┬─────────────┘
+             │ MCP (stdio/HTTP)             │ direct call
+┌────────────▼─────────────┐                │
+│    hypotree MCP server   │                │
+└────────────┬─────────────┘                │
+             │                              │
+┌────────────▼──────────────────────────────▼─────────────┐
+│  toolkit — 20 tool specs + dispatch (no transport)      │
+│  one description of the contract; both paths project it │
+└────────────────────────┬────────────────────────────────┘
+┌────────────────────────▼────────────────────────────────┐
+│  Engine                                                 │
+│  • Write-back propagation    • Cascading prune          │
+│  • Exclusion-group inference • Differential ablation    │
+│  • Thompson Sampling navigator                          │
+└────────────────────────┬────────────────────────────────┘
+┌────────────────────────▼────────────────────────────────┐
+│  SQLite-WAL                                             │
+│  • Bi-temporal history                                  │
+│  • Belief state + evidence + conflicts                  │
+│  • Keyed by workspace_id                                │
+└─────────────────────────────────────────────────────────┘
 ```
+
+The toolkit layer is the reason the two entry points cannot drift: neither owns the schemas, and neither owns the routing.
 
 ---
 

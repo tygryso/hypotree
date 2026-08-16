@@ -4,6 +4,62 @@ All notable changes to hypotree are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] - 0.6.0
+
+### Added
+- **A Python API: `HypoTreeToolset`, and a package that finally exports its own names.**
+  hypotree was described as a library and shipped as a server. `from hypotree import
+  HypoTreeEngine` raised — `__init__.py` contained a docstring and a version string and
+  nothing else — so every consumer reached through `hypotree.engine` into what was
+  nominally internal, including this project's own evaluation harness. The public API is
+  now re-exported and covered by `__all__`.
+  - `HypoTreeToolset(db_path, …)` is what a Python host holds instead of an MCP client:
+    `.tools()` returns OpenAI function-calling schemas, `.call(name, args)` executes and
+    returns a JSON string, and it is a context manager. `from_engine()` wraps an engine
+    the caller already owns **without** taking over its lifecycle, because two objects
+    that both believe they own one SQLite connection close it twice.
+  - **`.call` never raises.** A misspelled node id, a missing `success`, an argument that
+    is not an object — all come back as `{"error": …}`. Every one of them is recoverable
+    by the model that caused it, and propagating them as exceptions turns a correctable
+    mistake into a lost session.
+  - **Tool selection is composable**: `preset="essential"` exposes the six tools that can
+    still run the loop, `read_only=True` exposes the eleven sensors and refuses every
+    write, and `include`/`exclude` narrow either. This is not a convenience — most clients
+    re-send every schema on every turn, and a host already carrying forty of its own tools
+    cannot also carry twenty of ours. A narrowed surface is a real boundary: a hidden tool
+    is refused by name, not merely left out of the list, because models routinely call
+    tools they were never given.
+  - Each spec carries what a host needs and no JSON schema can express: `mutates` (gate
+    these) and `essential` (ship these when context is tight). `get_next_targets` is
+    classified as a mutation — it reads like a query and it issues leases, so it writes,
+    and a host inferring that from the tool's name gets it wrong.
+
+### Changed
+- **Tool schemas and dispatch moved out of the MCP server into `hypotree.toolkit`.** They
+  were always transport-neutral — a name, a dict of arguments, plain data back — but they
+  lived behind a module whose first three imports are the MCP SDK. A caller who wanted the
+  belief state had to acquire a JSON-RPC stack to reach it, or reimplement the routing.
+  - The MCP server is now one projection of the shared specs; an embedding host is the
+    other. Neither owns the contract, so neither can drift from it.
+  - `import hypotree` no longer imports `mcp`, and there is a test that fails if it starts.
+  - Internal moves, unreleased: `mcp_server._dispatch` → `toolkit.dispatch.dispatch`,
+    `_evidence_report` → `evidence_report`, `_parse_instant` → `parse_instant`,
+    `_hypothesis_item_schema` → `specs.hypothesis_item_schema`. `_tool_definitions()`,
+    `dashboard_url()` and `SERVER_INSTRUCTIONS` keep their names and locations.
+
+### Fixed
+- **The evaluation harness's hand-written tool schemas are now pinned against the real
+  ones.** Because the schemas were unreachable outside the MCP server, the harness wrote
+  its own copies of seven of them, and they drifted: arm B's `create_hypotheses` was
+  missing `exclusion_closed`, the one field that stops the engine deducing an answer over
+  an incomplete list of candidates. A parity test now fails on any field the harness
+  advertises that dispatch would silently drop — the `source_ref` class of bug, which has
+  shipped once — and on any type disagreement. Deliberate omissions are enumerated with
+  the reason each is acceptable, so a restriction nobody chose can no longer pass for one
+  that somebody did. Two are worth stating outright: arm B cannot declare an open
+  candidate list, and it supplies no `duration_s`, so cost-aware ordering is not under
+  test in the current gate.
+
 ## [0.5.0] - 2026-08-08
 
 ### Added

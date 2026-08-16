@@ -1,6 +1,8 @@
 ### hypotree — Persistent Hypothesis-DAG Orchestrator
 
-**hypotree** is a persistent hypothesis-DAG orchestrator exposed as an MCP server. It remembers what you've tried, what worked, what failed — across sessions. Use it for multi-step R&D where you're exploring competing approaches, running experiments, and need to avoid re-exploring dead ends.
+**hypotree** is a persistent hypothesis-DAG orchestrator. It remembers what you've tried, what worked, what failed — across sessions. Use it for multi-step R&D where you're exploring competing approaches, running experiments, and need to avoid re-exploring dead ends.
+
+It is reachable two ways, and the tools below are identical on both: as an **MCP server** for any client that speaks it, and as a **Python object** (`from hypotree import HypoTreeToolset`) for a host that would rather not put a subprocess between two objects in the same interpreter. If you are reading this over MCP, nothing here changes.
 
 ---
 

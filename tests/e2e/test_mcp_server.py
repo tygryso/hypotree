@@ -50,7 +50,7 @@ def _is_client_teardown_race(exc: BaseException) -> bool:
 # ---------------------------------------------------------------------------
 # The transport tier below spawns the real server process and speaks JSON-RPC
 # over stdio via the MCP SDK client, exercising the async list_tools/call_tool
-# wiring end to end. The remaining tests drive _dispatch directly — the pure
+# wiring end to end. The remaining tests drive dispatch directly — the pure
 # routing layer — to cover every tool branch without process overhead.
 # ---------------------------------------------------------------------------
 
@@ -176,28 +176,28 @@ async def test_handle_call_tool_serializes(tmp_path: Path) -> None:
 
 @pytest.mark.e2e
 def test_dispatch_all_tools(tmp_path: Path) -> None:
-    """Exercise every tool through the _dispatch routing layer."""
+    """Exercise every tool through the shared routing layer."""
     from hypotree.engine import HypoTreeEngine
-    from hypotree.mcp_server import _dispatch
+    from hypotree.toolkit.dispatch import dispatch
 
     db = tmp_path / "state.db"
     engine = HypoTreeEngine(db, rng_seed=42)
     try:
         # create_hypotheses
-        result = _dispatch(
+        result = dispatch(
             engine, "create_hypotheses", {"hypotheses": [{"statement": "test", "node_id": "n1"}]}
         )[0]
         assert result["node"]["id"] == "n1"
         assert result["created"] is True
 
         # get_next_targets
-        result = _dispatch(engine, "get_next_targets", {})[0]
+        result = dispatch(engine, "get_next_targets", {})[0]
         assert result["status"] == "SELECTED"
         assert result["node_id"] == "n1"
         claim_id = result["claim_id"]
 
         # record_evidence
-        result = _dispatch(
+        result = dispatch(
             engine,
             "record_evidence",
             {"node_id": "n1", "success": 1.0, "claim_id": claim_id},
@@ -205,20 +205,20 @@ def test_dispatch_all_tools(tmp_path: Path) -> None:
         assert result["node"]["alpha"] > 1.0
 
         # get_goal_status
-        result = _dispatch(engine, "get_goal_status", {})
+        result = dispatch(engine, "get_goal_status", {})
         assert "goals" in result
 
         # get_dag_context
-        result = _dispatch(engine, "get_dag_context", {})
+        result = dispatch(engine, "get_dag_context", {})
         assert len(result["nodes"]) >= 1
 
         # render_dag_map
-        result = _dispatch(engine, "render_dag_map", {})
+        result = dispatch(engine, "render_dag_map", {})
         assert "mermaid" in result
         assert "graph TD" in result["mermaid"]
 
         # update_status
-        result = _dispatch(
+        result = dispatch(
             engine,
             "update_status",
             {"node_ids": ["n1"], "new_status": "IN_PROGRESS", "reason": "manual"},
@@ -228,11 +228,11 @@ def test_dispatch_all_tools(tmp_path: Path) -> None:
         assert "transition" in result
 
         # invalidate_upstream
-        result = _dispatch(engine, "invalidate_upstream", {"leaf_id": "n1"})
+        result = dispatch(engine, "invalidate_upstream", {"leaf_id": "n1"})
         assert "affected_ids" in result
 
         # verify_upstream
-        result = _dispatch(engine, "verify_upstream", {"child_id": "n1"})
+        result = dispatch(engine, "verify_upstream", {"child_id": "n1"})
         assert "affected_ids" in result
     finally:
         engine.close()
@@ -240,16 +240,16 @@ def test_dispatch_all_tools(tmp_path: Path) -> None:
 
 @pytest.mark.e2e
 def test_dispatch_infra_evidence(tmp_path: Path) -> None:
-    """Infra error evidence routes correctly through _dispatch."""
+    """Infra error evidence routes correctly through the shared dispatch."""
     from hypotree.engine import HypoTreeEngine
-    from hypotree.mcp_server import _dispatch
+    from hypotree.toolkit.dispatch import dispatch
 
     engine = HypoTreeEngine(tmp_path / "state.db", rng_seed=42)
     try:
-        _dispatch(
+        dispatch(
             engine, "create_hypotheses", {"hypotheses": [{"statement": "h1", "node_id": "n1"}]}
         )
-        result = _dispatch(
+        result = dispatch(
             engine,
             "record_evidence",
             {
@@ -267,12 +267,12 @@ def test_dispatch_infra_evidence(tmp_path: Path) -> None:
 @pytest.mark.e2e
 def test_dispatch_unknown_tool_raises(tmp_path: Path) -> None:
     from hypotree.engine import HypoTreeEngine
-    from hypotree.mcp_server import _dispatch
+    from hypotree.toolkit.dispatch import dispatch
 
     engine = HypoTreeEngine(tmp_path / "state.db", rng_seed=42)
     try:
         with pytest.raises(ValueError, match="Unknown tool"):
-            _dispatch(engine, "nonexistent_tool", {})
+            dispatch(engine, "nonexistent_tool", {})
     finally:
         engine.close()
 
@@ -327,11 +327,11 @@ def test_there_is_exactly_one_way_to_create_and_one_to_update() -> None:
 def test_record_evidence_can_fuse_the_next_dispatch(tmp_path: Path) -> None:
     """One round-trip instead of two, on the call an agent makes most often."""
     from hypotree.engine import HypoTreeEngine
-    from hypotree.mcp_server import _dispatch
+    from hypotree.toolkit.dispatch import dispatch
 
     engine = HypoTreeEngine(tmp_path / "fuse.db", rng_seed=7)
     try:
-        _dispatch(
+        dispatch(
             engine,
             "create_hypotheses",
             {
@@ -341,8 +341,8 @@ def test_record_evidence_can_fuse_the_next_dispatch(tmp_path: Path) -> None:
                 ]
             },
         )
-        target = _dispatch(engine, "get_next_targets", {})[0]
-        result = _dispatch(
+        target = dispatch(engine, "get_next_targets", {})[0]
+        result = dispatch(
             engine,
             "record_evidence",
             {
@@ -363,11 +363,11 @@ def test_record_evidence_can_fuse_the_next_dispatch(tmp_path: Path) -> None:
 def test_record_evidence_reports_a_whole_batch_in_one_call(tmp_path: Path) -> None:
     """The tool surface has to expose the batch shape, not just the engine."""
     from hypotree.engine import HypoTreeEngine
-    from hypotree.mcp_server import _dispatch
+    from hypotree.toolkit.dispatch import dispatch
 
     engine = HypoTreeEngine(tmp_path / "batch.db", rng_seed=7)
     try:
-        _dispatch(
+        dispatch(
             engine,
             "create_hypotheses",
             {
@@ -378,7 +378,7 @@ def test_record_evidence_reports_a_whole_batch_in_one_call(tmp_path: Path) -> No
                 ]
             },
         )
-        result = _dispatch(
+        result = dispatch(
             engine,
             "record_evidence",
             {
@@ -407,19 +407,17 @@ def test_source_ref_survives_the_tool_boundary(tmp_path: Path) -> None:
     the field; one that says "0.85" is what shipped.
     """
     from hypotree.engine import HypoTreeEngine
-    from hypotree.mcp_server import _dispatch
+    from hypotree.toolkit.dispatch import dispatch
 
     engine = HypoTreeEngine(tmp_path / "ref.db", rng_seed=7)
     try:
-        _dispatch(
-            engine, "create_hypotheses", {"hypotheses": [{"statement": "a", "node_id": "n1"}]}
-        )
-        _dispatch(
+        dispatch(engine, "create_hypotheses", {"hypotheses": [{"statement": "a", "node_id": "n1"}]})
+        dispatch(
             engine,
             "record_evidence",
             {"node_id": "n1", "success": 1.0, "source_ref": "pytest run #4412"},
         )
-        history = _dispatch(engine, "get_evidence_history", {"node_id": "n1"})
+        history = dispatch(engine, "get_evidence_history", {"node_id": "n1"})
         assert history[0]["source_ref"] == "pytest run #4412"
     finally:
         engine.close()
@@ -435,24 +433,22 @@ def test_a_lease_can_be_renewed_and_handed_back(tmp_path: Path) -> None:
     stranding the node for the whole lease.
     """
     from hypotree.engine import HypoTreeEngine
-    from hypotree.mcp_server import _dispatch
+    from hypotree.toolkit.dispatch import dispatch
 
     engine = HypoTreeEngine(tmp_path / "leases.db", rng_seed=11)
     try:
-        _dispatch(
-            engine, "create_hypotheses", {"hypotheses": [{"statement": "a", "node_id": "n1"}]}
-        )
-        target = _dispatch(engine, "get_next_targets", {})[0]
+        dispatch(engine, "create_hypotheses", {"hypotheses": [{"statement": "a", "node_id": "n1"}]})
+        target = dispatch(engine, "get_next_targets", {})[0]
 
-        renewed = _dispatch(
+        renewed = dispatch(
             engine, "renew_claim", {"claim_id": target["claim_id"], "lease_ttl_s": 86400}
         )
         assert renewed["node_id"] == "n1"
         assert renewed["expires_in_s"] == 86400
 
-        released = _dispatch(engine, "release_claims", {"claim_ids": [target["claim_id"]]})
+        released = dispatch(engine, "release_claims", {"claim_ids": [target["claim_id"]]})
         assert released["released_node_ids"] == ["n1"]
-        assert _dispatch(engine, "get_active_claims", {}) == []
+        assert dispatch(engine, "get_active_claims", {}) == []
     finally:
         engine.close()
 
@@ -465,9 +461,9 @@ def test_conflict_tools_are_callable_through_the_server(tmp_path: Path) -> None:
     dispatch wiring is exactly what a new tool tends to be missing.
     """
     from hypotree.engine import HypoTreeEngine
-    from hypotree.mcp_server import _dispatch
     from hypotree.models.edge import EdgeType
     from hypotree.models.evidence import LogicalEvidence
+    from hypotree.toolkit.dispatch import dispatch
 
     engine = HypoTreeEngine(tmp_path / "mcp_conflicts.db", rng_seed=3)
     try:
@@ -481,11 +477,11 @@ def test_conflict_tools_are_callable_through_the_server(tmp_path: Path) -> None:
         engine.record_evidence("r1", LogicalEvidence(success=1.0))
         engine.record_evidence("combo", LogicalEvidence(success=0.0))
 
-        conflicts = _dispatch(engine, "get_conflicts", {})["conflicts"]
+        conflicts = dispatch(engine, "get_conflicts", {})["conflicts"]
         assert len(conflicts) == 1
         assert sorted(conflicts[0]["member_ids"]) == ["c1", "r1"]
 
-        suggestion = _dispatch(engine, "suggest_discriminating_experiment", {})
+        suggestion = dispatch(engine, "suggest_discriminating_experiment", {})
         assert suggestion["status"] == "SUGGESTED"
         # The cheapest next move is a single-assumption swap: one probe
         # eliminates a whole question, where re-testing an assumption on its own
@@ -501,8 +497,8 @@ def test_conflict_tools_are_callable_through_the_server(tmp_path: Path) -> None:
 def test_generate_learning_path_is_reachable_over_the_tool_surface(tmp_path: Path) -> None:
     """The narrative has to survive JSON serialisation to be worth anything."""
     from hypotree.engine import HypoTreeEngine
-    from hypotree.mcp_server import _dispatch
     from hypotree.models.evidence import LogicalEvidence
+    from hypotree.toolkit.dispatch import dispatch
 
     engine = HypoTreeEngine(tmp_path / "mcp_learning.db", rng_seed=3)
     try:
@@ -510,7 +506,7 @@ def test_generate_learning_path_is_reachable_over_the_tool_surface(tmp_path: Pat
             engine.create_hypothesis(nid, node_id=nid, exclusion_group="q")
         engine.record_evidence("a", LogicalEvidence(success=1.0))
 
-        result = _dispatch(engine, "generate_learning_path", {})
+        result = dispatch(engine, "generate_learning_path", {})
 
         assert json.loads(json.dumps(result, default=str))
         assert result["probes_spent"] == 1
@@ -750,14 +746,14 @@ def test_get_workspace_info_is_reachable_over_the_tool_surface(
 ) -> None:
     """The answer to "why is my graph empty?" has to be askable by the agent."""
     from hypotree.engine import HypoTreeEngine
-    from hypotree.mcp_server import _dispatch
+    from hypotree.toolkit.dispatch import dispatch
 
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("HYPOTREE_WORKSPACE_ID", "tool-check")
 
     engine = HypoTreeEngine(tmp_path / "wi.db", project_path=tmp_path, rng_seed=3)
     try:
-        info = _dispatch(engine, "get_workspace_info", {})
+        info = dispatch(engine, "get_workspace_info", {})
         assert json.loads(json.dumps(info, default=str))
         assert info["workspace_id"] == "tool-check"
         assert info["resolved_from"] == "env"
@@ -775,19 +771,19 @@ def test_a_result_with_no_success_is_refused_rather_than_invented() -> None:
     belief state may assert only what was observed or soundly inferred; a default
     value is the quietest possible way to break that.
     """
-    from hypotree.mcp_server import _evidence_report
+    from hypotree.toolkit.dispatch import evidence_report
 
     with pytest.raises(ValueError, match="needs success"):
-        _evidence_report({"node_id": "h1"})
+        evidence_report({"node_id": "h1"})
     # And the refusal names the alternative, rather than a Python key.
     with pytest.raises(ValueError, match="evidence_kind='infra'"):
-        _evidence_report({"node_id": "h1"})
+        evidence_report({"node_id": "h1"})
     with pytest.raises(ValueError, match="needs node_id"):
-        _evidence_report({"success": 1.0})
+        evidence_report({"success": 1.0})
     # An explicit zero is a real measurement and must survive.
-    assert _evidence_report({"node_id": "h1", "success": 0.0}).evidence.success == 0.0
+    assert evidence_report({"node_id": "h1", "success": 0.0}).evidence.success == 0.0
     # An infra report legitimately carries no success.
-    assert _evidence_report({"node_id": "h1", "evidence_kind": "infra"}).evidence.kind == "infra"
+    assert evidence_report({"node_id": "h1", "evidence_kind": "infra"}).evidence.kind == "infra"
 
 
 @pytest.mark.unit

@@ -1,6 +1,6 @@
 [project]
 name = "hypotree"
-version = "0.5.0"
+version = "0.6.0"
 description = "Memory that forgets: a persistent, self-revising belief-state MCP server for agentic R&D. Uses a hypothesis DAG to auto-prune dead ends and deduce truth without extra probes."
 readme = "README.md"
 requires-python = ">=3.10"
