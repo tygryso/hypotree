@@ -393,8 +393,16 @@ async def _handle_call_tool(
     """Serialize a single tool call behind the engine write lock.
 
     Extracted from the stdio wiring so the dispatch + JSON encoding path is
-    exercisable in-process; the lock guarantees engine mutations never interleave
-    across concurrent tool calls.
+    exercisable in-process.
+
+    The lock is held for reads as well as writes, and that costs nothing:
+    ``dispatch`` is fully synchronous, so it runs to completion without ever
+    yielding to the event loop and two calls cannot interleave whether or not a
+    lock is held. Letting sensors bypass it would therefore buy no throughput —
+    a slow read blocks the loop by being slow, not by being locked — while
+    planting a real race for whoever later moves dispatch onto a thread. The
+    lock is what makes that move safe, and the store's connection is
+    thread-bound, so it has to stay.
     """
     async with write_lock:
         result = dispatch(engine, name, arguments)

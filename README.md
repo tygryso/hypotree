@@ -9,7 +9,7 @@
 <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg" alt="Changelog"></a>
-<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-861-brightgreen.svg" alt="Tests: 861"></a>
+<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-925-brightgreen.svg" alt="Tests: 925"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/pyproject.toml"><img src="https://img.shields.io/badge/version-0.6.0-blue.svg" alt="Version: 0.6.0"></a>
 <a href="https://pypi.org/project/hypotree/"><img src="https://img.shields.io/pypi/v/hypotree.svg" alt="PyPI"></a>
 </p>
@@ -66,7 +66,7 @@ Off by default, and staying off until a full evaluation with a live model has sc
 
 | Feature | Status |
 |---|---|
-| **Cost-aware selection** (`--experimental-cost-aware`) | Ranks candidates by expected value **per unit cost** instead of by promise alone, using the `duration_s` your results report and the `estimated_cost` you declare. On a cost-weighted benchmark it cuts total cost to goal by **77%** for **1.5%** more probes, solving every seed — but that was measured against a scripted caller on a synthetic tariff, which justifies the mechanism and not the default. **Expected to become the default in a later minor release (0.6.0 or above)** once a run with a live model has scored it; the flag disappears at that point. Recording `duration_s` and `estimated_cost` is always safe and always useful — both are stored and displayed whether or not the flag is on. |
+| **Cost-aware selection** (`--experimental-cost-aware`) | Ranks candidates by expected value **per unit cost** instead of by promise alone, using the `duration_s` your results report and the `estimated_cost` you declare. On a cost-weighted benchmark it cuts total cost to goal by **77%** for **1.5%** more probes, solving every seed — but that was measured against a scripted caller on a synthetic tariff, which justifies the mechanism and not the default. **Expected to become the default in a later minor release (0.7.0 or above)** once a run with a live model has scored it; the flag disappears at that point. Recording `duration_s` and `estimated_cost` is always safe and always useful — both are stored and displayed whether or not the flag is on. |
 
 Why the saving exists, since it is not obvious: the last surviving answer to a closed question is *deduced rather than probed*, so whichever answer you never reach is never paid for. Ordering cheapest-first puts the expensive answer in that free slot. Probe **count** barely moves — the winner's position is uniform, so any order settles a question in the same expected number of probes — while probe **cost** falls a long way.
 
@@ -331,6 +331,43 @@ from hypotree import TOOL_SPECS
 {s.name for s in TOOL_SPECS if s.mutates}     # gate these
 {s.name for s in TOOL_SPECS if s.essential}   # ship these when context is tight
 ```
+
+### Embedding it in an agent loop
+
+The whole integration is three touch points: build the tool list once, execute by name, close on the way out. Everything else your loop already does.
+
+```python
+from hypotree import HypoTreeToolset
+
+belief = HypoTreeToolset(session_dir / "beliefs.db", preset="essential")
+try:
+    tools = my_own_tools() + belief.tools()
+
+    while not done:
+        reply = llm.chat(messages, tools=tools)
+        for call in reply.tool_calls:
+            if call.name in belief.tool_names:
+                # Your gate, your policy — hypotree only tells you which calls
+                # are consequential.
+                if belief.is_mutation(call.name) and not gate.open:
+                    result = "Belief writes are gated; think first."
+                else:
+                    result = belief.call(call.name, call.arguments)
+            else:
+                result = my_dispatch(call)
+            messages.append(tool_result(call, result))
+finally:
+    belief.close()
+```
+
+Four things that are easy to get wrong and cheap to get right:
+
+- **Point the database at storage that survives the session, not at the working directory.** The belief state outliving the run is the entire feature; a path under a git worktree forks it the first time you switch branches.
+- **Open the session by reading what is already known.** `generate_learning_path` is in the essential preset for a measured reason: across three full evaluation runs the agent called it after a context reset exactly zero times, and every redundant probe in those runs followed a reset.
+- **Do not charge belief writes against a code-mutation budget.** Recording what you learned is not the work. An agent that runs low on budget and stops writing down its findings loses the memory exactly when it is worth most.
+- **`call` never raises.** A bad node id comes back as `{"error": …}`, so the loop can hand it straight to the model and let it correct itself rather than dying on a typo.
+
+Pass `read_only=True` for anything that should observe without writing — a reviewer, a monitoring pass, an untrusted sub-agent. It exposes the eleven sensors and refuses every write, including by name if the model asks for one it was never given.
 
 Testing an integration costs nothing: the engine runs against a temporary SQLite file in milliseconds, so the full create → dispatch → record → conclude loop is a unit test, not an inference bill.
 

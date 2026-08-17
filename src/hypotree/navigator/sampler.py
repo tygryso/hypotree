@@ -22,7 +22,13 @@ import numpy as np
 
 from hypotree.models.node import Node
 from hypotree.models.status import Status, posterior_mean, utcnow
-from hypotree.navigator.convergence import convergence_gate, credible_interval
+from hypotree.navigator.convergence import (
+    CONVERGED_CEILING,
+    convergence_gate,
+    convergence_verdict,
+    credible_interval,
+    credible_width,
+)
 
 # Default claim/lease TTL in seconds.
 DEFAULT_LEASE_TTL_S = 900
@@ -511,6 +517,32 @@ class ThompsonSampler:
             self._epsilon_ci,
             self._n_max,
         )
+
+    def settling_note(self, node: Node, evidence_count: int) -> str | None:
+        """How this node's evidence came to be conclusive, when that is notable.
+
+        Returns a phrase for the status-change reason when a stochastic node
+        settles because it ran out of sample budget rather than because its
+        credible interval tightened, and ``None`` otherwise. Only the ceiling
+        case is reported: an interval that converged is the ordinary path and
+        annotating it would bury the one case a reader needs to notice.
+
+        Without this, a high-variance node that never converged and a node
+        measured to a tight interval leave the same trace, and "why did this
+        settle?" is answerable only by recomputing the posterior at the time.
+        """
+        converged, reason = convergence_verdict(
+            node.evidence_regime,
+            evidence_count,
+            node.alpha,
+            node.beta,
+            self._epsilon_ci,
+            self._n_max,
+        )
+        if not converged or reason != CONVERGED_CEILING:
+            return None
+        width = credible_width(node.alpha, node.beta)
+        return f"settled at sample ceiling (n={self._n_max}, CI width {width:.2f})"
 
     # -- internal: verify bar -------------------------------------------------
 

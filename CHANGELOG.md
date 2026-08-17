@@ -6,6 +6,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] - 0.6.0
 
+### Fixed
+- **The evaluation harness's hand-written tool schemas are now pinned against the real
+  ones.** Because the schemas were unreachable outside the MCP server, the harness wrote
+  its own copies of seven of them, and they drifted: arm B's `create_hypotheses` was
+  missing `exclusion_closed`, the one field that stops the engine deducing an answer over
+  an incomplete list of candidates. A parity test now fails on any field the harness
+  advertises that dispatch would silently drop — the `source_ref` class of bug, which has
+  shipped once — and on any type disagreement. Deliberate omissions are enumerated with
+  the reason each is acceptable, so a restriction nobody chose can no longer pass for one
+  that somebody did. Two are worth stating outright: arm B cannot declare an open
+  candidate list, and it supplies no `duration_s`, so cost-aware ordering is not under
+  test in the current gate.
+- **A no-op edge write moved the revision counter and lied to the audit log.** `add_edge`
+  paired an `INSERT OR IGNORE` with an unconditional `EdgeAdded` event, so re-adding an
+  existing edge wrote a row asserting an addition that never happened and advanced
+  `events.seq`. That counter is documented as advancing "exactly when something changed
+  and never when nothing did", and two readers take it at its word: the dashboard pushes
+  it to every connected browser as the change signal, and keys its whole snapshot cache
+  on it — so one phantom bump costs a full graph relayout everywhere. The event is now
+  written only when the insert actually inserted.
+- **`_handle_infra_error` rewrote every column of a node from a stale snapshot.** The last
+  whole-row writer on an engine path, and a lost-update by construction: anything written
+  between the read and the save was silently reverted, and an infra error arrives
+  interleaved with exactly the posterior and claim writes that would be lost. Replaced
+  with a targeted `increment_infra_retries`, mirroring `increment_evidence_count`.
+- **`get_next_targets` could mint a lease that was already expired.** The reclaim sweep
+  compares inclusively, so `lease_ttl_s=0` returned the node to the frontier on the next
+  call while the caller believed it held the work. `renew_claim` has refused non-positive
+  TTLs since it was written; the issuing path was guarded only by the tool schema, which
+  every direct Python caller bypasses — and the engine is public API now.
+- **The dashboard refused IPv6 loopback with a port.** `Host: [::1]:7331` contains three
+  colons, so the port split was skipped and the whole string was tested as a hostname.
+  It failed closed, so this was never a hole — an IPv6 browser simply could not open the
+  dashboard. Parsing is now bracket-aware, and a bracketed foreign host is still refused.
+
+### Changed
+- **Tool schemas and dispatch moved out of the MCP server into `hypotree.toolkit`.** They
+  were always transport-neutral — a name, a dict of arguments, plain data back — but they
+  lived behind a module whose first three imports are the MCP SDK. A caller who wanted the
+  belief state had to acquire a JSON-RPC stack to reach it, or reimplement the routing.
+  - The MCP server is now one projection of the shared specs; an embedding host is the
+    other. Neither owns the contract, so neither can drift from it.
+  - `import hypotree` no longer imports `mcp`, and there is a test that fails if it starts.
+  - Internal moves, unreleased: `mcp_server._dispatch` → `toolkit.dispatch.dispatch`,
+    `_evidence_report` → `evidence_report`, `_parse_instant` → `parse_instant`,
+    `_hypothesis_item_schema` → `specs.hypothesis_item_schema`. `_tool_definitions()`,
+    `dashboard_url()` and `SERVER_INSTRUCTIONS` keep their names and locations.
+- **SQLite is tuned for the write path it actually has.** `synchronous=NORMAL` (the
+  canonical WAL setting: a crash can lose the last transaction and cannot corrupt the
+  file), plus an explicit `busy_timeout`, cache size and in-memory temp store. Every
+  mutation writes its audit event in the same transaction, so the default `FULL` was
+  buying an fsync per belief change that no caller had asked for.
+- **A stochastic node now records whether it settled on evidence or on budget.** The
+  convergence gate returned a bare boolean, so a node whose credible interval was still
+  wide at the sample ceiling left exactly the trace of one measured to a tight interval —
+  and "why did this settle?" was answerable only by recomputing the posterior at the time.
+  New `convergence_verdict` returns the reason alongside the decision, and the ceiling
+  case is appended to the status-change reason where the audit log and the agent can both
+  read it. The boolean `convergence_gate` is unchanged, and so is *whether* any node
+  settles; only the record is richer.
+- **The git-remote lookup is resolved once per process.** Up to three subprocesses with a
+  five-second timeout each sat on the MCP startup path before the first handshake, so a
+  slow git or a remote behind a hung mount could look to a client like a server that
+  failed to start. Re-pointing a remote mid-session deliberately does not migrate the
+  belief state; `reset_identity_cache()` forces re-resolution for anything that needs it.
+- **One node read per selection pass instead of several.** `_frontier_nodes` accepts the
+  snapshot its caller already holds, and `_confirmed_for_composition` stopped reading the
+  table twice inside one call. Deliberately *not* a cache: a snapshot is reused only where
+  no write intervenes, because a node list that disagrees with SQLite produces a silently
+  wrong selection rather than a slow one — the same reason a long-lived incremental graph
+  was rejected.
+- **Rewinding the dashboard is one query.** `_posterior_at` asked `posterior_history` per
+  node, so every scrubber position paid an N+1 that the snapshot cache cannot amortise
+  (the instant is part of its key). New `get_all_posterior_history`, mirroring
+  `get_all_status_history`.
+- **`HypoTreeGraph.is_frontier_status` is public.** It was the engine's only reach into
+  another layer's privates, `# noqa: SLF001` and all.
+
+### Removed
+- **`sqlalchemy` is no longer a dependency.** It was declared and imported nowhere — tens
+  of megabytes of install weight, extra resolver and attack surface, and a false signal
+  that an ORM was in play in a package whose entire product is a hand-written SQLite
+  schema. A test now fails if any declared dependency stops being imported.
+
 ### Added
 - **A Python API: `HypoTreeToolset`, and a package that finally exports its own names.**
   hypotree was described as a library and shipped as a server. `from hypotree import
@@ -33,32 +117,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     these) and `essential` (ship these when context is tight). `get_next_targets` is
     classified as a mutation — it reads like a query and it issues leases, so it writes,
     and a host inferring that from the tool's name gets it wrong.
-
-### Changed
-- **Tool schemas and dispatch moved out of the MCP server into `hypotree.toolkit`.** They
-  were always transport-neutral — a name, a dict of arguments, plain data back — but they
-  lived behind a module whose first three imports are the MCP SDK. A caller who wanted the
-  belief state had to acquire a JSON-RPC stack to reach it, or reimplement the routing.
-  - The MCP server is now one projection of the shared specs; an embedding host is the
-    other. Neither owns the contract, so neither can drift from it.
-  - `import hypotree` no longer imports `mcp`, and there is a test that fails if it starts.
-  - Internal moves, unreleased: `mcp_server._dispatch` → `toolkit.dispatch.dispatch`,
-    `_evidence_report` → `evidence_report`, `_parse_instant` → `parse_instant`,
-    `_hypothesis_item_schema` → `specs.hypothesis_item_schema`. `_tool_definitions()`,
-    `dashboard_url()` and `SERVER_INSTRUCTIONS` keep their names and locations.
-
-### Fixed
-- **The evaluation harness's hand-written tool schemas are now pinned against the real
-  ones.** Because the schemas were unreachable outside the MCP server, the harness wrote
-  its own copies of seven of them, and they drifted: arm B's `create_hypotheses` was
-  missing `exclusion_closed`, the one field that stops the engine deducing an answer over
-  an incomplete list of candidates. A parity test now fails on any field the harness
-  advertises that dispatch would silently drop — the `source_ref` class of bug, which has
-  shipped once — and on any type disagreement. Deliberate omissions are enumerated with
-  the reason each is acceptable, so a restriction nobody chose can no longer pass for one
-  that somebody did. Two are worth stating outright: arm B cannot declare an open
-  candidate list, and it supplies no `duration_s`, so cost-aware ordering is not under
-  test in the current gate.
 
 ## [0.5.0] - 2026-08-08
 

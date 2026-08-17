@@ -677,9 +677,31 @@ def test_releasing_claims_hands_the_work_back(engine: HypoTreeEngine) -> None:
 def test_an_expired_lease_stops_blocking(engine: HypoTreeEngine) -> None:
     """The TTL is the backstop for an agent that simply walks away."""
     engine.create_hypothesis("h1", node_id="h1")
-    engine.get_next_targets(lease_ttl_s=0)
+    engine.get_next_targets(lease_ttl_s=60)
+
+    # Walk the clock past the lease rather than issuing one born expired. A
+    # zero-second TTL is refused at the API now, and it never described what an
+    # abandoned agent actually leaves behind: a lease that was live when taken
+    # and ran out while nobody was reporting against it.
+    engine._store.expire_stale_claims(datetime.now(timezone.utc) + timedelta(seconds=61))
 
     assert engine.get_next_targets()[0].node_id == "h1"
+
+
+@pytest.mark.unit
+def test_a_lease_cannot_be_issued_already_expired(engine: HypoTreeEngine) -> None:
+    """A non-positive TTL hands back work the caller believes it holds.
+
+    The reclaim sweep compares inclusively, so a zero-second lease is expired
+    the moment it exists and the node returns to the frontier on the very next
+    call — while the caller sits on a claim_id it thinks is live. `renew_claim`
+    has always refused this; the issuing path was guarded only by the tool
+    schema, which every direct Python caller bypasses.
+    """
+    engine.create_hypothesis("h1", node_id="h1")
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="lease_ttl_s must be > 0"):
+            engine.get_next_targets(lease_ttl_s=bad)
 
 
 # -- goal dispatch priority ----------------------------------------------------

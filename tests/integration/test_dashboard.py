@@ -424,6 +424,33 @@ async def test_a_foreign_host_header_is_refused(server: DashboardServer) -> None
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_ipv6_loopback_with_a_port_is_accepted(server: DashboardServer) -> None:
+    """`[::1]:7331` is loopback, and the parser used to read it as a hostname.
+
+    IPv6 literals are bracketed precisely because they contain colons, so
+    splitting on the last one produced the whole string as the "name", which
+    matched no allowlist entry. It failed closed — a robustness bug, never a
+    hole — but an IPv6-only browser simply could not open the dashboard.
+    """
+    status, _ = await _request(
+        server.port, f"/api/meta?t={server.token}", headers={"Host": "[::1]:7331"}
+    )
+    assert status == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_a_bracketed_foreign_host_is_still_refused(server: DashboardServer) -> None:
+    """Bracket-awareness must not become a way through the allowlist."""
+    for host in ("[2001:db8::1]:7331", "[evil.test]:7331"):
+        status, _ = await _request(
+            server.port, f"/api/meta?t={server.token}", headers={"Host": host}
+        )
+        assert status == 403, host
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_a_cross_origin_request_is_refused(server: DashboardServer) -> None:
     status, _ = await _request(
         server.port, f"/api/meta?t={server.token}", headers={"Origin": "https://evil.test"}

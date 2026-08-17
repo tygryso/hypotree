@@ -43,7 +43,6 @@ classifiers = [
 dependencies = [
     "networkx>=3.3",
     "pydantic>=2.7",
-    "sqlalchemy>=2.0",
     "numpy>=1.26",
     "scipy>=1.11",
     "mcp>=1.28.1,<2",

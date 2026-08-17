@@ -281,7 +281,12 @@ class DashboardServer:
 
     def _host_ok(self, request: _Request) -> bool:
         host = request.headers.get("host", "")
-        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+        if host.startswith("["):
+            # IPv6 literals are bracketed precisely because they contain the
+            # colons a naive port split would trip over: `[::1]:7331`.
+            name = host.partition("]")[0] + "]"
+        else:
+            name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
         return name in _ALLOWED_HOSTS
 
     def _origin_ok(self, request: _Request) -> bool:

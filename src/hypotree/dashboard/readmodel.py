@@ -415,11 +415,15 @@ class ReadModel:
         return out
 
     def _posterior_at(self, when: datetime) -> dict[str, tuple[float, float]]:
+        """Every node's posterior at an instant, from the SCD2 intervals.
+
+        One scan, ordered oldest-first, so a later interval overwrites an
+        earlier one exactly as the per-node loop's ordering did.
+        """
         out: dict[str, tuple[float, float]] = {}
-        for node in self.store.get_all_nodes():
-            for row in self.store.get_posterior_history(node.id):
-                if _covers(row, when):
-                    out[node.id] = (float(row["alpha"]), float(row["beta"]))
+        for row in self.store.get_all_posterior_history():
+            if _covers(row, when):
+                out[str(row["node_id"])] = (float(row["alpha"]), float(row["beta"]))
         return out
 
     # -- panels ----------------------------------------------------------------

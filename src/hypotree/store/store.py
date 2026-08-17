@@ -137,6 +137,17 @@ class HypoTreeStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        # NORMAL is the canonical durability level under WAL: a crash cannot
+        # corrupt the database, only lose the last transaction. Every mutation
+        # here writes an audit event in the same transaction, so the default
+        # FULL was paying an fsync per belief change for a guarantee no caller
+        # asked for. The busy timeout is stated rather than inherited from the
+        # driver's implicit five seconds, so a days-long run's contention
+        # behaviour is visible in the code that chose it.
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA busy_timeout=10000")
+        self._conn.execute("PRAGMA cache_size=-65536")
+        self._conn.execute("PRAGMA temp_store=MEMORY")
         self._init_schema()
         self._check_schema_version()
 
@@ -532,16 +543,21 @@ class HypoTreeStore:
     def add_edge(self, edge: Edge) -> None:
         txn = self._txn_id()
         with self.transaction() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT OR IGNORE INTO edges (src, dst, type, created_at) VALUES (?,?,?,?)",
                 (edge.src, edge.dst, edge.type.value, _dt_to_str(utcnow())),
             )
-            self._write_event(
-                conn,
-                "EdgeAdded",
-                json.dumps({"edge": edge.model_dump(mode="json")}),
-                txn,
-            )
+            # A duplicate edge is ignored by the insert, so writing the event
+            # anyway would claim an addition that did not happen and advance
+            # `events.seq` — the revision number every reader treats as "something
+            # changed", and the dashboard's cache key.
+            if cur.rowcount:
+                self._write_event(
+                    conn,
+                    "EdgeAdded",
+                    json.dumps({"edge": edge.model_dump(mode="json")}),
+                    txn,
+                )
 
     def get_all_edges(self) -> list[Edge]:
         rows = self._conn.execute("SELECT * FROM edges").fetchall()
@@ -1188,6 +1204,18 @@ class HypoTreeStore:
             "SELECT * FROM status_history ORDER BY valid_from, node_id"
         ).fetchall()
 
+    def get_all_posterior_history(self) -> list[sqlite3.Row]:
+        """Every posterior interval in the workspace, oldest first.
+
+        The sibling of :meth:`get_all_status_history`, and it exists for the same
+        reason: rewinding the whole workspace to an instant is one question, and
+        answering it by asking per node turns a single scan into a query per
+        hypothesis on the path a human drags a slider along.
+        """
+        return self._conn.execute(
+            "SELECT * FROM posterior_history ORDER BY valid_from, node_id"
+        ).fetchall()
+
     def current_status_reasons(self) -> dict[str, str]:
         """Why every node holds the status it currently holds, in one query.
 
@@ -1303,6 +1331,26 @@ class HypoTreeStore:
                 "UPDATE nodes SET evidence_count = evidence_count + 1 WHERE id=?",
                 (node_id,),
             )
+
+    def increment_infra_retries(self, node_id: str, now: datetime) -> int:
+        """Bump a node's infra-retry counter and return the new value (one txn).
+
+        Targeted rather than a whole-row save for the same reason
+        :meth:`increment_evidence_count` is: rewriting every column from a
+        snapshot read moments earlier reverts anything written in between, and
+        an infra error arrives interleaved with exactly the posterior and claim
+        writes that would be lost.
+        """
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE nodes SET infra_retry_count = infra_retry_count + 1, updated_at = ? "
+                "WHERE id=?",
+                (_dt_to_str(now), node_id),
+            )
+            row = conn.execute(
+                "SELECT infra_retry_count FROM nodes WHERE id=?", (node_id,)
+            ).fetchone()
+        return int(row["infra_retry_count"]) if row is not None else 0
 
     def get_active_claims(self, now: datetime) -> list[sqlite3.Row]:
         """Return live (unconsumed, unexpired) claims as of *now*."""

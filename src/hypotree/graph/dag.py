@@ -159,7 +159,7 @@ class HypoTreeGraph:
     # Edge-type-aware frontier
     # ------------------------------------------------------------------
 
-    def _is_frontier_status(self, status: Status) -> bool:
+    def is_frontier_status(self, status: Status) -> bool:
         """A node is frontier-eligible only in these statuses.
 
         EXHAUSTED is deliberately absent: a conclusively-tested node that did
@@ -229,7 +229,7 @@ class HypoTreeGraph:
         return [
             nid
             for nid, node in self._nodes.items()
-            if self._is_frontier_status(node.status) and self._parent_gate_satisfied(nid)
+            if self.is_frontier_status(node.status) and self._parent_gate_satisfied(nid)
         ]
 
     # ------------------------------------------------------------------

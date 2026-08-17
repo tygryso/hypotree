@@ -453,6 +453,17 @@ _ORIGIN_BY_MARKER: tuple[tuple[str, Literal["observed", "inferred", "reversed"],
 )
 
 
+def _with_note(reason: str, note: str | None) -> str:
+    """Append a settling note to a status-change reason.
+
+    Appended rather than prefixed because the reason's *prefix* is a parsed
+    marker — `_settlement_origin` and every retraction path key off it — so a
+    note added at the front would silently reclassify the settlement it is
+    describing.
+    """
+    return f"{reason} — {note}" if note else reason
+
+
 def _settlement_origin(reason: str) -> tuple[Literal["observed", "inferred", "reversed"], str]:
     """Read a status-history reason as an origin and a plain-language cause."""
     for marker, origin, phrase in _ORIGIN_BY_MARKER:
@@ -572,7 +583,7 @@ class HypoTreeEngine:
         if node is not None:
             self._graph.add_node(node)
 
-    def _frontier_nodes(self) -> list[Node]:
+    def _frontier_nodes(self, all_nodes: list[Node] | None = None) -> list[Node]:
         """Nodes that are eligible AND actually dispatchable right now.
 
         Two refinements on top of the graph's edge-type gate, both of which the
@@ -607,12 +618,19 @@ class HypoTreeEngine:
         experiment that discriminates a conflict is a composition. Leaving them
         dispatchable spent a tenth of a whole run's probe budget re-confirming
         assumptions that were never individually in question.
+
+        ``all_nodes`` lets a caller that has already read the table hand it in.
+        Nothing is cached across calls: a snapshot is reused only inside a single
+        pass with no write between the read and the use, because a node list that
+        disagrees with SQLite yields a silently wrong selection rather than a
+        slow one.
         """
         eligible = set(self._graph.eligible_frontier())
         under_diagnosis = {m for n in self._diagnosing_nogoods() for m in n["member_ids"]}
+        nodes = self._store.get_all_nodes() if all_nodes is None else all_nodes
         return [
             n
-            for n in self._store.get_all_nodes()
+            for n in nodes
             if n.id in eligible
             and n.active_claim_id is None
             and not n.is_goal
@@ -709,16 +727,17 @@ class HypoTreeEngine:
         advice cannot become a loop that keeps proposing an assembly the caller
         has tried.
         """
+        all_nodes = self._store.get_all_nodes()
         composed: set[frozenset[str]] = {
             frozenset(self._graph.parents(n.id, EdgeType.DEPENDENCY))
-            for n in self._store.get_all_nodes()
+            for n in all_nodes
             if not n.is_goal
         }
         used = {pid for parents in composed for pid in parents}
 
         by_group: dict[str, list[str]] = {}
         loose: list[str] = []
-        for node in self._store.get_all_nodes():
+        for node in all_nodes:
             if node.status != Status.VERIFIED or node.is_goal:
                 continue
             if self._graph.parents(node.id, EdgeType.DEPENDENCY):
@@ -1131,6 +1150,14 @@ class HypoTreeEngine:
         """
         if count < 1:
             raise ValueError(f"count must be >= 1, got {count}")
+        # A non-positive TTL mints a lease that is already expired: the reclaim
+        # sweep uses an inclusive comparison, so the node returns to the frontier
+        # on the very next call while the caller believes it holds the work.
+        # `renew_claim` has refused this since it was written; the issuing path
+        # was guarded only by the tool schema, which a direct Python caller and
+        # any host that skips validation both bypass.
+        if lease_ttl_s is not None and lease_ttl_s <= 0:
+            raise ValueError(f"lease_ttl_s must be > 0 to issue a lease, got {lease_ttl_s}")
         if dry_run:
             count = 1
 
@@ -1187,7 +1214,7 @@ class HypoTreeEngine:
             if (
                 node.exclusion_group in claimed_groups
                 and node.id not in dispatched
-                and self._graph._is_frontier_status(node.status)  # noqa: SLF001
+                and self._graph.is_frontier_status(node.status)
                 and (scope is None or node.id in scope)
             ):
                 withheld[node.exclusion_group] = withheld.get(node.exclusion_group, 0) + 1
@@ -1273,7 +1300,12 @@ class HypoTreeEngine:
         through `_refresh_node_in_graph`, so the topology it was handed stays
         correct for the rest of the batch.
         """
-        frontier = self._frontier_nodes()
+        # One read for the whole pass. Everything between here and the sampler
+        # call is a read, so the snapshot cannot go stale under itself; the
+        # frontier filter and the sampler's group counts were each paying for
+        # their own full deserialisation of the same rows.
+        all_nodes = self._store.get_all_nodes()
+        frontier = self._frontier_nodes(all_nodes)
         # A goal filter narrows *which* work is offered, never what counts as
         # work. Applied before the exclusion-lease guard so the two compose.
         out_of_scope = 0
@@ -1313,7 +1345,6 @@ class HypoTreeEngine:
             pinned = [n for n in frontier if n.id in directives]
             if pinned:
                 frontier = pinned
-        all_nodes = self._store.get_all_nodes()
         goals = [n for n in all_nodes if n.is_goal]
         suspects = self._conflict_suspects()
         result = self._sampler.select(
@@ -1326,7 +1357,6 @@ class HypoTreeEngine:
             eliminated_ids=self._eliminated_ids(all_nodes),
             costs=self._probe_costs(frontier, all_nodes) if self._cost_aware else None,
         )
-
         if result.status == "DONE":
             # An empty frontier has several very different causes, and the
             # caller's next move differs completely between them. Collapsing any
@@ -1779,14 +1809,20 @@ class HypoTreeEngine:
         elif last_success is not None:
             depth = evidence.depth if isinstance(evidence, LogicalEvidence) else 0
             new_logical_count = logical_count + 1
+            # Recorded alongside the transition so the audit log can tell a node
+            # measured to a tight interval from one that merely ran out of
+            # sample budget. Read from `node`, which was re-fetched after the
+            # posterior update, so it reflects the belief that produced the
+            # verdict rather than the one before it.
+            note = self._sampler.settling_note(node, new_logical_count)
             if self._sampler.should_invalidate(node, new_logical_count, last_success):
-                self._invalidate_node(node.id, now, depth)
+                self._invalidate_node(node.id, now, depth, note=note)
             elif self._sampler.should_verify(node, new_logical_count, last_success):
-                self._verify_node(node.id, now, depth)
+                self._verify_node(node.id, now, depth, note=note)
             elif self._sampler.should_exhaust(node, new_logical_count, last_success):
                 # Conclusive but sub-bar: settle the node so it leaves the
                 # frontier instead of being re-dispatched forever.
-                self._exhaust_node(node.id, now, last_success, depth)
+                self._exhaust_node(node.id, now, last_success, depth, note=note)
 
         self._refresh_node_in_graph(node_id)
         updated = self._store.get_node(node_id)
@@ -3053,15 +3089,17 @@ class HypoTreeEngine:
 
     def _handle_infra_error(self, node: Node, now: datetime) -> None:
         """Increment infra retry count; auto-BLOCKED after MAX_INFRA_RETRIES."""
-        node.infra_retry_count += 1
+        retries = self._store.increment_infra_retries(node.id, now)
+        node.infra_retry_count = retries
         node.updated_at = now
-        self._store.save_node(node)
-        if node.infra_retry_count >= MAX_INFRA_RETRIES:
+        if retries >= MAX_INFRA_RETRIES:
             self._store.change_status(
                 node.id, Status.BLOCKED, reason="max infra retries exceeded", now=now
             )
 
-    def _invalidate_node(self, node_id: str, now: datetime, depth: int = 0) -> None:
+    def _invalidate_node(
+        self, node_id: str, now: datetime, depth: int = 0, note: str | None = None
+    ) -> None:
         """Transition to INVALIDATED + cascade prune + upstream blame + deduction."""
         prior = self._store.get_node(node_id)
         group = prior.exclusion_group if prior is not None else None
@@ -3069,7 +3107,7 @@ class HypoTreeEngine:
         self._store.change_status(
             node_id,
             Status.INVALIDATED,
-            reason="evidence triggered invalidation",
+            reason=_with_note("evidence triggered invalidation", note),
             now=now,
         )
         # A refutation withdraws the confirmation entirely, depth included.
@@ -4262,7 +4300,9 @@ class HypoTreeEngine:
                 by_group.setdefault(node.exclusion_group, []).append(node)
         return sorted(g for g, members in by_group.items() if self._question_is_dead(g, members))
 
-    def _verify_node(self, node_id: str, now: datetime, depth: int = 0) -> None:
+    def _verify_node(
+        self, node_id: str, now: datetime, depth: int = 0, note: str | None = None
+    ) -> None:
         """Transition to VERIFIED + exclusion inference + upstream verify.
 
         ``depth`` is the rigour of the observation that produced the
@@ -4276,7 +4316,7 @@ class HypoTreeEngine:
         self._store.change_status(
             node_id,
             Status.VERIFIED,
-            reason="posterior converged above verify bar",
+            reason=_with_note("posterior converged above verify bar", note),
             now=now,
         )
         # A re-confirmation never weakens what was already established, so the
@@ -4407,7 +4447,12 @@ class HypoTreeEngine:
         return restored
 
     def _exhaust_node(
-        self, node_id: str, now: datetime, last_success: float, depth: int = 0
+        self,
+        node_id: str,
+        now: datetime,
+        last_success: float,
+        depth: int = 0,
+        note: str | None = None,
     ) -> None:
         """Transition to EXHAUSTED — conclusively tested, did not clear the bar.
 
@@ -4431,7 +4476,9 @@ class HypoTreeEngine:
         self._store.change_status(
             node_id,
             Status.EXHAUSTED,
-            reason=f"conclusive evidence below verify bar (success={last_success:.4f})",
+            reason=_with_note(
+                f"conclusive evidence below verify bar (success={last_success:.4f})", note
+            ),
             now=now,
         )
         self._refresh_node_in_graph(node_id)

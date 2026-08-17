@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from functools import cache
 from pathlib import Path
 
 import yaml
@@ -215,10 +216,20 @@ def _normalize_remote(url: str) -> str:
     return url.strip("/")
 
 
+@cache
 def _resolve_remote(project_path: Path) -> str | None:
     """Try ``origin``, then fall back to the first remote listed by git.
 
     Logs each attempt so that mismatches between MCP clients can be traced.
+
+    Memoised for the life of the process: this is up to three git subprocesses
+    with a five-second timeout each, and it sits on the server's startup path
+    before the first handshake — on a machine where git is slow or a remote
+    lives behind a hung mount, that delay is what an MCP client renders as a
+    failed start. Re-pointing a remote mid-session deliberately does *not* move
+    the belief state; migrating a running session to a different workspace is
+    not something a `git remote set-url` should silently do. Call
+    :func:`reset_identity_cache` to force re-resolution.
     """
     # Try `origin` first — the most common case.
     try:
@@ -336,6 +347,16 @@ def workspace_id(project_path: Path) -> str:
     thing without the provenance.
     """
     return resolve_workspace_id(project_path)[0]
+
+
+def reset_identity_cache() -> None:
+    """Forget the memoised git-remote lookups.
+
+    Exists for callers that genuinely change the git state underneath a live
+    process — tests, and anything simulating a second session. Ordinary code
+    should not need it: within one session the workspace is meant to be fixed.
+    """
+    _resolve_remote.cache_clear()
 
 
 def resolve_workspace_id(project_path: Path) -> tuple[str, str, str]:

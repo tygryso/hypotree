@@ -12,6 +12,7 @@ import pytest
 
 from hypotree.store.identity import (
     _validate_name,
+    reset_identity_cache,
     resolve_project_path,
     workspace_id,
 )
@@ -147,6 +148,12 @@ def test_workspace_id_git_remote_hash(tmp_path: Path, monkeypatch: pytest.Monkey
         capture_output=True,
         check=True,
     )
+    # The remote lookup is memoised per process, so without this the second call
+    # would return the SSH answer and the assertion below would hold for the
+    # wrong reason. Changing a remote under a live process is exactly the case
+    # the cache is meant to ignore; re-resolving here stands in for the restart
+    # that would pick the change up.
+    reset_identity_cache()
     wid_https = workspace_id(repo)
 
     assert wid_ssh == wid_https
