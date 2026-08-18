@@ -32,8 +32,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import sys
 from importlib import resources
+from pathlib import Path
 
 from mcp import types
 from mcp.server import Server
@@ -192,7 +194,11 @@ def _agent_guide() -> str:
     return resources.files("hypotree").joinpath("AGENT_GUIDE.md").read_text(encoding="utf-8")
 
 
-async def _run_main(dashboard_port: int | None, cost_aware: bool = False) -> None:
+async def _run_main(
+    dashboard_port: int | None,
+    cost_aware: bool = False,
+    db_path_override: Path | None = None,
+) -> None:
     """Wire the engine into an MCP stdio server and run it.
 
     ``dashboard_port`` of ``None`` starts no dashboard. Anything else is the
@@ -205,7 +211,8 @@ async def _run_main(dashboard_port: int | None, cost_aware: bool = False) -> Non
     way to add a term to an acquisition function a frozen gate has scored.
     """
     project_path = resolve_project_path()
-    db_path = store_root(project_path) / "state.db"
+    db_path = db_path_override or (store_root(project_path) / "state.db")
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
     engine = HypoTreeEngine(db_path, project_path=project_path, cost_aware=cost_aware)
     write_lock = asyncio.Lock()
@@ -288,7 +295,7 @@ async def _run_main(dashboard_port: int | None, cost_aware: bool = False) -> Non
         _publish_dashboard_url(None)
 
 
-async def _run_viewer(port: int) -> None:
+async def _run_viewer(port: int, db_path_override: Path | None = None) -> None:
     """Serve the dashboard against an existing belief state, with no MCP server.
 
     The try-before-you-wire path: someone who has never configured an MCP client
@@ -297,7 +304,7 @@ async def _run_viewer(port: int) -> None:
     """
     from hypotree.dashboard import DashboardServer, choose_port
 
-    db_path = store_root(resolve_project_path()) / "state.db"
+    db_path = db_path_override or (store_root(resolve_project_path()) / "state.db")
     if not db_path.exists():
         print(
             f"no belief state at {db_path}. Run `hypotree --info` to see which "
@@ -439,7 +446,7 @@ def main() -> None:
         return
 
     try:
-        port, dashboard, mcp, cost_aware = _parse_serve_args(args)
+        port, dashboard, mcp, cost_aware, db_path = _parse_serve_args(args)
     except ValueError as exc:
         print(f"hypotree: {exc}\n", file=sys.stderr)
         print(_cli_help(), file=sys.stderr)
@@ -450,13 +457,19 @@ def main() -> None:
             print("hypotree: --no-mcp and --no-dashboard leave nothing to run\n", file=sys.stderr)
             raise SystemExit(2)
         with contextlib.suppress(KeyboardInterrupt):
-            asyncio.run(_run_viewer(port))
+            asyncio.run(_run_viewer(port, db_path))
         return
-    asyncio.run(_run_main(dashboard_port=port if dashboard else None, cost_aware=cost_aware))
+    asyncio.run(
+        _run_main(
+            dashboard_port=port if dashboard else None,
+            cost_aware=cost_aware,
+            db_path_override=db_path,
+        )
+    )
 
 
-def _parse_serve_args(args: list[str]) -> tuple[int, bool, bool, bool]:
-    """Resolve the serving flags into (first port to try, dashboard?, mcp?, cost-aware?).
+def _parse_serve_args(args: list[str]) -> tuple[int, bool, bool, bool, Path | None]:
+    """Resolve serving flags, including an optional explicit SQLite path.
 
     Hand-rolled rather than argparse because this entry point must stay
     import-cheap: it is spawned per MCP session, and the flags here do not
@@ -468,6 +481,8 @@ def _parse_serve_args(args: list[str]) -> tuple[int, bool, bool, bool]:
     dashboard = True
     mcp = True
     cost_aware = False
+    configured_path = os.environ.get("HYPOTREE_DB_PATH", "").strip()
+    db_path = Path(configured_path).expanduser().resolve() if configured_path else None
     rest = list(args)
     while rest:
         arg = rest.pop(0)
@@ -483,9 +498,18 @@ def _parse_serve_args(args: list[str]) -> tuple[int, bool, bool, bool]:
             port = _port(rest.pop(0))
         elif arg.startswith("--dashboard-port="):
             port = _port(arg.split("=", 1)[1])
+        elif arg == "--db-path":
+            if not rest:
+                raise ValueError("--db-path needs a path")
+            db_path = Path(rest.pop(0)).expanduser().resolve()
+        elif arg.startswith("--db-path="):
+            raw_path = arg.split("=", 1)[1]
+            if not raw_path:
+                raise ValueError("--db-path needs a path")
+            db_path = Path(raw_path).expanduser().resolve()
         else:
             raise ValueError(f"unknown option {arg!r}")
-    return port, dashboard, mcp, cost_aware
+    return port, dashboard, mcp, cost_aware, db_path
 
 
 def _port(raw: str) -> int:
@@ -506,34 +530,33 @@ def _cli_help() -> str:
 hypotree {__version__} — persistent, self-revising hypothesis DAG (MCP server)
 
 Usage:
-  hypotree             Run the MCP server on stdio (what an MCP client does),
-                       with the web dashboard beside it on port {_default_port()},
-                       probing upward if that one is taken.
-  hypotree --dashboard-port PORT
-                       Start the dashboard from PORT instead, still probing
-                       upward. Use it when several workspaces are open at once
-                       and you want a predictable address for this one.
-  hypotree --no-dashboard
-                       MCP server only, no socket opened.
-  hypotree --no-mcp    Dashboard only, against the existing belief state, with
-                       no MCP server. Read-only, so it is safe to point at a
-                       workspace an agent is actively writing. This is the
-                       try-before-you-wire path.
-  hypotree --experimental-cost-aware
-                       EXPERIMENTAL, off by default. Rank candidates by expected
-                       value per unit cost rather than by promise alone, from
-                       the `duration_s` your results report and the
-                       `estimated_cost` you declare. Use it when your
-                       experiments differ in cost by more than they differ in
-                       promise — a fine-tune against a unit test. Measured at
-                       77% less total cost for 1.5% more probes on a
-                       cost-weighted benchmark, but only against a scripted
-                       caller; it is expected to become the default once a
-                       full evaluation with a live model has scored it.
-                       Without it selection is exactly as it is today.
-  hypotree --info      Print the resolved workspace, store path and warnings.
-  hypotree --version   Print the version.
-  hypotree --help      Show this message.
+  hypotree                            Run the MCP server on stdio (what an MCP client does),
+                                      with the web dashboard beside it on port {_default_port()},
+                                      probing upward if that one is taken.
+  hypotree --dashboard-port PORT      Start the dashboard from PORT instead, still probing
+                                      upward. Use it when several workspaces are open at once
+                                      and you want a predictable address for this one.
+  hypotree --no-dashboard             MCP server only, no socket opened.
+  hypotree --no-mcp                   Dashboard only, against the existing belief state, with
+                                      no MCP server. Read-only, so it is safe to point at a
+                                      workspace an agent is actively writing. This is the
+                                      try-before-you-wire path.
+  hypotree --no-mcp --db-path PATH    Dashboard only against an explicit state.db. The same
+                                      override is available as HYPOTREE_DB_PATH.
+  hypotree --experimental-cost-aware  EXPERIMENTAL, off by default. Rank candidates by expected
+                                      value per unit cost rather than by promise alone, from
+                                      the `duration_s` your results report and the
+                                      `estimated_cost` you declare. Use it when your
+                                      experiments differ in cost by more than they differ in
+                                      promise — a fine-tune against a unit test. Measured at
+                                      77% less total cost for 1.5% more probes on a
+                                      cost-weighted benchmark, but only against a scripted
+                                      caller; it is expected to become the default once a
+                                      full evaluation with a live model has scored it.
+                                      Without it selection is exactly as it is today.
+  hypotree --info                     Print the resolved workspace, store path and warnings.
+  hypotree --version                  Print the version.
+  hypotree --help                     Show this message.
 
 The dashboard binds 127.0.0.1 only and mints a session token at startup; the URL
 it prints (to stderr, because stdout is JSON-RPC) carries that token. An agent

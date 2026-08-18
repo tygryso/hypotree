@@ -711,12 +711,38 @@ def test_the_serving_flags_resolve_to_a_port_and_three_switches() -> None:
     from hypotree.dashboard.server import DEFAULT_PORT
     from hypotree.mcp_server import _parse_serve_args
 
-    assert _parse_serve_args([]) == (DEFAULT_PORT, True, True, False)
-    assert _parse_serve_args(["--dashboard-port", "9001"]) == (9001, True, True, False)
-    assert _parse_serve_args(["--dashboard-port=9001"]) == (9001, True, True, False)
-    assert _parse_serve_args(["--no-dashboard"]) == (DEFAULT_PORT, False, True, False)
-    assert _parse_serve_args(["--no-mcp"]) == (DEFAULT_PORT, True, False, False)
-    assert _parse_serve_args(["--experimental-cost-aware"]) == (DEFAULT_PORT, True, True, True)
+    assert _parse_serve_args([]) == (DEFAULT_PORT, True, True, False, None)
+    assert _parse_serve_args(["--dashboard-port", "9001"]) == (
+        9001,
+        True,
+        True,
+        False,
+        None,
+    )
+    assert _parse_serve_args(["--dashboard-port=9001"]) == (
+        9001,
+        True,
+        True,
+        False,
+        None,
+    )
+    assert _parse_serve_args(["--no-dashboard"]) == (DEFAULT_PORT, False, True, False, None)
+    assert _parse_serve_args(["--no-mcp"]) == (DEFAULT_PORT, True, False, False, None)
+    assert _parse_serve_args(["--experimental-cost-aware"]) == (
+        DEFAULT_PORT,
+        True,
+        True,
+        True,
+        None,
+    )
+
+
+def test_explicit_db_path_overrides_workspace_resolution(tmp_path):
+    from hypotree.mcp_server import _parse_serve_args
+
+    db_path = tmp_path / "isolated" / "state.db"
+    parsed = _parse_serve_args(["--no-mcp", "--db-path", str(db_path)])
+    assert parsed == (7331, True, False, False, db_path.resolve())
 
     for bad in (
         ["--bogus"],

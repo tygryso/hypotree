@@ -113,7 +113,8 @@ hypotree --info      # which belief state am I connected to, and where is it?
 
 ## Quick start
 
-### 1. Connect to an MCP client
+
+### 1a. Connect to an MCP client
 
 Add hypotree to your MCP client config (Cursor, Cline, Claude Desktop, etc.):
 
@@ -137,6 +138,15 @@ Or run directly:
 uvx hypotree
 ```
 
+To view a database owned by an embedding host without workspace resolution or an MCP server:
+
+```bash
+uv run hypotree --no-mcp --db-path /path/to/state.db
+```
+
+`HYPOTREE_DB_PATH` provides the same override.
+
+
 ### 1b. Or embed it in a Python agent — no MCP client
 
 If your agent is Python, it does not need a transport to reach the belief state. `HypoTreeToolset` hands you OpenAI function-calling schemas and executes calls by name:
@@ -158,6 +168,8 @@ Three things worth knowing:
 - **`ht.call` never raises.** A bad node id or a malformed argument dict comes back as `{"error": ...}`, because those are recoverable by the model that caused them and killing the session over one is not.
 
 Pass `read_only=True` for a reviewer or an untrusted sub-agent: it exposes the eleven sensors and refuses every write, including by name if the model asks for one it was not given.
+
+> Embedded hosts can keep state in their own isolated storage namespace and later launch `hypotree --no-mcp --db-path .../state.db` without copying it into hypotree's global workspace resolver.
 
 ### 2. Create hypotheses
 

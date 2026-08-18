@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   dashboard. Parsing is now bracket-aware, and a bracketed foreign host is still refused.
 
 ### Changed
+- **The CLI can open an explicit belief database with `--db-path` or
+  `HYPOTREE_DB_PATH`.** Embedded hosts can keep state in their own isolated
+  storage namespace and later launch `hypotree --no-mcp --db-path .../state.db`
+  without copying it into hypotree's global workspace resolver.
 - **Tool schemas and dispatch moved out of the MCP server into `hypotree.toolkit`.** They
   were always transport-neutral — a name, a dict of arguments, plain data back — but they
   lived behind a module whose first three imports are the MCP SDK. A caller who wanted the
