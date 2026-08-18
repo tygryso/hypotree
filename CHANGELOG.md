@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   dashboard. Parsing is now bracket-aware, and a bracketed foreign host is still refused.
 
 ### Changed
+- **The agent guide now distinguishes plan steps from falsifiable belief nodes
+  and defines safe continuation of unfinished goals.** It names the
+  `get_goal_status` → `generate_learning_path` → `get_active_claims` resume
+  sequence and clarifies when backward diagnosis leaves a goal pinned versus
+  when a growing forward pipeline adds a new last-stage dependency.
 - **The CLI can open an explicit belief database with `--db-path` or
   `HYPOTREE_DB_PATH`.** Embedded hosts can keep state in their own isolated
   storage namespace and later launch `hypotree --no-mcp --db-path .../state.db`

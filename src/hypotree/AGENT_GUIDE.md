@@ -23,6 +23,20 @@ DEPENDS on is VERIFIED — so wire it to the work meant to achieve it, and set
 `is_goal=True` on nothing else (a node marked as a goal can never be tested,
 refuted or settled).
 
+**Continuing an existing objective.** At session start, call
+`get_goal_status` and `generate_learning_path`. Continue an unfinished goal only
+when its statement and acceptance bar are the same objective as the new task;
+similar vocabulary is not enough. Then call `get_active_claims` to recover any
+live leased probes before requesting new targets. If no goal matches, create a
+new goal and its initial falsifiable premises together. Ordinary implementation
+steps belong in the host's plan, not automatically in this graph.
+
+**Growing work has two directions.** When diagnosing backward, add a new premise
+upstream of the failed claim and leave the goal pinned to the claim that still
+defines completion. When building a forward pipeline, add the new last stage as
+a DEPENDENCY parent of the goal. The direction is not a stylistic choice: it is
+determined by which verified node now means the objective is actually done.
+
 ---
 
 #### 20 Tools
