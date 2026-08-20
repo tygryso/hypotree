@@ -145,6 +145,27 @@ def test_evidence_history_limit(engine: HypoTreeEngine) -> None:
     assert len(history) == 2
 
 
+@pytest.mark.unit
+def test_goal_status_surfaces_unwired_confirmation_and_stale_count(
+    engine: HypoTreeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine.create_hypothesis("support", node_id="support")
+    engine.create_hypothesis("unwired", node_id="unwired")
+    engine.create_hypothesis("goal", node_id="goal", is_goal=True, parent_ids=["support"])
+    engine.update_status("support", Status.VERIFIED, "observed")
+    engine.update_status("unwired", Status.VERIFIED, "observed")
+    monkeypatch.setattr(engine, "stale_node_ids", lambda: {"support"})
+
+    status = engine.get_goal_status()
+
+    assert status.stale_beliefs == 1
+    assert status.unwired_confirmations == ["unwired"]
+    assert status.ceiling_settled == 0
+    scoped = engine.get_goal_status("goal")
+    assert scoped.unwired_confirmations == ["unwired"]
+
+
 # -- get_active_claims -----------------------------------------------------
 
 

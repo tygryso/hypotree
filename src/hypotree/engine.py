@@ -219,6 +219,9 @@ class GoalStatusResponse(BaseModel):
     frontier_size: int = 0
     total_nodes: int = 0
     status_breakdown: dict[str, int] = {}
+    stale_beliefs: int = 0
+    unwired_confirmations: list[str] = []
+    ceiling_settled: int = 0
 
 
 class DagContextNode(BaseModel):
@@ -2278,6 +2281,30 @@ class HypoTreeEngine:
             total_nodes = len(scoped)
             status_breakdown = Counter(n.status.value for n in scoped)
 
+        scoped_ids = set(scope) if scope is not None else None
+        stale_ids = self.stale_node_ids()
+        if scoped_ids is not None:
+            stale_ids &= scoped_ids
+
+        all_nodes = self._store.get_all_nodes()
+        goal_support: set[str] = set(scoped_ids or set())
+        if scoped_ids is None:
+            for goal in (node for node in all_nodes if node.is_goal):
+                goal_support.update(self._resolve_goal_scope(goal.id) or set())
+        unwired_confirmations = sorted(
+            node.id
+            for node in all_nodes
+            if node.status is Status.VERIFIED and not node.is_goal and node.id not in goal_support
+        )
+        ceiling_settled = sum(
+            1
+            for row in self._store.get_all_status_history()
+            if row["valid_to"] is None
+            and row["status"] == Status.VERIFIED.value
+            and "sample ceiling" in str(row["reason"])
+            and (scoped_ids is None or row["node_id"] in scoped_ids)
+        )
+
         return GoalStatusResponse(
             goals=entries,
             all_met=all_met,
@@ -2286,6 +2313,9 @@ class HypoTreeEngine:
             frontier_size=frontier_size,
             total_nodes=total_nodes,
             status_breakdown=status_breakdown,
+            stale_beliefs=len(stale_ids),
+            unwired_confirmations=unwired_confirmations,
+            ceiling_settled=ceiling_settled,
         )
 
     def get_dag_context(

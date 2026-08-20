@@ -9,7 +9,7 @@
 <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg" alt="Changelog"></a>
-<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-925-brightgreen.svg" alt="Tests: 925"></a>
+<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-931-brightgreen.svg" alt="Tests: 931"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/pyproject.toml"><img src="https://img.shields.io/badge/version-0.6.0-blue.svg" alt="Version: 0.6.0"></a>
 <a href="https://pypi.org/project/hypotree/"><img src="https://img.shields.io/pypi/v/hypotree.svg" alt="PyPI"></a>
 </p>

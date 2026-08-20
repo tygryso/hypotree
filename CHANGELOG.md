@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] - 0.6.0
 
 ### Added
+- **Goal-status observability for embedding hosts.** `get_goal_status` now reports stale
+  supporting beliefs, VERIFIED confirmations outside the selected goal's support, and
+  active sample-ceiling settlements. These additive fields let hosts steer re-verification,
+  graph wiring and telemetry without reconstructing engine internals.
 - **Runner-minted process attestations.** Schema 13 adds immutable `attestations`
   plus evidence references and context-mismatch flags. Embedded runners mint through the
   direct Python API; `record_evidence` accepts only an `attestation_id`, and no MCP tool
