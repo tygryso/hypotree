@@ -820,7 +820,7 @@ def test_the_record_evidence_schema_requires_what_the_dispatch_requires() -> Non
     tools = {t.name: t for t in _tool_definitions()}
     item = tools["record_evidence"].inputSchema["properties"]["results"]
     assert item["minItems"] == 1, "an empty batch is a mistake, not a no-op"
-    assert set(item["items"]["required"]) == {"node_id", "success"}
+    assert set(item["items"]["required"]) == {"node_id"}
 
 
 @pytest.mark.unit

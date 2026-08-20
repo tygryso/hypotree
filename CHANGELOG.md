@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     and a host inferring that from the tool's name gets it wrong.
 
 ### Fixed
+- **Batch infrastructure evidence no longer requires a fabricated logical `success`.** The
+  JSON Schema now requires only `node_id` for result items; dispatch still refuses logical
+  reports without success and accepts success-less `evidence_kind="infra"` reports.
 - **The evaluation harness's hand-written tool schemas are now pinned against the real
   ones.** Because the schemas were unreachable outside the MCP server, the harness wrote
   its own copies of seven of them, and they drifted: arm B's `create_hypotheses` was

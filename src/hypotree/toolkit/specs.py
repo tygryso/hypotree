@@ -345,7 +345,10 @@ def _build_specs() -> tuple[ToolSpec, ...]:
                                 "attestation_id": {"type": "string"},
                                 "notes": {"type": "string"},
                             },
-                            "required": ["node_id", "success"],
+                            # Logical reports still require success in dispatch. Keeping
+                            # it out of JSON Schema lets evidence_kind="infra" truthfully
+                            # report that no logical measurement was made.
+                            "required": ["node_id"],
                         },
                     },
                     "node_id": {"type": "string"},
