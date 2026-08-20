@@ -521,12 +521,26 @@ async def test_the_read_endpoints_answer(server: DashboardServer) -> None:
     assert status == 200 and isinstance(meta, dict)
     assert [g["id"] for g in meta["goals"]] == ["goal"]
 
+    status, goals = await _request(server.port, f"/api/goals?t={t}&goal_id=goal")
+    assert status == 200 and isinstance(goals, dict)
+    goal = goals["goals"][0]
+    assert goal["parents_total"] == 1
+    assert goal["parents_verified"] == 0
+    assert goal["pending_parent_ids"] == ["combo"]
+
+    status, conflicts = await _request(server.port, f"/api/conflicts?t={t}")
+    assert status == 200 and conflicts == {"conflicts": []}
+    status, claims = await _request(server.port, f"/api/claims?t={t}")
+    assert status == 200 and claims == {"claims": []}
+
     status, graph = await _request(server.port, f"/api/graph?t={t}")
     assert status == 200 and isinstance(graph, dict)
     assert graph["nodes"] and all("p_select" in n for n in graph["nodes"])
+    assert all("leased" in n for n in graph["nodes"])
 
     status, node = await _request(server.port, f"/api/node/a0?t={t}")
     assert status == 200 and isinstance(node, dict) and node["node"]["id"] == "a0"
+    assert {"revision", "evidence_total", "evidence_limit", "evidence_offset"} <= set(node)
 
     status, _ = await _request(server.port, f"/api/node/ghost?t={t}")
     assert status == 404
@@ -543,6 +557,23 @@ async def test_the_read_endpoints_answer(server: DashboardServer) -> None:
 
     status, timeline = await _request(server.port, f"/api/timeline?t={t}")
     assert status == 200 and isinstance(timeline, dict) and timeline["ticks"]
+
+
+@pytest.mark.unit
+def test_spa_uses_dashboard_progress_title_and_evidence_contracts() -> None:
+    static = Path(__file__).parents[2] / "src/hypotree/dashboard/static"
+    html = (static / "index.html").read_text()
+    app = (static / "app.js").read_text()
+    assert "parents_verified" in html and "pending_parent_ids" in html
+    assert "nodeLabel(n)" in html and "n.title || n.id" in app
+    assert "label.slice(0, 19)" in app
+    css = (static / "app.css").read_text()
+    assert "@media (max-width: 700px)" in css
+    assert "width: 100% !important" in css
+    assert "Workspace-wide open conflicts" in html
+    assert "workspace-wide live lease" in html
+    assert "evidenceKind" in app and "evidenceQuery" in app
+    assert "attestation.runner" in html and "evidence_total" in html
 
 
 @pytest.mark.asyncio

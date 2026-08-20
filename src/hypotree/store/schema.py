@@ -282,6 +282,10 @@ MIGRATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS idx_evidence_attestation ON evidence(attestation_id)",
         ),
     ),
+    (
+        "14",
+        ("ALTER TABLE nodes ADD COLUMN title TEXT",),
+    ),
 )
 
 # Derived from the chain, so the two cannot drift.

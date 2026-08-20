@@ -9,12 +9,12 @@
 <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-CHANGELOG.md-lightgrey.svg" alt="Changelog"></a>
-<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-931-brightgreen.svg" alt="Tests: 931"></a>
+<a href="https://github.com/tygryso/hypotree/tree/master/tests"><img src="https://img.shields.io/badge/tests-942-brightgreen.svg" alt="Tests: 942"></a>
 <a href="https://github.com/tygryso/hypotree/blob/master/pyproject.toml"><img src="https://img.shields.io/badge/version-0.6.0-blue.svg" alt="Version: 0.6.0"></a>
 <a href="https://pypi.org/project/hypotree/"><img src="https://img.shields.io/pypi/v/hypotree.svg" alt="PyPI"></a>
 </p>
 
-A persistent, self-revising **hypothesis DAG** for agentic R&D — exposed as an [MCP server](https://modelcontextprotocol.io/).
+A persistent, self-revising **hypothesis DAG** for agentic R&D — exposed as an [MCP server](https://modelcontextprotocol.io/) and a Python API.
 
 Current agent memory is passive: vector stores and scratchpads accumulate facts but never revise them. Hypotree structures the agent's working knowledge as a **directed acyclic graph** of hypotheses backed by SQLite-WAL. When an experiment fails, the engine walks the dependency edges and retracts what rested on it. When a premise collapses, every dependent subtree is pruned automatically.
 
@@ -80,7 +80,7 @@ A belief state that revises itself is hard to appreciate from a status column. *
   <img src="https://raw.githubusercontent.com/tygryso/hypotree/master/dashboard.gif" alt="hypotree" width="1024">
 </p>
 
-That is a real run. Nodes arrive as the agent creates them and glow at their actual chance of being dispatched next; confirmed answers turn green and their rivals retire without ever being probed; a refuted premise takes its subtree with it. The bar along the bottom is the run's own activity — drag it and the whole graph rewinds to what was believed at that moment, narrative included.
+That is a real run. Nodes arrive as the agent creates them and glow at their actual chance of being dispatched next; confirmed answers turn green and their rivals retire without ever being probed; a refuted premise takes its subtree with it. Optional 128-character titles keep large graphs readable while preserving stable ids in details. Goal progress names pending dependencies, evidence can be filtered and paged with attestation and trend context, and dedicated conflict and live-claim views expose why work is blocked or leased. The layout remains usable on compact screens by stacking the narrative and graph. The bar along the bottom is the run's own activity — drag it and the whole graph rewinds to what was believed at that moment, narrative included.
 
 Nothing on that page writes evidence. If a belief moved, an experiment moved it.
 

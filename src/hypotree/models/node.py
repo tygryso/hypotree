@@ -18,6 +18,7 @@ class Node(BaseModel):
     """A single hypothesis node in the R&D DAG."""
 
     id: str
+    title: str | None = Field(default=None, max_length=128)
     statement: str
     status: Status = Status.UNTESTED
     # Derived from the edges table on load — not stored redundantly on the node

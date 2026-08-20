@@ -56,6 +56,8 @@ createApp({
     const graph = reactive({ nodes: [], edges: [], stats: {}, unwired_goal: null, goal_wiring: null });
     const frontier = ref([]);
     const doubt = ref([]);
+    const conflicts = ref([]);
+    const claims = ref([]);
     const narrative = ref("");
     const timeline = ref({ ticks: [], from: null, to: null });
 
@@ -63,6 +65,10 @@ createApp({
     const tab = ref("path");
     const selected = ref(null);
     const detail = ref(null);
+    const evidenceKind = ref("");
+    const evidenceQuery = ref("");
+    const evidenceOffset = ref(0);
+    const evidenceLimit = 10;
     const live = ref(false);
     const busyUntil = ref(0);
     const now = ref(Date.now());
@@ -107,6 +113,10 @@ createApp({
     // "The agent is working" is a claim about the last minute, not about whether
     // a socket is open. A dashboard that always looks busy tells you nothing.
     const working = computed(() => now.value < busyUntil.value);
+    const activeGoal = computed(() => {
+      if (!meta.value || !meta.value.goals.length) return null;
+      return meta.value.goals.find((goal) => goal.id === goalId.value) || null;
+    });
     // The scrubber runs left-to-right through history, so its right-hand end is
     // the present. Anywhere short of that end is a rewind.
     const lastTick = computed(() => Math.max(0, timeline.value.ticks.length - 1));
@@ -225,10 +235,19 @@ createApp({
       const query = q();
       doubt.value = (await api(`/api/counterfactual?k=5${query ? "&" + query : ""}`)).beliefs;
     }
+    async function loadGovernance() {
+      const [conflictData, claimData] = await Promise.all([
+        api("/api/conflicts?open_only=true"),
+        api("/api/claims"),
+      ]);
+      conflicts.value = conflictData.conflicts || [];
+      claims.value = claimData.claims || [];
+    }
     async function loadPanels() {
       const query = q();
       await loadFrontier();
       await loadDoubt();
+      await loadGovernance();
       await loadNarrative();
       const wasLive = atLive.value;
       timeline.value = await api(`/api/timeline${query ? "?" + query : ""}`);
@@ -239,7 +258,7 @@ createApp({
     async function refreshAll() {
       try {
         error.value = "";
-        await Promise.all([loadGraph(), loadPanels()]);
+        await Promise.all([loadMeta(), loadGraph(), loadPanels()]);
       } catch (e) {
         error.value = String(e.message || e);
       }
@@ -269,6 +288,10 @@ createApp({
     );
 
     const radius = (n) => (n.is_goal ? 13 : 8 + 7 * (n.p_select || 0));
+    const nodeLabel = (n) => {
+      const label = n.title || n.id;
+      return label.length > 20 ? `${label.slice(0, 19)}…` : label;
+    };
     // Untested nodes glow at their real chance of being dispatched next.
     const nodeOpacity = (n) =>
       n.status === "UNTESTED" ? 0.32 + 0.68 * Math.min(1, (n.p_select || 0) * 3) : 1;
@@ -315,8 +338,9 @@ createApp({
       const id = node.id;
       selected.value = id;
       detail.value = null;
+      evidenceOffset.value = 0;
       tab.value = "path";
-      api(`/api/node/${encodeURIComponent(id)}`)
+      loadDetail(id)
         .then((d) => {
           // A slow response for a node the reader has already moved off must
           // not overwrite the one they are looking at now.
@@ -324,6 +348,26 @@ createApp({
         })
         .catch((e) => (error.value = String(e.message || e)));
       if (ev) hover(node, ev);
+    }
+    function detailPath(id) {
+      const params = new URLSearchParams({
+        limit: String(evidenceLimit),
+        offset: String(evidenceOffset.value),
+      });
+      if (evidenceKind.value) params.set("kind", evidenceKind.value);
+      if (evidenceQuery.value.trim()) params.set("q", evidenceQuery.value.trim());
+      return `/api/node/${encodeURIComponent(id)}?${params.toString()}`;
+    }
+    const loadDetail = (id = selected.value) => id ? api(detailPath(id)) : Promise.resolve(null);
+    async function applyEvidenceFilters() {
+      if (!selected.value) return;
+      evidenceOffset.value = 0;
+      detail.value = await loadDetail();
+    }
+    async function evidencePage(delta) {
+      if (!selected.value || !detail.value) return;
+      evidenceOffset.value = Math.max(0, evidenceOffset.value + delta * evidenceLimit);
+      detail.value = await loadDetail();
     }
     function clearSelection() {
       selected.value = null;
@@ -371,7 +415,7 @@ createApp({
         // A directive changes what is offered, so the frontier and this node's
         // own card are the only things that can have moved. Reloading the whole
         // view would rebuild the narrative and the layout for nothing.
-        detail.value = await api(`/api/node/${encodeURIComponent(id)}`);
+        detail.value = await loadDetail(id);
         await Promise.all([loadGraph(), loadFrontier()]);
       } catch (e) {
         error.value = String(e.message || e);
@@ -405,7 +449,6 @@ createApp({
     });
 
     onMounted(async () => {
-      await loadMeta();
       await refreshAll();
       await nextTick();
       installZoom();
@@ -425,13 +468,14 @@ createApp({
         : `<pre>${(src || "").replace(/[<>&]/g, "")}</pre>`;
 
     return {
-      meta, graph, frontier, doubt, narrative, timeline, goalId, tab, selected, detail,
+      meta, graph, frontier, doubt, conflicts, claims, narrative, timeline, goalId, activeGoal,
+      tab, selected, detail, evidenceKind, evidenceQuery, evidenceOffset, evidenceLimit,
       sinceTick, sincePct, markSince, clearSince, inWindow, cost,
       live, working, scrub, scrubLabel, playing, tip, error, missing,
       lastTick, atLive, goLive, panelWidth, resizing, startResize, zoomBy,
       activity, binOfScrub, cursorPct, stamp, directiveMode, clearSelection, bannerDismissed,
       edgeLines, radius, nodeOpacity, px, py, pick, hover, directive, fit,
-      refreshAll, renderMd, at,
+      refreshAll, renderMd, at, applyEvidenceFilters, evidencePage, nodeLabel,
     };
   },
 }).mount("#app");

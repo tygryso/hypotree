@@ -5,6 +5,7 @@ timestamps, and git-context auto-capture.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -108,6 +109,24 @@ def test_list_nodes_order_desc(engine: HypoTreeEngine) -> None:
 
 
 @pytest.mark.unit
+def test_list_nodes_order_desc_breaks_equal_timestamp_ties_by_id(
+    engine: HypoTreeEngine,
+) -> None:
+    created = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    engine.create_hypothesis("first", node_id="n1")
+    engine.create_hypothesis("second", node_id="n2")
+    for node_id in ("n1", "n2"):
+        node = engine._store.get_node(node_id)
+        assert node is not None
+        node.created_at = created
+        engine._store.save_node(node)
+
+    result = engine.list_nodes(order_by="created_at", ascending=False)
+
+    assert "n2" in result.strip().split("\n")[2]
+
+
+@pytest.mark.unit
 def test_list_nodes_limit(engine: HypoTreeEngine) -> None:
     for i in range(5):
         engine.create_hypothesis(f"node {i}", node_id=f"n{i}")
@@ -164,6 +183,22 @@ def test_goal_status_surfaces_unwired_confirmation_and_stale_count(
     assert status.ceiling_settled == 0
     scoped = engine.get_goal_status("goal")
     assert scoped.unwired_confirmations == ["unwired"]
+
+
+@pytest.mark.unit
+def test_goal_status_explains_dependency_progress(engine: HypoTreeEngine) -> None:
+    engine.create_hypothesis("first", node_id="p1")
+    engine.create_hypothesis("second", node_id="p2")
+    engine.create_hypothesis("goal", node_id="goal", is_goal=True, parent_ids=["p1", "p2"])
+    engine.update_status("p1", Status.VERIFIED, "observed")
+
+    goal = engine.get_goal_status("goal").goals[0]
+
+    assert goal.met is False
+    assert goal.parents_total == 2
+    assert goal.parents_verified == 1
+    assert goal.pending_parent_ids == ["p2"]
+    assert goal.blocked_reason == "pending_dependencies"
 
 
 # -- get_active_claims -----------------------------------------------------

@@ -51,6 +51,11 @@ class TestNode:
         assert posterior_mean(n.alpha, n.beta) == pytest.approx(0.6)
         assert posterior_variance(n.alpha, n.beta) > 0
 
+    def test_title_is_optional_and_bounded(self) -> None:
+        assert Node(id="n", title="Parser", statement="works").title == "Parser"
+        with pytest.raises(ValueError):
+            Node(id="n", title="x" * 129, statement="works")
+
     def test_timestamps_auto_filled(self) -> None:
         n = Node(id="n1", statement="x")
         assert n.created_at is not None

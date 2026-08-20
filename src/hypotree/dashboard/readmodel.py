@@ -235,21 +235,31 @@ class ReadModel:
     def meta(self) -> dict[str, Any]:
         """Identity, plus the goal list the viewer's selector is built from."""
         nodes = self.store.get_all_nodes()
+        status = self._engine.get_goal_status()
+        titles = {node.id: node.title for node in nodes if node.is_goal}
         goals = [
-            {
-                "id": n.id,
-                "statement": n.statement,
-                "met": self._engine.goal_achieved(n),
-                "target_metric": n.target_metric,
-            }
-            for n in nodes
-            if n.is_goal
+            {"id": goal.node_id, "title": titles.get(goal.node_id), **goal.model_dump()}
+            for goal in status.goals
         ]
         return {
             "revision": self.revision(),
             "db_path": str(self.store._db_path),
             "node_count": len(nodes),
             "goals": goals,
+        }
+
+    def goals(self, goal_id: str | None = None) -> dict[str, Any]:
+        """Full engine-owned goal progress for dashboard clients."""
+        return self._engine.get_goal_status(goal_id).model_dump(mode="json")
+
+    def conflicts(self, open_only: bool = True) -> dict[str, Any]:
+        """Conflict diagnosis state, unchanged from the engine read surface."""
+        return {"conflicts": self._engine.get_conflicts(open_only=open_only)}
+
+    def claims(self) -> dict[str, Any]:
+        """Live leases that explain why frontier nodes may be unavailable."""
+        return {
+            "claims": [claim.model_dump(mode="json") for claim in self._engine.get_active_claims()]
         }
 
     # -- graph -----------------------------------------------------------------
@@ -366,6 +376,7 @@ class ReadModel:
             out_nodes.append(
                 {
                     "id": node.id,
+                    "title": node.title,
                     "statement": node.statement,
                     "status": status,
                     "is_goal": node.is_goal,
@@ -375,6 +386,7 @@ class ReadModel:
                     "posterior_mean": posterior_mean(alpha, beta),
                     "evidence_count": node.evidence_count,
                     "p_select": round(p_select.get(node.id, 0.0), 4),
+                    "leased": bool(node.active_claim_id),
                     "directive": directive["mode"] if directive is not None else None,
                     "created_at": node.created_at.isoformat() if node.created_at else None,
                     "settled_at": settled_at.get(node.id),
@@ -428,16 +440,79 @@ class ReadModel:
 
     # -- panels ----------------------------------------------------------------
 
-    def node_detail(self, node_id: str) -> dict[str, Any] | None:
+    def node_detail(
+        self,
+        node_id: str,
+        *,
+        evidence_mode: str = "full",
+        evidence_kind: str | None = None,
+        evidence_since: str | None = None,
+        evidence_query: str | None = None,
+        evidence_limit: int = 20,
+        evidence_offset: int = 0,
+    ) -> dict[str, Any] | None:
         """Everything behind one node, including what paid for it."""
         node = self.store.get_node(node_id)
         if node is None:
             return None
         directive = self.store.get_directives().get(node_id)
         history = self.store.get_status_history(node_id)
+        since = _parse_at(evidence_since)
+        rows, evidence_total = self.store.get_evidence_filtered(
+            node_id,
+            kind=evidence_kind,
+            since=since,
+            query=evidence_query,
+            limit=evidence_limit,
+            offset=evidence_offset,
+        )
+        evidence = []
+        if evidence_mode != "none":
+            for row in rows:
+                attestation = (
+                    self.store.get_attestation(str(row["attestation_id"]))
+                    if row["attestation_id"]
+                    else None
+                )
+                evidence.append(
+                    {
+                        "id": row["id"],
+                        "kind": row["kind"],
+                        "success": row["success"],
+                        "depth": row["depth"],
+                        "metrics": json.loads(row["metrics"] or "{}"),
+                        "delta_success": row["delta_success"],
+                        "delta_metrics": json.loads(row["delta_metrics"] or "{}"),
+                        "monotonicity": row["monotonicity"],
+                        "context_hash": row["context_hash"],
+                        "git_branch": row["git_branch"],
+                        "source_ref": row["source_ref"],
+                        "duration_s": row["duration_s"],
+                        "artifacts": json.loads(row["artifacts"] or "[]"),
+                        "attestation_id": row["attestation_id"],
+                        "verified_by": ("attested" if row["attestation_id"] else "self_reported"),
+                        "attestation": (
+                            {
+                                "runner": attestation.runner,
+                                "exit_code": attestation.exit_code,
+                                "duration_s": attestation.duration_s,
+                                "base_commit": attestation.base_commit,
+                            }
+                            if attestation is not None
+                            else None
+                        ),
+                        "notes": row["notes"],
+                        "recorded_at": row["recorded_at"],
+                    }
+                )
+                if evidence_mode == "summary":
+                    evidence[-1].pop("metrics", None)
+                    evidence[-1].pop("delta_metrics", None)
         return {
+            "revision": self.revision(),
             "node": {
                 "id": node.id,
+                "title": node.title,
                 "statement": node.statement,
                 "status": node.status.value,
                 "is_goal": node.is_goal,
@@ -455,21 +530,10 @@ class ReadModel:
                 "reason": str(history[-1]["reason"] or "") if history else "",
             },
             "directive": dict(directive) if directive is not None else None,
-            "evidence": [
-                {
-                    "kind": r["kind"],
-                    "success": r["success"],
-                    "depth": r["depth"],
-                    "context_hash": r["context_hash"],
-                    "git_branch": r["git_branch"],
-                    "source_ref": r["source_ref"],
-                    "duration_s": r["duration_s"],
-                    "artifacts": json.loads(r["artifacts"] or "[]"),
-                    "notes": r["notes"],
-                    "recorded_at": r["recorded_at"],
-                }
-                for r in self.store.get_evidence_for_node(node_id)
-            ],
+            "evidence": evidence,
+            "evidence_total": evidence_total,
+            "evidence_limit": evidence_limit,
+            "evidence_offset": evidence_offset,
             "status_history": [
                 {
                     "status": r["status"],

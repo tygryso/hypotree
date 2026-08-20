@@ -4,9 +4,19 @@ All notable changes to hypotree are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] - 0.6.0
+## [2026-08-20] - 0.6.0
 
 ### Added
+- **Readable, truthful dashboard observability.** Schema 14 adds optional node titles
+  (validated to 128 characters) across model, store, toolkit, API and dashboard surfaces.
+  Goal responses expose direct dependency progress and blocked reasons. Node evidence is
+  newest-first, filtered and paginated with metrics, deltas and attestation summaries;
+  conflicts and active claims have dedicated read routes and UI surfaces.
+- **Responsive dashboard layout.** Long legacy identifiers are bounded on the graph while
+  remaining complete in details, and compact viewports stack the narrative and canvas with
+  no horizontal page overflow.
+- **Deterministic cross-platform history.** Status transitions normalize naive timestamps,
+  preserve the initial interval when clocks tie, and use stable id tie-breaks for node lists.
 - **Goal-status observability for embedding hosts.** `get_goal_status` now reports stale
   supporting beliefs, VERIFIED confirmations outside the selected goal's support, and
   active sample-ceiling settlements. These additive fields let hosts steer re-verification,

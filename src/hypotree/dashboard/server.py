@@ -400,10 +400,24 @@ class DashboardServer:
         if method == "GET":
             if path == "/api/meta":
                 return 200, {**self._read.meta(), "missing_assets": missing_scripts()}
+            if path == "/api/goals":
+                return 200, self._read.goals(goal_id)
+            if path == "/api/conflicts":
+                return 200, self._read.conflicts(request.one("open_only") != "false")
+            if path == "/api/claims":
+                return 200, self._read.claims()
             if path == "/api/graph":
                 return 200, self._read.graph(goal_id, request.one("at")).to_json()
             if path.startswith("/api/node/"):
-                detail = self._read.node_detail(path[len("/api/node/") :])
+                detail = self._read.node_detail(
+                    path[len("/api/node/") :],
+                    evidence_mode=request.one("evidence") or "full",
+                    evidence_kind=request.one("kind") or None,
+                    evidence_since=request.one("since") or None,
+                    evidence_query=request.one("q") or None,
+                    evidence_limit=_int(request.one("limit"), 20),
+                    evidence_offset=_int(request.one("offset"), 0),
+                )
                 return (200, detail) if detail is not None else (404, {"error": "no such node"})
             if path == "/api/frontier":
                 return 200, self._read.frontier(goal_id, _int(request.one("k"), 5))

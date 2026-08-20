@@ -16,8 +16,67 @@ import pytest
 from hypotree.dashboard.readmodel import ReadModel, _layer_positions
 from hypotree.engine import HypoTreeEngine
 from hypotree.models.edge import Edge, EdgeType
-from hypotree.models.evidence import LogicalEvidence
+from hypotree.models.evidence import LogicalEvidence, RunAttestation
 from hypotree.store.store import utcnow
+
+
+@pytest.mark.unit
+def test_dashboard_payloads_expose_title(tmp_path: Path) -> None:
+    db = tmp_path / "title.db"
+    engine = HypoTreeEngine(db)
+    engine.create_hypothesis("Long claim", node_id="n1", title="Short label")
+    engine.close()
+    read = ReadModel(db)
+    try:
+        graph_node = next(node for node in read.graph().nodes if node["id"] == "n1")
+        detail = read.node_detail("n1")
+        assert graph_node["title"] == "Short label"
+        assert detail is not None
+        assert detail["node"]["title"] == "Short label"
+    finally:
+        read.close()
+
+
+@pytest.mark.unit
+def test_node_detail_exposes_paginated_provenance(tmp_path: Path) -> None:
+    db = tmp_path / "evidence.db"
+    engine = HypoTreeEngine(db)
+    engine.create_hypothesis("claim", node_id="n1")
+    attestation = RunAttestation(
+        id="run-1",
+        runner="pytest",
+        argv=["pytest"],
+        exit_code=0,
+        duration_s=0.25,
+        created_at=utcnow(),
+    )
+    engine.add_attestation(attestation)
+    engine.record_evidence(
+        "n1",
+        LogicalEvidence(
+            success=1.0,
+            metrics={"passed": 4.0},
+            delta_success=0.5,
+            monotonicity="up",
+            notes="new result",
+            attestation_id="run-1",
+        ),
+    )
+    engine.close()
+    read = ReadModel(db)
+    try:
+        detail = read.node_detail("n1", evidence_limit=1, evidence_query="new")
+        assert detail is not None
+        assert detail["revision"] >= 1
+        assert detail["evidence_total"] == 1
+        row = detail["evidence"][0]
+        assert row["metrics"] == {"passed": 4.0}
+        assert row["delta_success"] == 0.0
+        assert row["monotonicity"] == "first"
+        assert row["verified_by"] == "attested"
+        assert row["attestation"]["runner"] == "pytest"
+    finally:
+        read.close()
 
 
 @pytest.fixture

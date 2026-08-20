@@ -19,6 +19,13 @@ from hypotree.toolkit.specs import (
 
 
 @pytest.mark.unit
+def test_create_hypotheses_schema_exposes_optional_title() -> None:
+    spec = next(spec for spec in TOOL_SPECS if spec.name == "create_hypotheses")
+    title = spec.input_schema["properties"]["hypotheses"]["items"]["properties"]["title"]
+    assert title["maxLength"] == 128
+
+
+@pytest.mark.unit
 def test_importing_hypotree_does_not_require_the_mcp_sdk() -> None:
     """Embedding the belief state must not drag in a JSON-RPC stack.
 

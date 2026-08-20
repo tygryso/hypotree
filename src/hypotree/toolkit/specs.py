@@ -121,6 +121,11 @@ def hypothesis_item_schema() -> dict[str, Any]:
         "type": "object",
         "properties": {
             "statement": {"type": "string", "description": "The claim being made."},
+            "title": {
+                "type": "string",
+                "maxLength": 128,
+                "description": "Optional short human label; node_id remains the identity.",
+            },
             "parent_ids": {
                 "type": "array",
                 "items": {"type": "string"},

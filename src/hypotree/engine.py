@@ -207,6 +207,10 @@ class GoalStatusEntry(BaseModel):
     posterior_mean: float
     status: Status
     met: bool
+    parents_total: int = 0
+    parents_verified: int = 0
+    pending_parent_ids: list[str] = []
+    blocked_reason: str | None = None
 
 
 class GoalStatusResponse(BaseModel):
@@ -899,6 +903,7 @@ class HypoTreeEngine:
         exclusion_group: str | None = None,
         exclusion_closed: bool = True,
         estimated_cost: float | None = None,
+        title: str | None = None,
         node_id: str | None = None,
         if_exists: str = "error",
     ) -> CreateHypothesisResult:
@@ -954,6 +959,7 @@ class HypoTreeEngine:
 
         node = Node(
             id=node_id,
+            title=title,
             statement=statement,
             is_parametric=is_parametric,
             evidence_regime=evidence_regime,  # type: ignore[arg-type]
@@ -2258,6 +2264,21 @@ class HypoTreeEngine:
         for g in goals:
             mean = posterior_mean(g.alpha, g.beta)
             met = self.goal_achieved(g)
+            parent_ids = sorted(self._graph.parents(g.id, EdgeType.DEPENDENCY))
+            parent_nodes = [self._store.get_node(node_id) for node_id in parent_ids]
+            verified = [
+                node for node in parent_nodes if node is not None and node.status is Status.VERIFIED
+            ]
+            pending_ids = [
+                node.id
+                for node in parent_nodes
+                if node is not None and node.status is not Status.VERIFIED
+            ]
+            blocked_reason = None
+            if not parent_ids:
+                blocked_reason = "inverted" if self._graph.children(g.id) else "unwired"
+            elif pending_ids:
+                blocked_reason = "pending_dependencies"
             entries.append(
                 GoalStatusEntry(
                     node_id=g.id,
@@ -2266,6 +2287,10 @@ class HypoTreeEngine:
                     posterior_mean=mean,
                     status=g.status,
                     met=met,
+                    parents_total=len(parent_ids),
+                    parents_verified=len(verified),
+                    pending_parent_ids=pending_ids,
+                    blocked_reason=blocked_reason,
                 )
             )
         all_met = bool(entries) and all(e.met for e in entries)

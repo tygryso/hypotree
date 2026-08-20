@@ -13,7 +13,7 @@ import uuid
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -395,15 +395,16 @@ class HypoTreeStore:
     def _insert_node_row(conn: sqlite3.Connection, node: Node) -> None:
         conn.execute(
             """INSERT OR REPLACE INTO nodes (
-                id, statement, status, evidence_regime, is_parametric, param_config,
+                id, title, statement, status, evidence_regime, is_parametric, param_config,
                 is_goal, target_metric, exclusion_group, exclusion_closed, confirmed_depth,
                 alpha, beta, evidence_count,
                 active_claim_id, claimed_at, infra_retry_count,
                 created_at, first_dispatched_at, first_evidence_at,
                 verified_at, invalidated_at, pruned_at, updated_at, estimated_cost
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 node.id,
+                node.title,
                 node.statement,
                 node.status.value,
                 node.evidence_regime,
@@ -519,9 +520,14 @@ class HypoTreeStore:
         created_at = _str_to_dt(row["created_at"])
         updated_at = _str_to_dt(row["updated_at"])
         assert created_at is not None and updated_at is not None
+        try:
+            title = row["title"]
+        except IndexError:
+            title = None
 
         return Node(
             id=row["id"],
+            title=title,
             statement=row["statement"],
             status=Status(row["status"]),
             parent_ids=parent_ids,
@@ -645,6 +651,10 @@ class HypoTreeStore:
         """
         if now is None:
             now = utcnow()
+        elif now.tzinfo is None:
+            # Public callers historically passed datetime.now(). Treat naive
+            # instants as UTC, matching every timestamp the store itself mints.
+            now = now.replace(tzinfo=timezone.utc)
         now_str = _dt_to_str(now)
         txn = self._txn_id()
 
@@ -666,6 +676,23 @@ class HypoTreeStore:
             if new == old_status:
                 conn.execute("UPDATE nodes SET updated_at=? WHERE id=?", (now_str, node_id))
                 return
+
+            # Windows clocks can return the exact same timestamp for node
+            # creation and the immediately following dispatch. History keys are
+            # (node_id, valid_from), so equal instants would make OR REPLACE erase
+            # the initial UNTESTED interval. Preserve causality with the smallest
+            # representable datetime step when the wall clock has not advanced.
+            current_interval = conn.execute(
+                "SELECT valid_from FROM status_history WHERE node_id=? AND valid_to IS NULL",
+                (node_id,),
+            ).fetchone()
+            if current_interval is not None:
+                current_start = _str_to_dt(current_interval["valid_from"])
+                if current_start is not None and current_start.tzinfo is None:
+                    current_start = current_start.replace(tzinfo=timezone.utc)
+                if current_start is not None and now <= current_start:
+                    now = current_start + timedelta(microseconds=1)
+                    now_str = _dt_to_str(now)
 
             # Close the currently-open status_history interval
             conn.execute(
@@ -912,6 +939,43 @@ class HypoTreeStore:
             "SELECT * FROM evidence WHERE node_id=? ORDER BY id DESC LIMIT ? OFFSET ?",
             (node_id, limit, offset),
         ).fetchall()
+
+    def get_evidence_filtered(
+        self,
+        node_id: str,
+        *,
+        kind: str | None = None,
+        since: datetime | None = None,
+        query: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[sqlite3.Row], int]:
+        """Newest evidence plus total count under dashboard-safe filters."""
+        clauses = ["node_id=?"]
+        params: list[Any] = [node_id]
+        if kind:
+            clauses.append("kind=?")
+            params.append(kind)
+        if since is not None:
+            clauses.append("recorded_at>=?")
+            params.append(_dt_to_str(since))
+        if query:
+            clauses.append(
+                "(LOWER(notes) LIKE LOWER(?) ESCAPE '\\' "
+                "OR LOWER(COALESCE(source_ref,'')) LIKE LOWER(?) ESCAPE '\\')"
+            )
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            params.extend([pattern, pattern])
+        where = " AND ".join(clauses)
+        total_row = self._conn.execute(
+            f"SELECT COUNT(*) AS count FROM evidence WHERE {where}", params
+        ).fetchone()
+        rows = self._conn.execute(
+            f"SELECT * FROM evidence WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            [*params, max(1, min(limit, 200)), max(0, offset)],
+        ).fetchall()
+        return rows, int(total_row["count"] if total_row is not None else 0)
 
     def count_evidence_by_node(self, before: datetime | None = None) -> dict[str, int]:
         """Observation tallies per node, optionally as they stood at an instant.
@@ -1372,7 +1436,12 @@ class HypoTreeStore:
         # direction so the default (descending staleness) surfaces stale nodes first.
         if order_by == "staleness":
             direction = "DESC" if ascending else "ASC"
-        sql = f"SELECT * FROM nodes{where} ORDER BY {sort_col} {direction} LIMIT ? OFFSET ?"
+        # IDs are immutable and unique, so they make equal clock values stable
+        # across SQLite/platform versions without changing primary ordering.
+        sql = (
+            f"SELECT * FROM nodes{where} "
+            f"ORDER BY {sort_col} {direction}, id {direction} LIMIT ? OFFSET ?"
+        )
         params.extend([limit, offset])
         return self._conn.execute(sql, params).fetchall()
 

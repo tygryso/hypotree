@@ -246,6 +246,20 @@ table.metrics td { padding: 0.3rem 0; border-bottom: 1px solid var(--line); vert
 table.metrics tr:last-child td { border-bottom: 0; }
 table.metrics td:first-child { color: var(--ink-dim); }
 table.metrics td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.goal-progress {
+  position: absolute; top: 0.75rem; left: 50%; transform: translateX(-50%);
+  z-index: 8; min-width: 20rem; max-width: min(46rem, 60vw); padding: 0.65rem 0.8rem;
+  border: 1px solid var(--line); border-radius: 6px; background: rgba(255,255,255,0.96);
+  box-shadow: 0 5px 18px rgba(15,23,42,0.1);
+}
+.goal-progress > div:first-child { display: flex; gap: 0.65rem; align-items: center; }
+.evidence-filters { display: grid; grid-template-columns: auto 1fr auto; gap: 0.35rem; margin-bottom: 0.6rem; }
+.evidence-filters input { min-width: 0; border: 1px solid var(--line); border-radius: 4px; padding: 0.45rem; }
+.evidence-list { display: grid; gap: 0.55rem; }
+.evidence-card { border: 1px solid var(--line); border-radius: 5px; padding: 0.65rem; background: #fff; }
+.evidence-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-bottom: 0.4rem; }
+.evidence-pages { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.claims-strip { border-left: 3px solid var(--accent); padding: 0.55rem 0.7rem; margin-bottom: 0.8rem; background: #eff6ff; }
 .st { font-size: 0.72rem; color: var(--ink-faint); }
 
 /* ---- scheduling controls ------------------------------------------------ */
@@ -503,4 +517,27 @@ footer button { padding: 0.3rem 0.6rem; min-width: 2.1rem; margin-left: 0.3rem; 
   font-size: 0.76rem; color: var(--ink-dim); white-space: nowrap;
   font-variant-numeric: tabular-nums;
   max-width: 200px;
+}
+
+@media (max-width: 700px) {
+  header { gap: 0.45rem; padding: 0.35rem 0.5rem; }
+  .brand img { height: 48px; }
+  .brand .sub, .live span, .tick-label { display: none; }
+  header select { flex: 1; min-width: 0; max-width: none; }
+
+  main { flex-direction: column; }
+  aside {
+    width: 100% !important; height: 58%; flex: 0 0 58%;
+    border-right: 0; border-bottom: 1px solid var(--line);
+  }
+  .resizer { display: none; }
+  .graph-wrap { width: 100%; min-height: 0; }
+  .goal-progress {
+    left: 0.5rem; right: 0.5rem; transform: none;
+    min-width: 0; max-width: none;
+  }
+
+  footer { gap: 0.25rem; padding: 0.35rem 0.4rem; }
+  footer button { margin-left: 0; margin-right: 0; }
+  .timbar-right { display: flex; width: auto; flex: 0 0 auto; }
 }

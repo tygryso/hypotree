@@ -23,7 +23,8 @@
     <select v-model="goalId" v-if="meta && meta.goals.length" title="Show only the case for one goal">
       <option value="">All goals</option>
       <option v-for="g in meta.goals" :key="g.id" :value="g.id">
-        {{ g.met ? '\u2713' : '\u00b7' }} {{ g.statement || g.id }}
+        {{ g.met ? '\u2713' : `${g.parents_verified}/${g.parents_total}` }}
+        {{ g.title || g.statement || g.id }}
       </option>
     </select>
 
@@ -39,11 +40,25 @@
   </header>
 
   <main>
+    <div class="goal-progress" v-if="activeGoal">
+      <div>
+        <b>{{ activeGoal.title || activeGoal.statement || activeGoal.id }}</b>
+        <span class="pill" :class="activeGoal.met ? 'VERIFIED' : 'IN_PROGRESS'">
+          {{ activeGoal.met ? 'met' : `${activeGoal.parents_verified}/${activeGoal.parents_total} verified` }}
+        </span>
+      </div>
+      <div class="st" v-if="activeGoal.blocked_reason === 'unwired'">No dependencies are attached.</div>
+      <div class="st" v-else-if="activeGoal.blocked_reason === 'inverted'">Dependencies are wired away from the goal.</div>
+      <div class="st" v-else-if="activeGoal.pending_parent_ids.length">
+        Waiting on: {{ activeGoal.pending_parent_ids.join(', ') }}
+      </div>
+    </div>
     <aside :style="panelWidth ? {width: panelWidth + 'px'} : null" :class="{resizing: resizing}">
       <div class="tabs">
         <button :class="{on: tab === 'path'}" @click="tab = 'path'">Learning path</button>
         <button :class="{on: tab === 'frontier'}" @click="tab = 'frontier'">Frontier</button>
         <button :class="{on: tab === 'doubt'}" @click="tab = 'doubt'">What would change my mind</button>
+        <button :class="{on: tab === 'conflicts'}" @click="tab = 'conflicts'">Conflicts</button>
       </div>
 
       <div class="panel">
@@ -61,7 +76,7 @@
           <template v-if="selected">
             <div class="card" :class="[detail ? detail.node.status : '', {goal: detail && detail.node.is_goal}]">
               <div class="card-id">
-                <span>{{ selected }}</span>
+                <span>{{ detail && detail.node.title ? detail.node.title : selected }}</span>
                 <span class="pill" :class="detail ? detail.node.status : ''" v-if="detail">
                   {{ detail.node.status }}
                 </span>
@@ -92,32 +107,40 @@
 
             <template v-if="detail">
               <h2>What paid for this</h2>
+              <div class="evidence-filters">
+                <select v-model="evidenceKind" @change="applyEvidenceFilters">
+                  <option value="">all evidence</option>
+                  <option value="logical">logical</option>
+                  <option value="infra">infrastructure</option>
+                </select>
+                <input v-model="evidenceQuery" @keyup.enter="applyEvidenceFilters" placeholder="filter source or notes">
+                <button @click="applyEvidenceFilters">filter</button>
+              </div>
               <div v-if="!detail.evidence.length" class="empty" style="padding:0.9rem">
                 Nothing was observed here &mdash; this belief was inferred.
               </div>
-              <table class="metrics" v-else>
-                <tr v-for="(e, i) in detail.evidence" :key="i">
-                  <td>
-                    {{ e.success === null ? 'infra' : e.success.toFixed(2) }}
-                    at depth {{ e.depth }}
-                    <template v-if="e.duration_s !== null && e.duration_s !== undefined">
-                      &middot; took {{ cost(e.duration_s) }}
-                    </template>
-                    <div class="st" v-if="e.source_ref || e.git_branch">
-                      {{ e.source_ref || '' }}
-                      <template v-if="e.git_branch">
-                        &middot; {{ e.git_branch }}@{{ (e.context_hash || '').slice(0, 7) }}
-                      </template>
-                    </div>
-                    <div class="st" v-if="e.artifacts && e.artifacts.length">
-                      <span v-for="(a, j) in e.artifacts" :key="j">
-                        <template v-if="j">&middot; </template><code>{{ a }}</code>
-                      </span>
-                    </div>
-                  </td>
-                  <td>{{ stamp(e.recorded_at) }}</td>
-                </tr>
-              </table>
+              <div class="evidence-list" v-else>
+                <article class="evidence-card" v-for="e in detail.evidence" :key="e.id">
+                  <div class="evidence-head">
+                    <span class="pill" :class="e.kind === 'infra' ? 'BLOCKED' : 'VERIFIED'">{{ e.kind }}</span>
+                    <b>{{ e.success === null ? 'not measured' : e.success.toFixed(2) }}</b>
+                    <span>depth {{ e.depth }}</span>
+                    <span v-if="e.duration_s !== null">{{ cost(e.duration_s) }}</span>
+                    <span class="st">{{ stamp(e.recorded_at) }}</span>
+                  </div>
+                  <div v-if="e.source_ref">{{ e.source_ref }}</div>
+                  <div class="st" v-if="e.attestation">attested by {{ e.attestation.runner }} &middot; exit {{ e.attestation.exit_code }}</div>
+                  <div class="st" v-else>{{ e.verified_by }}</div>
+                  <div v-if="Object.keys(e.metrics || {}).length"><code>{{ JSON.stringify(e.metrics) }}</code></div>
+                  <div v-if="e.monotonicity !== 'first'">trend: {{ e.monotonicity }} ({{ e.delta_success }})</div>
+                  <div v-if="e.notes">{{ e.notes }}</div>
+                </article>
+                <div class="evidence-pages" v-if="detail.evidence_total > evidenceLimit">
+                  <button @click="evidencePage(-1)" :disabled="evidenceOffset === 0">newer</button>
+                  <span>{{ evidenceOffset + 1 }}–{{ Math.min(evidenceOffset + detail.evidence.length, detail.evidence_total) }} / {{ detail.evidence_total }}</span>
+                  <button @click="evidencePage(1)" :disabled="evidenceOffset + evidenceLimit >= detail.evidence_total">older</button>
+                </div>
+              </div>
 
               <div class="sched">
                 <h2>Scheduling</h2>
@@ -156,6 +179,12 @@
 
         <!-- Tab B — what the navigator is about to do -->
         <template v-else-if="tab === 'frontier'">
+          <div class="claims-strip" v-if="claims.length">
+            <b>{{ claims.length }} workspace-wide live lease{{ claims.length === 1 ? '' : 's' }}</b>
+            <div class="st" v-for="claim in claims" :key="claim.claim_id">
+              {{ claim.node_id }} &middot; {{ claim.expires_in_s }}s remaining
+            </div>
+          </div>
           <h2>Most likely next</h2>
           <div class="empty" v-if="!frontier.length">
             Nothing is waiting &mdash; every question in scope is answered.
@@ -180,7 +209,7 @@
         </template>
 
         <!-- Tab C — the question a reviewer actually asks -->
-        <template v-else>
+        <template v-else-if="tab === 'doubt'">
           <h2>What would change my mind</h2>
           <p class="doubt-lede">
             The cheapest experiments that would <em>overturn</em> what this goal
@@ -204,6 +233,20 @@
               &middot; {{ d.estimated_cost.toFixed(1) }}&times; median cost</template></div>
             <div class="st">{{ d.what_it_would_flip }}</div>
           </div>
+        </template>
+
+        <template v-else-if="tab === 'conflicts'">
+          <h2>Workspace-wide open conflicts</h2>
+          <div class="empty" v-if="!conflicts.length">No unresolved conflict sets.</div>
+          <article class="evidence-card" v-for="conflict in conflicts" :key="conflict.id">
+            <div class="evidence-head">
+              <b>Conflict {{ conflict.id }}</b>
+              <span class="pill NEEDS_REVISION">depth {{ conflict.conflict_depth }}</span>
+            </div>
+            <div>{{ (conflict.member_statements || []).join(' · ') }}</div>
+            <div class="st" v-if="conflict.resolve_by">Next: {{ conflict.resolve_by }}</div>
+            <div class="st" v-if="conflict.resolved_culprit_id">Culprit: {{ conflict.resolved_culprit_id }}</div>
+          </article>
         </template>
       </div>
       <div class="resizer" @pointerdown="startResize" title="Drag to widen the panel"></div>
@@ -239,7 +282,7 @@
                @click.stop="pick(n, $event)"
                @mouseenter="hover(n, $event)" @mouseleave="tip.show = false">
               <circle :r="radius(n)" :class="'s-' + n.status" :opacity="nodeOpacity(n)"/>
-              <text :y="radius(n) + 13" text-anchor="middle">{{ n.id }}</text>
+              <text :y="radius(n) + 13" text-anchor="middle">{{ nodeLabel(n) }}</text>
             </g>
           </transition-group>
         </g>
@@ -247,10 +290,11 @@
 
       <div class="tip" v-if="tip.show && tip.node" :style="{left: tip.x + 'px', top: tip.y + 'px'}">
         <div class="head">
-          <b>{{ tip.node.id }}</b>
+          <b>{{ tip.node.title || tip.node.id }}</b>
           <span class="pill" :class="tip.node.status">{{ tip.node.status }}</span>
         </div>
         <div>{{ tip.node.statement }}</div>
+        <div class="st" v-if="tip.node.title">{{ tip.node.id }}</div>
         <div class="st" v-if="tip.node.status === 'UNTESTED'">
           {{ (tip.node.p_select * 100).toFixed(1) }}% chance of being picked next
         </div>

@@ -50,7 +50,7 @@ _MIRRORED = {
 _WAIVED: dict[str, set[str]] = {
     # The eval task fixes a closed candidate set by construction, and the
     # environment measures cost itself rather than trusting a self-report, so
-    # the parametric and cost fields would be noise the agent has to fill in.
+    # the title, parametric and cost fields would be noise the agent has to fill in.
     # `exclusion_closed` is the consequential one: with it withheld, arm B can
     # never declare an open candidate list, so the last-one-standing deduction
     # is always licensed and the closed-world guard is never exercised.
@@ -60,6 +60,7 @@ _WAIVED: dict[str, set[str]] = {
         "hypotheses[].exclusion_closed",
         "hypotheses[].is_parametric",
         "hypotheses[].param_config",
+        "hypotheses[].title",
     },
     # Leases and multi-goal routing are not exercised: the harness is
     # single-agent and single-goal, so both would be dead parameters.

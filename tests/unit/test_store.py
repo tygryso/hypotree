@@ -61,6 +61,63 @@ def test_schema_version_stamped_on_creation(store: HypoTreeStore) -> None:
 
 
 @pytest.mark.unit
+def test_node_title_round_trip(store: HypoTreeStore) -> None:
+    store.add_node(Node(id="titled", title="Readable label", statement="Long claim"))
+    loaded = store.get_node("titled")
+    assert loaded is not None
+    assert loaded.title == "Readable label"
+
+
+@pytest.mark.unit
+def test_row_without_unmigrated_optional_title_loads_as_none(store: HypoTreeStore) -> None:
+    store.add_node(Node(id="legacy-title", statement="Legacy claim"))
+    row = store._conn.execute(
+        "SELECT id, statement, status, evidence_regime, is_parametric, param_config, "
+        "is_goal, target_metric, exclusion_group, exclusion_closed, confirmed_depth, "
+        "estimated_cost, alpha, beta, evidence_count, active_claim_id, claimed_at, "
+        "infra_retry_count, created_at, first_dispatched_at, first_evidence_at, "
+        "verified_at, invalidated_at, pruned_at, updated_at "
+        "FROM nodes WHERE id='legacy-title'"
+    ).fetchone()
+    assert row is not None
+    loaded = store._row_to_node(row, [])
+    assert loaded.title is None
+
+
+@pytest.mark.unit
+def test_filtered_evidence_is_newest_first_and_counted(store: HypoTreeStore) -> None:
+    store.add_node(Node(id="evidence", statement="Evidence"))
+    store.append_evidence(
+        "evidence",
+        LogicalEvidence(success=0.0, notes="old failure", source_ref="run-old"),
+    )
+    store.append_evidence(
+        "evidence",
+        LogicalEvidence(success=1.0, notes="new success", source_ref="run-new"),
+    )
+
+    rows, total = store.get_evidence_filtered("evidence", query="success", limit=1, offset=0)
+
+    assert total == 1
+    assert len(rows) == 1
+    assert rows[0]["notes"] == "new success"
+
+
+@pytest.mark.unit
+def test_status_transition_preserves_initial_interval_at_same_timestamp(
+    store: HypoTreeStore,
+) -> None:
+    created = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    store.add_node(Node(id="same-clock", statement="same clock", created_at=created))
+
+    store.change_status("same-clock", Status.IN_PROGRESS, "dispatch", now=created)
+
+    history = store.get_status_history("same-clock")
+    assert [row["status"] for row in history] == ["UNTESTED", "IN_PROGRESS"]
+    assert history[0]["valid_to"] == history[1]["valid_from"]
+
+
+@pytest.mark.unit
 def test_schema_version_fail_fast_on_mismatch(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     s = HypoTreeStore(db)
