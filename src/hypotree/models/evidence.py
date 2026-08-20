@@ -6,10 +6,27 @@ InfraError never touches the posterior and never triggers INVALIDATED.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
+
+
+class RunAttestation(BaseModel):
+    """Runner-minted immutable metadata describing one observed process."""
+
+    id: str
+    runner: str
+    workspace_id: str | None = None
+    base_commit: str | None = None
+    argv: list[str]
+    exit_code: int | None = None
+    duration_s: float | None = Field(default=None, ge=0.0)
+    patch_digest: str | None = None
+    stdout_digest: str | None = None
+    stderr_digest: str | None = None
+    created_at: datetime
 
 
 class LogicalEvidence(BaseModel):
@@ -37,6 +54,10 @@ class LogicalEvidence(BaseModel):
     # estimate cost guesses once and never revises. None means unknown, which is
     # not the same as free.
     duration_s: float | None = Field(default=None, ge=0.0)
+    # Reference only. Tool callers cannot create attestation rows; a trusted
+    # runner must have minted this id before evidence cites it.
+    attestation_id: str | None = None
+    attestation_context_mismatch: bool = False
     claim_id: str | None = None
     notes: str = ""
     delta_success: float | None = None

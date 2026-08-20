@@ -260,6 +260,28 @@ MIGRATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "ALTER TABLE nodes ADD COLUMN estimated_cost REAL",
         ),
     ),
+    (
+        "13",
+        (
+            """CREATE TABLE IF NOT EXISTS attestations (
+                id            TEXT PRIMARY KEY,
+                runner        TEXT NOT NULL,
+                workspace_id  TEXT,
+                base_commit   TEXT,
+                argv          TEXT NOT NULL,
+                exit_code     INTEGER,
+                duration_s    REAL,
+                patch_digest  TEXT,
+                stdout_digest TEXT,
+                stderr_digest TEXT,
+                created_at    TEXT NOT NULL
+            )""",
+            "ALTER TABLE evidence ADD COLUMN attestation_id TEXT",
+            "ALTER TABLE evidence ADD COLUMN attestation_context_mismatch "
+            "INTEGER NOT NULL DEFAULT 0",
+            "CREATE INDEX IF NOT EXISTS idx_evidence_attestation ON evidence(attestation_id)",
+        ),
+    ),
 )
 
 # Derived from the chain, so the two cannot drift.

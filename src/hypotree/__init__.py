@@ -44,6 +44,7 @@ from hypotree.models import (
     InfraError,
     LogicalEvidence,
     Node,
+    RunAttestation,
     Status,
 )
 from hypotree.toolkit import (
@@ -72,6 +73,7 @@ __all__ = [
     "InfraError",
     "LogicalEvidence",
     "Node",
+    "RunAttestation",
     "NodeNotFoundError",
     "Status",
     "ToolSpec",

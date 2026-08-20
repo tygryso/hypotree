@@ -14,7 +14,7 @@ from hypotree.models.events import (
     UpstreamInvalidated,
     UpstreamVerified,
 )
-from hypotree.models.evidence import Evidence, InfraError, LogicalEvidence
+from hypotree.models.evidence import Evidence, InfraError, LogicalEvidence, RunAttestation
 from hypotree.models.node import Node
 from hypotree.models.status import Status, posterior_mean, posterior_variance, utcnow
 
@@ -28,6 +28,7 @@ __all__ = [
     "EvidenceRecorded",
     "InfraError",
     "LogicalEvidence",
+    "RunAttestation",
     "Node",
     "NodeCreated",
     "Status",

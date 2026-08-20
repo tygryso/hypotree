@@ -342,6 +342,7 @@ def _build_specs() -> tuple[ToolSpec, ...]:
                                 "metrics": {"type": "object"},
                                 "source_ref": {"type": "string"},
                                 "duration_s": {"type": "number", "minimum": 0},
+                                "attestation_id": {"type": "string"},
                                 "notes": {"type": "string"},
                             },
                             "required": ["node_id", "success"],
@@ -391,6 +392,11 @@ def _build_specs() -> tuple[ToolSpec, ...]:
                             "navigator rank by value per unit cost rather than treating a "
                             "three-day run and a one-second check as interchangeable."
                         ),
+                    },
+                    "attestation_id": {
+                        "type": "string",
+                        "description": "Runner-minted attestation id. Provenance fields "
+                        "cannot be supplied here; unknown ids degrade to self-reported.",
                     },
                     "count_next_targets": {
                         "type": "integer",

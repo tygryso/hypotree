@@ -98,6 +98,7 @@ def evidence_report(item: dict) -> EvidenceReport:
             notes=item.get("notes", ""),
             source_ref=item.get("source_ref"),
             duration_s=item.get("duration_s"),
+            attestation_id=item.get("attestation_id"),
         )
     return EvidenceReport(
         node_id=str(node_id),

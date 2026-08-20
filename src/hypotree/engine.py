@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from hypotree.graph.dag import CycleError, HypoTreeGraph
 from hypotree.models.edge import Edge, EdgeType
 from hypotree.models.elision import ElisionNode
-from hypotree.models.evidence import Evidence, InfraError, LogicalEvidence
+from hypotree.models.evidence import Evidence, InfraError, LogicalEvidence, RunAttestation
 from hypotree.models.node import Node
 from hypotree.models.status import Status, posterior_mean, utcnow
 from hypotree.navigator.convergence import credible_interval
@@ -273,6 +273,9 @@ class EvidenceSummary(BaseModel):
     context_hash: str | None
     git_branch: str | None
     source_ref: str | None = None
+    attestation_id: str | None = None
+    verified_by: Literal["attested", "self_reported"]
+    attestation_context_mismatch: bool = False
     # Paths the experiment left behind. Recorded since the first release and
     # never once read back, which made the field a question nobody asked; an
     # audit trail that cannot produce the log it refers to is not an audit trail.
@@ -547,6 +550,14 @@ class HypoTreeEngine:
 
     def close(self) -> None:
         self._store.close()
+
+    def add_attestation(self, attestation: RunAttestation) -> None:
+        """Persist provenance minted by a trusted in-process runner."""
+        self._store.add_attestation(attestation)
+
+    def get_attestation(self, attestation_id: str) -> RunAttestation | None:
+        """Return runner provenance for audit and host-side policy checks."""
+        return self._store.get_attestation(attestation_id)
 
     @property
     def project_path(self) -> Path:
@@ -1718,6 +1729,23 @@ class HypoTreeEngine:
                 f"verified."
             )
 
+        if isinstance(evidence, LogicalEvidence) and evidence.attestation_id is not None:
+            attestation = self._store.get_attestation(evidence.attestation_id)
+            if attestation is None:
+                evidence.attestation_id = None
+            else:
+                if (
+                    evidence.context_hash is not None
+                    and attestation.base_commit is not None
+                    and evidence.context_hash != attestation.base_commit
+                ):
+                    evidence.attestation_context_mismatch = True
+                elif evidence.context_hash is None:
+                    evidence.context_hash = attestation.base_commit
+                evidence.duration_s = attestation.duration_s
+                if evidence.source_ref is None:
+                    evidence.source_ref = f"attestation:{attestation.id}"
+
         # Best-effort git context capture for the staleness flag. Only fills
         # when the evidence doesn't already carry explicit values.
         if isinstance(evidence, LogicalEvidence) and (
@@ -2547,6 +2575,9 @@ class HypoTreeEngine:
                 context_hash=r["context_hash"],
                 git_branch=r["git_branch"],
                 source_ref=r["source_ref"],
+                attestation_id=r["attestation_id"],
+                verified_by=("attested" if r["attestation_id"] else "self_reported"),
+                attestation_context_mismatch=bool(r["attestation_context_mismatch"]),
                 artifacts=json.loads(r["artifacts"] or "[]"),
                 notes=r["notes"],
                 recorded_at=datetime.fromisoformat(r["recorded_at"]),

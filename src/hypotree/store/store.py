@@ -17,10 +17,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hypotree.models import (
+    Evidence,
+    InfraError,
+    LogicalEvidence,
+    Node,
+    RunAttestation,
+    Status,
+    utcnow,
+)
 from hypotree.models.edge import Edge, EdgeType
-from hypotree.models.evidence import Evidence, InfraError, LogicalEvidence
-from hypotree.models.node import Node
-from hypotree.models.status import Status, utcnow
 from hypotree.store.schema import BASE_DDL, BASELINE_VERSION, MIGRATIONS, SCHEMA_VERSION
 
 
@@ -75,7 +81,7 @@ def _str_to_dt(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s)
 
 
-def _evidence_to_row(node_id: str, ev: Evidence) -> dict:
+def _evidence_to_row(node_id: str, ev: Evidence) -> dict[str, Any]:
     """Flatten a Pydantic Evidence union into columns for the evidence table."""
     if isinstance(ev, LogicalEvidence):
         return {
@@ -93,6 +99,8 @@ def _evidence_to_row(node_id: str, ev: Evidence) -> dict:
             "git_branch": ev.git_branch,
             "source_ref": ev.source_ref,
             "duration_s": ev.duration_s,
+            "attestation_id": ev.attestation_id,
+            "attestation_context_mismatch": int(ev.attestation_context_mismatch),
             "claim_id": ev.claim_id,
             "notes": ev.notes,
             "delta_success": ev.delta_success,
@@ -109,6 +117,9 @@ def _evidence_to_row(node_id: str, ev: Evidence) -> dict:
         "context_hash": None,
         "git_branch": None,
         "source_ref": None,
+        "duration_s": None,
+        "attestation_id": None,
+        "attestation_context_mismatch": 0,
         "claim_id": ev.claim_id,
         "notes": f"{ev.error_type}: {ev.message}",
         "delta_success": None,
@@ -795,6 +806,59 @@ class HypoTreeStore:
             )
 
     # -- evidence --------------------------------------------------------------
+
+    def add_attestation(self, attestation: RunAttestation) -> None:
+        """Persist one runner-minted attestation; ids are immutable."""
+        txn = self._txn_id()
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO attestations "
+                "(id,runner,workspace_id,base_commit,argv,exit_code,duration_s,"
+                "patch_digest,stdout_digest,stderr_digest,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    attestation.id,
+                    attestation.runner,
+                    attestation.workspace_id,
+                    attestation.base_commit,
+                    json.dumps(attestation.argv),
+                    attestation.exit_code,
+                    attestation.duration_s,
+                    attestation.patch_digest,
+                    attestation.stdout_digest,
+                    attestation.stderr_digest,
+                    _dt_to_str(attestation.created_at),
+                ),
+            )
+            self._write_event(
+                conn,
+                "AttestationCreated",
+                json.dumps({"attestation_id": attestation.id, "runner": attestation.runner}),
+                txn,
+            )
+
+    def get_attestation(self, attestation_id: str) -> RunAttestation | None:
+        """Return runner metadata by id without exposing a minting tool."""
+        row = self._conn.execute(
+            "SELECT * FROM attestations WHERE id=?", (attestation_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        created_at = _str_to_dt(row["created_at"])
+        assert created_at is not None
+        return RunAttestation(
+            id=row["id"],
+            runner=row["runner"],
+            workspace_id=row["workspace_id"],
+            base_commit=row["base_commit"],
+            argv=json.loads(row["argv"]),
+            exit_code=row["exit_code"],
+            duration_s=row["duration_s"],
+            patch_digest=row["patch_digest"],
+            stdout_digest=row["stdout_digest"],
+            stderr_digest=row["stderr_digest"],
+            created_at=created_at,
+        )
 
     def append_evidence(
         self, node_id: str, ev: Evidence, recorded_at: datetime | None = None

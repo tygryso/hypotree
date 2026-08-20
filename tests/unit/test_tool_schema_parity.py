@@ -69,6 +69,7 @@ _WAIVED: dict[str, set[str]] = {
     # measurement, and it means arm B's belief state carries no agent-supplied
     # cost signal — cost-aware ordering is therefore not under test here.
     "record_evidence": {
+        "attestation_id",
         "duration_s",
         "error_type",
         "evidence_kind",
@@ -77,6 +78,7 @@ _WAIVED: dict[str, set[str]] = {
         "metrics",
         "source_ref",
         "results[].duration_s",
+        "results[].attestation_id",
         "results[].error_type",
         "results[].evidence_kind",
         "results[].message",
